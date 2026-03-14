@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -50,6 +51,7 @@ class SourcesPage(QWidget):
         self.search = search
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._on_select)
+        self.list.itemDoubleClicked.connect(self._open_current_workspace)
 
         left = QVBoxLayout()
         left.addWidget(search)
@@ -66,7 +68,7 @@ class SourcesPage(QWidget):
         btn_relink = QPushButton("Relink File")
         btn_archive = QPushButton("Toggle Active")
         btn_delete = QPushButton("Delete Source")
-        btn_open.clicked.connect(lambda: self.current_source_id and self.open_workspace.emit(self.current_source_id))
+        btn_open.clicked.connect(self._open_current_workspace)
         btn_edit.clicked.connect(self.edit_source)
         btn_relink.clicked.connect(self.relink_source)
         btn_archive.clicked.connect(self.toggle_active)
@@ -85,6 +87,10 @@ class SourcesPage(QWidget):
         lay = QVBoxLayout(self)
         lay.addWidget(split)
         self.refresh()
+
+    def _open_current_workspace(self, *_):
+        if self.current_source_id:
+            self.open_workspace.emit(self.current_source_id)
 
     def refresh(self):
         q = self.search.text().strip()
@@ -169,6 +175,7 @@ class SourceWorkspace(QMainWindow):
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Outline", "Queue"])
         self.tree.itemSelectionChanged.connect(self.on_item_select)
         self.tree.itemChanged.connect(self.on_item_changed)
+        self.tree.itemDoubleClicked.connect(lambda *_: self.jump_to_selected())
         btn_all = QPushButton("Enable All")
         btn_none = QPushButton("Disable All")
         btn_edit = QPushButton("Edit Outline Text")
@@ -203,6 +210,7 @@ class SourceWorkspace(QMainWindow):
     def load_source(self):
         self.source = self.source_repo.get(self.source_id)
         self.pdf.load_if_needed(self.source.file_path)
+        self.pdf.set_fit_mode()
         self.refresh_tree()
         self.refresh_insights()
 
@@ -291,9 +299,11 @@ class StudyQueuePage(QWidget):
         self.timer_running = False
         self.active_unit = None
         self.started_at = None
+        self.unit_drafts: dict[int, dict] = {}
 
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self.pick_unit)
+        self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
         left = QVBoxLayout(); left.addWidget(QLabel("Due Units")); left.addWidget(self.list)
 
         self.title = QLabel("No unit selected")
@@ -307,28 +317,73 @@ class StudyQueuePage(QWidget):
         hist_btn = QPushButton("Review History")
         hist_btn.clicked.connect(self.open_history)
         jump_btn = QPushButton("Jump to Unit")
-        jump_btn.clicked.connect(lambda: self.active_unit and self.pdf.set_page(self.active_unit.start_page))
+        jump_btn.clicked.connect(self.jump_to_active_unit)
 
         ratings = QHBoxLayout()
         for label, r in [("Easy", "easy"), ("With Effort", "with_effort"), ("Hard", "hard"), ("Skip", "skip")]:
             b = QPushButton(label)
             b.clicked.connect(lambda _, rr=r: self.rate(rr))
             ratings.addWidget(b)
-        right = QVBoxLayout(); right.addWidget(self.title)
+
+        content = QWidget()
+        right = QVBoxLayout(content)
+        right.addWidget(self.title)
         right.addWidget(self.timer_lbl); right.addWidget(timer_start); right.addWidget(timer_reset)
         right.addWidget(QLabel("Pre-recall note")); right.addWidget(self.pre)
         right.addWidget(QLabel("Post-recall note")); right.addWidget(self.post)
         right.addLayout(ratings); right.addWidget(jump_btn); right.addWidget(hist_btn)
         right.addWidget(self.pdf)
 
-        split = QSplitter(); lw = QWidget(); lw.setLayout(left); rw = QWidget(); rw.setLayout(right)
-        split.addWidget(lw); split.addWidget(rw); split.setSizes([300, 900])
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+
+        split = QSplitter(); lw = QWidget(); lw.setLayout(left)
+        split.addWidget(lw); split.addWidget(scroll); split.setSizes([300, 900])
         lay = QVBoxLayout(self); lay.addWidget(split)
 
         self.qt_timer = QTimer(self)
         self.qt_timer.timeout.connect(self.tick)
         self.qt_timer.start(1000)
         self.refresh()
+
+    def _save_current_draft(self):
+        if not self.active_unit:
+            return
+        state = self.pdf.view_state()
+        self.unit_drafts[self.active_unit.unit_id] = {
+            "pre": self.pre.toPlainText(),
+            "post": self.post.toPlainText(),
+            "timer_seconds": self.timer_seconds,
+            "timer_running": self.timer_running,
+            "started_at": self.started_at.isoformat() if self.started_at else "",
+            "pdf_page": state["page"],
+            "pdf_location": state["location"],
+        }
+
+    def _load_draft_for_active(self):
+        self.pre.clear(); self.post.clear()
+        self.timer_seconds = 0
+        self.timer_running = False
+        self.started_at = None
+        self.timer_lbl.setText("00:00")
+        if not self.active_unit:
+            return
+        draft = self.unit_drafts.get(self.active_unit.unit_id)
+        if not draft:
+            return
+        self.pre.setText(draft.get("pre", ""))
+        self.post.setText(draft.get("post", ""))
+        self.timer_seconds = int(draft.get("timer_seconds", 0))
+        self.timer_running = bool(draft.get("timer_running", False))
+        started = draft.get("started_at", "")
+        if started:
+            try:
+                self.started_at = datetime.fromisoformat(started)
+            except Exception:
+                self.started_at = None
+        self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
+        self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
 
     def refresh(self):
         units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
@@ -341,6 +396,7 @@ class StudyQueuePage(QWidget):
             self.list.setCurrentRow(0)
 
     def pick_unit(self, idx):
+        self._save_current_draft()
         if idx < 0 or idx >= len(self.units):
             self.active_unit = None
             return
@@ -348,7 +404,13 @@ class StudyQueuePage(QWidget):
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
         s = self.source_repo.get(self.active_unit.source_id)
         self.pdf.load_if_needed(s.file_path)
+        self.pdf.set_fit_mode()
         self.pdf.set_page(self.active_unit.start_page)
+        self._load_draft_for_active()
+
+    def jump_to_active_unit(self):
+        if self.active_unit:
+            self.pdf.set_page(self.active_unit.start_page)
 
     def tick(self):
         if self.timer_running:
@@ -365,6 +427,10 @@ class StudyQueuePage(QWidget):
         self.started_at = None
         self.timer_running = False
         self.timer_lbl.setText("00:00")
+        if self.active_unit and self.active_unit.unit_id in self.unit_drafts:
+            self.unit_drafts[self.active_unit.unit_id]["timer_seconds"] = 0
+            self.unit_drafts[self.active_unit.unit_id]["timer_running"] = False
+            self.unit_drafts[self.active_unit.unit_id]["started_at"] = ""
 
     def rate(self, rating: str):
         if not self.active_unit:
@@ -384,7 +450,7 @@ class StudyQueuePage(QWidget):
         }
         self.review_repo.add_event(self.active_unit.unit_id, payload)
         count = unit_row["review_count"] + 1
-        avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy":5,"with_effort":3,"hard":2,"skip":1}[rating]) / count
+        avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
         self.review_repo.update_unit_stats(self.active_unit.unit_id, {
             "last_review_at": now.isoformat(timespec="seconds"),
             "next_review_at": res.next_review_at,
@@ -393,6 +459,7 @@ class StudyQueuePage(QWidget):
             "interval_days": res.interval_days,
             "avg_rating": avg,
         })
+        self.unit_drafts.pop(self.active_unit.unit_id, None)
         self.reset_timer(); self.pre.clear(); self.post.clear(); self.refresh()
 
     def open_history(self):
