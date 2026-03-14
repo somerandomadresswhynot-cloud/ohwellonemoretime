@@ -29,11 +29,16 @@ run_study_app.bat update
 run_study_app.bat resetdb
 ```
 
-If launch errors close too quickly from Explorer, run from `cmd.exe`, or set:
+When double-clicked from Explorer (`run_study_app.bat` with no args), the launcher now pauses at the end so logs stay visible.
+
+Optional behavior:
 
 ```bat
 set KEEP_OPEN_ON_ERROR=1
-run_study_app.bat
+run_study_app.bat run
+
+set KEEP_OPEN_ALWAYS=1
+run_study_app.bat setup
 ```
 
 ## Core flow
