@@ -39,6 +39,7 @@ from study_app.ui.pdf_viewer import PersistentPdfViewer
 
 class SourcesPage(QWidget):
     open_workspace = Signal(int)
+    library_changed = Signal()
 
     def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, pdf_service: PdfService):
         super().__init__()
@@ -125,6 +126,7 @@ class SourcesPage(QWidget):
             entries = self.pdf_service.generate_outline_entries(path, Path(path).stem, pages)
             self.outline_repo.replace_outline(source_id, entries)
             self.refresh()
+            self.library_changed.emit()
         except Exception as exc:
             QMessageBox.critical(self, "Import failed", str(exc))
 
@@ -137,6 +139,7 @@ class SourcesPage(QWidget):
             active = dlg.active_edit.text().strip().lower() in {"y", "yes", "true", "1"}
             self.source_repo.update_metadata(s.id, dlg.title_edit.text().strip() or s.title, active)
             self.refresh()
+            self.library_changed.emit()
 
     def relink_source(self):
         if not self.current_source_id:
@@ -147,6 +150,7 @@ class SourcesPage(QWidget):
         size, pages = self.pdf_service.inspect(path)
         self.source_repo.relink(self.current_source_id, path, size, pages)
         self.refresh()
+        self.library_changed.emit()
 
     def toggle_active(self):
         if not self.current_source_id:
@@ -154,15 +158,18 @@ class SourcesPage(QWidget):
         s = self.source_repo.get(self.current_source_id)
         self.source_repo.update_metadata(s.id, s.title, not s.is_active)
         self.refresh()
+        self.library_changed.emit()
 
     def delete_source(self):
         if self.current_source_id:
             self.source_repo.delete(self.current_source_id)
             self.current_source_id = None
             self.refresh()
+            self.library_changed.emit()
 
 
 class SourceWorkspace(QMainWindow):
+    queue_changed = Signal()
     def __init__(self, source_id: int, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo):
         super().__init__()
         self.source_id = source_id
@@ -273,6 +280,7 @@ class SourceWorkspace(QMainWindow):
             return
         enabled = item.checkState(1) == Qt.Checked
         self.outline_repo.set_queue_enabled(item.data(0, 256), enabled)
+        self.queue_changed.emit()
 
     def jump_to_selected(self):
         items = self.tree.selectedItems()
@@ -292,10 +300,12 @@ class SourceWorkspace(QMainWindow):
             self.outline_repo.replace_outline(self.source_id, dlg.parsed_entries)
             self.refresh_tree()
             self.refresh_insights()
+            self.queue_changed.emit()
 
     def _bulk(self, enabled: bool):
         self.outline_repo.bulk_set_source(self.source_id, enabled)
         self.refresh_tree()
+        self.queue_changed.emit()
 
     def refresh_insights(self):
         units = self.review_repo.source_units(self.source_id)
@@ -666,9 +676,15 @@ class MainWindow(QMainWindow):
         lay.addWidget(tabs)
 
         self.sources.open_workspace.connect(self.open_workspace)
+        self.sources.library_changed.connect(self.sync_queue_views)
         self._workspace_windows = []
+
+    def sync_queue_views(self):
+        self.queue.refresh()
+        self.settings.refresh_summary()
 
     def open_workspace(self, source_id: int):
         win = SourceWorkspace(source_id, self.sources.source_repo, self.sources.outline_repo, self.queue.review_repo, self.highlight_repo)
+        win.queue_changed.connect(self.sync_queue_views)
         win.show()
         self._workspace_windows.append(win)
