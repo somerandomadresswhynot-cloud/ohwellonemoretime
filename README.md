@@ -13,6 +13,22 @@ study-app
 
 Database is stored at `./study_app.db` by default.
 
+## Windows quick start
+
+Use the reusable launcher:
+
+```bat
+run_study_app.bat
+```
+
+Optional commands:
+
+```bat
+run_study_app.bat setup
+run_study_app.bat update
+run_study_app.bat resetdb
+```
+
 ## Core flow
 
 1. Import a PDF from **Sources**.
