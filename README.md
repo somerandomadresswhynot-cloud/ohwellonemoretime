@@ -2,7 +2,7 @@
 
 Local Python desktop app (PySide6 + SQLite) for PDF reading and scheduled rereading/review.
 
-Requires **Python 3.11+**.
+Requires **Python 3.10+** (3.11+ recommended).
 
 ## Run
 
@@ -17,7 +17,7 @@ Database is stored at `./study_app.db` by default.
 
 ## Windows quick start
 
-Use the reusable launcher (it now validates Python version before install):
+Use the reusable launcher (it now validates Python version (3.10+) before install):
 
 ```bat
 run_study_app.bat

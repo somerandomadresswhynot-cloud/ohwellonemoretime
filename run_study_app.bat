@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 
 REM Reusable launcher for Study PDF Desktop MVP.
 REM Works for first-time setup and future updates.
@@ -25,29 +25,37 @@ REM   set KEEP_OPEN_ON_ERROR=1  (pause on error)
 REM   set KEEP_OPEN_ALWAYS=1    (pause always)
 
 set "PY_CMD="
+
+REM Prefer py launcher with 3.11, then 3.10.
 where py >nul 2>&1
-if %errorlevel%==0 (
+if not errorlevel 1 (
     py -3.11 -c "import sys" >nul 2>&1
-    if %errorlevel%==0 set "PY_CMD=py -3.11"
+    if not errorlevel 1 set "PY_CMD=py -3.11"
+    if "%PY_CMD%"=="" (
+        py -3.10 -c "import sys" >nul 2>&1
+        if not errorlevel 1 set "PY_CMD=py -3.10"
+    )
 )
 
+REM Fallback to python on PATH (must be >=3.10).
 if "%PY_CMD%"=="" (
     where python >nul 2>&1
-    if %errorlevel%==0 set "PY_CMD=python"
+    if not errorlevel 1 set "PY_CMD=python"
 )
 
 if "%PY_CMD%"=="" (
-    echo [ERROR] Python 3.11+ was not found. Install Python 3.11+ and try again.
+    echo [ERROR] Python 3.10+ was not found.
+    echo [HINT] Install Python 3.10+ and retry.
     set "EXITCODE=1"
     goto :finish
 )
 
-%PY_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>&1
+%PY_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Detected interpreter is below Python 3.11.
+    echo [ERROR] Detected interpreter is below Python 3.10.
     %PY_CMD% -c "import sys; print('Detected Python:', sys.version)"
-    echo [ERROR] This app requires Python 3.11+ per pyproject constraints.
-    echo [HINT] Install Python 3.11+ from python.org and ensure "py -3.11" works.
+    echo [ERROR] This app requires Python 3.10+ per pyproject constraints.
+    echo [HINT] Install Python 3.10+ and ensure either "py -3.10" or "python" resolves correctly.
     set "EXITCODE=1"
     goto :finish
 )
@@ -84,11 +92,11 @@ if errorlevel 1 (
     goto :finish
 )
 
-python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>&1
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] The virtual environment is not using Python 3.11+.
+    echo [ERROR] The virtual environment is not using Python 3.10+.
     python -c "import sys; print('Venv Python:', sys.version)"
-    echo [HINT] Delete .venv and rerun after installing Python 3.11+, or run: py -3.11 -m venv .venv
+    echo [HINT] Delete .venv and rerun after installing Python 3.10+, or run: py -3.10 -m venv .venv
     set "EXITCODE=1"
     goto :finish
 )
@@ -144,7 +152,7 @@ set "EXITCODE=%errorlevel%"
 if not "%EXITCODE%"=="0" (
     echo [WARN] python -m study_app.main failed with %EXITCODE%. Trying study-app launcher...
     where study-app >nul 2>&1
-    if %errorlevel%==0 (
+    if not errorlevel 1 (
         study-app
         set "EXITCODE=%errorlevel%"
     )
