@@ -58,6 +58,13 @@ def seed_outline_from_pages(page_count: int, title: str) -> list[dict]:
     return out
 
 
+def seed_outline_single_section(page_count: int, title: str) -> list[dict]:
+    return [
+        {"depth": 1, "title": title, "start_page": None, "end_page": None, "is_unit": False, "queue_enabled": True},
+        {"depth": 2, "title": "Full document", "start_page": 1, "end_page": max(1, page_count), "is_unit": True, "queue_enabled": True},
+    ]
+
+
 def _sanitize_title(title: str) -> str:
     return re.sub(r"\s+", " ", (title or "").strip())[:180]
 
