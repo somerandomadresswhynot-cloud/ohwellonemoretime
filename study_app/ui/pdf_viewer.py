@@ -87,8 +87,9 @@ class PersistentPdfViewer(QWidget):
             self._doc_cache.move_to_end(path)
             return
         doc = QPdfDocument(self)
-        if doc.load(path) == QPdfDocument.Status.Ready:
-            self._cache_doc(path, doc)
+        # QPdfDocument load/error enums differ across Qt versions; cache doc directly after load call.
+        doc.load(path)
+        self._cache_doc(path, doc)
 
     def zoom_factor(self) -> float:
         if not self._view:
@@ -140,8 +141,7 @@ class PersistentPdfViewer(QWidget):
             self._doc_cache.move_to_end(path)
         else:
             doc = QPdfDocument(self)
-            if doc.load(path) != QPdfDocument.Status.Ready:
-                return
+            doc.load(path)
             self._cache_doc(path, doc)
 
         self._view.setDocument(doc)
