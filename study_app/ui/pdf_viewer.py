@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
 try:
     from PySide6.QtPdf import QPdfDocument
@@ -24,7 +24,7 @@ class PersistentPdfViewer(QWidget):
         self._last_page = 1
         self._last_location = (0.0, 0.0)
 
-        layout = QVBoxLayout(self)
+        root = QVBoxLayout(self)
         if QPdfDocument and QPdfView:
             self._doc = QPdfDocument(self)
             self._view = QPdfView(self)
@@ -34,9 +34,45 @@ class PersistentPdfViewer(QWidget):
                 self._view.pageNavigator().currentPageChanged.connect(self._on_page_changed)
             except Exception:
                 pass
-            layout.addWidget(self._view)
+            root.addWidget(self._view)
+
+            controls = QHBoxLayout()
+            self.zoom_out_btn = QPushButton("-")
+            self.zoom_in_btn = QPushButton("+")
+            self.zoom_pct = QSpinBox()
+            self.zoom_pct.setRange(25, 400)
+            self.zoom_pct.setValue(100)
+            self.fit_width_btn = QPushButton("Fit Width")
+            self.fit_page_btn = QPushButton("Fit Page")
+            self.fullscreen_btn = QPushButton("Full Screen")
+
+            self.zoom_out_btn.clicked.connect(lambda: self.set_zoom(max(0.25, self.zoom_factor() - 0.1)))
+            self.zoom_in_btn.clicked.connect(lambda: self.set_zoom(min(4.0, self.zoom_factor() + 0.1)))
+            self.zoom_pct.valueChanged.connect(lambda v: self.set_zoom(v / 100.0))
+            self.fit_width_btn.clicked.connect(self.set_fit_mode)
+            self.fit_page_btn.clicked.connect(self.set_fit_page_mode)
+            self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
+
+            for w in [QLabel("Scale"), self.zoom_out_btn, self.zoom_pct, self.zoom_in_btn, self.fit_width_btn, self.fit_page_btn, self.fullscreen_btn]:
+                controls.addWidget(w)
+            controls.addStretch()
+            root.addLayout(controls)
         else:
-            layout.addWidget(self._label)
+            root.addWidget(self._label)
+
+    def zoom_factor(self) -> float:
+        if not self._view:
+            return 1.0
+        try:
+            return float(self._view.zoomFactor())
+        except Exception:
+            return 1.0
+
+    def _sync_zoom_spin(self) -> None:
+        if hasattr(self, "zoom_pct"):
+            self.zoom_pct.blockSignals(True)
+            self.zoom_pct.setValue(int(self.zoom_factor() * 100))
+            self.zoom_pct.blockSignals(False)
 
     def _on_page_changed(self, page_zero: int) -> None:
         self._last_page = max(1, int(page_zero) + 1)
@@ -82,6 +118,15 @@ class PersistentPdfViewer(QWidget):
                     self._view.setZoomMode(QPdfView.ZoomMode.FitInView)
                 except Exception:
                     pass
+            self._sync_zoom_spin()
+
+    def set_fit_page_mode(self) -> None:
+        if self._view:
+            try:
+                self._view.setZoomMode(QPdfView.ZoomMode.FitInView)
+            except Exception:
+                pass
+            self._sync_zoom_spin()
 
     def set_page(self, page: int, location: tuple[float, float] | None = None) -> None:
         if not self._view:
@@ -101,7 +146,21 @@ class PersistentPdfViewer(QWidget):
     def set_zoom(self, factor: float) -> None:
         if self._view:
             self._view.setZoomMode(QPdfView.ZoomMode.Custom)
-            self._view.setZoomFactor(factor)
+            self._view.setZoomFactor(float(factor))
+            self._sync_zoom_spin()
+
+    def toggle_fullscreen(self) -> None:
+        window = self.window()
+        if not window:
+            return
+        if window.isFullScreen():
+            window.showNormal()
+            if hasattr(self, "fullscreen_btn"):
+                self.fullscreen_btn.setText("Full Screen")
+        else:
+            window.showFullScreen()
+            if hasattr(self, "fullscreen_btn"):
+                self.fullscreen_btn.setText("Exit Full Screen")
 
     def view_state(self) -> dict:
         page = self._last_page

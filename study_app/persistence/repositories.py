@@ -197,3 +197,14 @@ class SettingsRepo:
             (key, value),
         )
         self.db.conn.commit()
+
+    def get_ui_state(self, key: str, default: str = "") -> str:
+        row = self.db.conn.execute("SELECT value FROM ui_state WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_ui_state(self, key: str, value: str) -> None:
+        self.db.conn.execute(
+            "INSERT INTO ui_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self.db.conn.commit()

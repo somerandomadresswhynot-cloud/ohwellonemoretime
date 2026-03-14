@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -332,21 +333,40 @@ class StudyQueuePage(QWidget):
             b.clicked.connect(lambda _, rr=r: self.rate(rr))
             ratings.addWidget(b)
 
-        content = QWidget()
-        right = QVBoxLayout(content)
+        controls_content = QWidget()
+        right = QVBoxLayout(controls_content)
         right.addWidget(self.title)
         right.addWidget(self.timer_lbl); right.addWidget(timer_start); right.addWidget(timer_reset)
         right.addWidget(QLabel("Pre-recall note")); right.addWidget(self.pre)
         right.addWidget(QLabel("Post-recall note")); right.addWidget(self.post)
         right.addLayout(ratings); right.addWidget(jump_btn); right.addWidget(hist_btn)
-        right.addWidget(self.pdf)
+        right.addStretch()
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(content)
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setWidget(controls_content)
+
+        self.right_splitter = QSplitter(Qt.Vertical)
+        self.right_splitter.addWidget(controls_scroll)
+        self.right_splitter.addWidget(self.pdf)
+
+        saved = self.settings_repo.get_ui_state("queue_right_splitter_sizes", "")
+        if saved:
+            try:
+                sizes = json.loads(saved)
+                if isinstance(sizes, list) and len(sizes) == 2:
+                    self.right_splitter.setSizes([int(sizes[0]), int(sizes[1])])
+            except Exception:
+                self.right_splitter.setSizes([460, 760])
+        else:
+            self.right_splitter.setSizes([460, 760])
+
+        self.right_splitter.splitterMoved.connect(
+            lambda *_: self.settings_repo.set_ui_state("queue_right_splitter_sizes", json.dumps(self.right_splitter.sizes()))
+        )
 
         split = QSplitter(); lw = QWidget(); lw.setLayout(left)
-        split.addWidget(lw); split.addWidget(scroll); split.setSizes([300, 900])
+        split.addWidget(lw); split.addWidget(self.right_splitter); split.setSizes([300, 900])
         lay = QVBoxLayout(self); lay.addWidget(split)
 
         self.qt_timer = QTimer(self)
