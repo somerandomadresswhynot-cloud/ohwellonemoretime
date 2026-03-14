@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -290,6 +289,33 @@ class SourceWorkspace(QMainWindow):
         self.insights.setText(f"Total units: {len(units)}\nUntouched: {untouched}\nLow retention: {low}\nAvg retention: {avg:.0%}")
 
 
+class BottomResizeHandle(QFrame):
+    def __init__(self, on_delta, parent=None):
+        super().__init__(parent)
+        self.on_delta = on_delta
+        self.setFixedHeight(10)
+        self.setCursor(Qt.SizeVerCursor)
+        self._drag_start_y = None
+        self.setStyleSheet("background:#2b3357; border:1px solid #41558f; border-radius:3px;")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_y = event.globalPosition().y()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_y is not None:
+            y = event.globalPosition().y()
+            delta = int(y - self._drag_start_y)
+            self._drag_start_y = y
+            self.on_delta(delta)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_y = None
+        super().mouseReleaseEvent(event)
+
+
 class StudyQueuePage(QWidget):
     def __init__(self, source_repo: SourceRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo):
         super().__init__()
@@ -301,6 +327,7 @@ class StudyQueuePage(QWidget):
         self.active_unit = None
         self.started_at = None
         self.unit_drafts: dict[int, dict] = {}
+        self.source_path_cache: dict[int, str] = {}
 
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self.pick_unit)
@@ -319,7 +346,7 @@ class StudyQueuePage(QWidget):
         timer_start.clicked.connect(self.toggle_timer)
         timer_reset.clicked.connect(self.reset_timer)
         self.pdf = PersistentPdfViewer()
-        self.pdf.set_single_page_mode()
+        self.pdf.set_multi_page_mode()
         self.pdf.set_fit_mode()
         self.pdf.setMinimumHeight(760)
         hist_btn = QPushButton("Review History")
@@ -333,46 +360,46 @@ class StudyQueuePage(QWidget):
             b.clicked.connect(lambda _, rr=r: self.rate(rr))
             ratings.addWidget(b)
 
-        controls_content = QWidget()
-        right = QVBoxLayout(controls_content)
+        content = QWidget()
+        right = QVBoxLayout(content)
         right.addWidget(self.title)
         right.addWidget(self.timer_lbl); right.addWidget(timer_start); right.addWidget(timer_reset)
         right.addWidget(QLabel("Pre-recall note")); right.addWidget(self.pre)
         right.addWidget(QLabel("Post-recall note")); right.addWidget(self.post)
         right.addLayout(ratings); right.addWidget(jump_btn); right.addWidget(hist_btn)
+
+        saved_h = self.settings_repo.get_ui_state("queue_pdf_height", "760")
+        try:
+            h = max(320, min(1600, int(saved_h)))
+        except Exception:
+            h = 760
+        self.pdf.setMinimumHeight(h)
+        self.pdf.setMaximumHeight(h)
+
+        self.resize_handle = BottomResizeHandle(self._resize_pdf_by_delta)
+        right.addWidget(self.resize_handle)
+        right.addWidget(self.pdf)
         right.addStretch()
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
-        controls_scroll.setWidget(controls_content)
-
-        self.right_splitter = QSplitter(Qt.Vertical)
-        self.right_splitter.addWidget(controls_scroll)
-        self.right_splitter.addWidget(self.pdf)
-
-        saved = self.settings_repo.get_ui_state("queue_right_splitter_sizes", "")
-        if saved:
-            try:
-                sizes = json.loads(saved)
-                if isinstance(sizes, list) and len(sizes) == 2:
-                    self.right_splitter.setSizes([int(sizes[0]), int(sizes[1])])
-            except Exception:
-                self.right_splitter.setSizes([460, 760])
-        else:
-            self.right_splitter.setSizes([460, 760])
-
-        self.right_splitter.splitterMoved.connect(
-            lambda *_: self.settings_repo.set_ui_state("queue_right_splitter_sizes", json.dumps(self.right_splitter.sizes()))
-        )
+        controls_scroll.setWidget(content)
 
         split = QSplitter(); lw = QWidget(); lw.setLayout(left)
-        split.addWidget(lw); split.addWidget(self.right_splitter); split.setSizes([300, 900])
+        split.addWidget(lw); split.addWidget(controls_scroll); split.setSizes([300, 900])
         lay = QVBoxLayout(self); lay.addWidget(split)
 
         self.qt_timer = QTimer(self)
         self.qt_timer.timeout.connect(self.tick)
         self.qt_timer.start(1000)
         self.refresh()
+
+    def _resize_pdf_by_delta(self, delta: int):
+        current = self.pdf.minimumHeight()
+        new_h = max(320, min(1600, current + delta))
+        self.pdf.setMinimumHeight(new_h)
+        self.pdf.setMaximumHeight(new_h)
+        self.settings_repo.set_ui_state("queue_pdf_height", str(new_h))
 
     def _save_current_draft(self):
         if not self.active_unit:
@@ -416,9 +443,15 @@ class StudyQueuePage(QWidget):
         units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
         self.units = units
         self.list.clear()
+        self.source_path_cache = {}
         for u in units:
             item = QListWidgetItem(f"{u.source_title} · {u.title} [{u.start_page}-{u.end_page}] ({u.review_count}x)")
             self.list.addItem(item)
+            if u.source_id not in self.source_path_cache:
+                s = self.source_repo.get(u.source_id)
+                if s:
+                    self.source_path_cache[u.source_id] = s.file_path
+                    self.pdf.prime_path(s.file_path)
         if self.list.count() > 0:
             self.list.setCurrentRow(0)
 
@@ -429,9 +462,14 @@ class StudyQueuePage(QWidget):
             return
         self.active_unit = self.units[idx]
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
-        s = self.source_repo.get(self.active_unit.source_id)
-        self.pdf.load_if_needed(s.file_path)
-        self.pdf.set_single_page_mode()
+        path = self.source_path_cache.get(self.active_unit.source_id)
+        if not path:
+            s = self.source_repo.get(self.active_unit.source_id)
+            path = s.file_path if s else ""
+            if path:
+                self.source_path_cache[self.active_unit.source_id] = path
+        self.pdf.load_if_needed(path)
+        self.pdf.set_multi_page_mode()
         self.pdf.set_fit_mode()
         self.pdf.set_page(self.active_unit.start_page)
         self._load_draft_for_active()
