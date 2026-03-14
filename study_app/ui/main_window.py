@@ -289,30 +289,30 @@ class SourceWorkspace(QMainWindow):
         self.insights.setText(f"Total units: {len(units)}\nUntouched: {untouched}\nLow retention: {low}\nAvg retention: {avg:.0%}")
 
 
-class BottomResizeHandle(QFrame):
+class CornerResizeHandle(QFrame):
     def __init__(self, on_delta, parent=None):
         super().__init__(parent)
         self.on_delta = on_delta
-        self.setFixedHeight(10)
-        self.setCursor(Qt.SizeVerCursor)
-        self._drag_start_y = None
+        self.setFixedSize(16, 16)
+        self.setCursor(Qt.SizeFDiagCursor)
+        self._drag_start = None
         self.setStyleSheet("background:#2b3357; border:1px solid #41558f; border-radius:3px;")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._drag_start_y = event.globalPosition().y()
+            self._drag_start = event.globalPosition()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_start_y is not None:
-            y = event.globalPosition().y()
-            delta = int(y - self._drag_start_y)
-            self._drag_start_y = y
-            self.on_delta(delta)
+        if self._drag_start is not None:
+            current = event.globalPosition()
+            delta = current - self._drag_start
+            self._drag_start = current
+            self.on_delta(int(delta.y()))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._drag_start_y = None
+        self._drag_start = None
         super().mouseReleaseEvent(event)
 
 
@@ -376,9 +376,14 @@ class StudyQueuePage(QWidget):
         self.pdf.setMinimumHeight(h)
         self.pdf.setMaximumHeight(h)
 
-        self.resize_handle = BottomResizeHandle(self._resize_pdf_by_delta)
-        right.addWidget(self.resize_handle)
         right.addWidget(self.pdf)
+
+        corner_row = QHBoxLayout()
+        corner_row.addStretch()
+        self.resize_corner = CornerResizeHandle(self._resize_pdf_by_delta)
+        corner_row.addWidget(self.resize_corner)
+        right.addLayout(corner_row)
+        right.addSpacing(90)
         right.addStretch()
 
         controls_scroll = QScrollArea()
@@ -413,7 +418,9 @@ class StudyQueuePage(QWidget):
             "started_at": self.started_at.isoformat() if self.started_at else "",
             "pdf_page": state["page"],
             "pdf_location": state["location"],
+            "pdf_zoom": self.pdf.zoom_factor(),
         }
+        self.settings_repo.set_ui_state("queue_pdf_zoom", str(self.pdf.zoom_factor()))
 
     def _load_draft_for_active(self):
         self.pre.clear(); self.post.clear()
@@ -437,6 +444,8 @@ class StudyQueuePage(QWidget):
             except Exception:
                 self.started_at = None
         self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
+        zoom = float(draft.get("pdf_zoom", self.settings_repo.get_ui_state("queue_pdf_zoom", "1.0") or "1.0"))
+        self.pdf.set_zoom(max(0.25, min(4.0, zoom)))
         self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
 
     def refresh(self):
@@ -468,9 +477,15 @@ class StudyQueuePage(QWidget):
             path = s.file_path if s else ""
             if path:
                 self.source_path_cache[self.active_unit.source_id] = path
+        last_zoom = self.pdf.zoom_factor()
         self.pdf.load_if_needed(path)
         self.pdf.set_multi_page_mode()
-        self.pdf.set_fit_mode()
+        zoom_setting = self.settings_repo.get_ui_state("queue_pdf_zoom", "")
+        try:
+            target_zoom = float(zoom_setting) if zoom_setting else float(last_zoom)
+        except Exception:
+            target_zoom = float(last_zoom)
+        self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
         self.pdf.set_page(self.active_unit.start_page)
         self._load_draft_for_active()
 
