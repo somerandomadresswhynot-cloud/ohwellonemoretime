@@ -96,9 +96,29 @@ if errorlevel 1 (
 )
 
 echo [INFO] Launching study app...
-study-app
+set "EXITCODE=0"
+
+REM Prefer console module launch so tracebacks are visible.
+python -m study_app.main
 set "EXITCODE=%errorlevel%"
+
+REM Fallback to generated entrypoint if module execution failed for packaging reasons.
 if not "%EXITCODE%"=="0" (
-    echo [WARN] App exited with code %EXITCODE%.
+    echo [WARN] python -m study_app.main failed with %EXITCODE%. Trying study-app launcher...
+    where study-app >nul 2>&1
+    if %errorlevel%==0 (
+        study-app
+        set "EXITCODE=%errorlevel%"
+    )
+)
+
+if not "%EXITCODE%"=="0" (
+    echo [ERROR] App failed to launch. Exit code: %EXITCODE%
+    echo [ERROR] If this window closes too quickly, run from cmd.exe to inspect logs.
+    if /i "%KEEP_OPEN_ON_ERROR%"=="1" (
+        echo.
+        echo Press any key to close . . .
+        pause >nul
+    )
 )
 exit /b %EXITCODE%

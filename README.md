@@ -29,6 +29,13 @@ run_study_app.bat update
 run_study_app.bat resetdb
 ```
 
+If launch errors close too quickly from Explorer, run from `cmd.exe`, or set:
+
+```bat
+set KEEP_OPEN_ON_ERROR=1
+run_study_app.bat
+```
+
 ## Core flow
 
 1. Import a PDF from **Sources**.
