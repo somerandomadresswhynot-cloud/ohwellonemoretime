@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
 from study_app.pdf.pdf_service import PdfService
-from study_app.services.outline_service import entries_to_text, seed_outline_from_pages
+from study_app.services.outline_service import entries_to_text
 from study_app.services.scheduler import choose_new_units_allowed, compute_next, retention_estimate
 from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
@@ -122,7 +122,7 @@ class SourcesPage(QWidget):
         try:
             size, pages = self.pdf_service.inspect(path)
             source_id = self.source_repo.create(Path(path).stem, path, size, pages)
-            entries = seed_outline_from_pages(pages, Path(path).stem)
+            entries = self.pdf_service.generate_outline_entries(path, Path(path).stem, pages)
             self.outline_repo.replace_outline(source_id, entries)
             self.refresh()
         except Exception as exc:
