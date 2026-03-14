@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -196,6 +198,7 @@ class SourceWorkspace(QMainWindow):
         self.search.textChanged.connect(self.refresh_tree)
 
         self.pdf = PersistentPdfViewer()
+        self.pdf.set_selection_menu_handler(self.open_selection_menu)
         self.zoom = QSpinBox(); self.zoom.setRange(50, 250); self.zoom.setValue(100)
         self.zoom.valueChanged.connect(lambda v: self.pdf.set_zoom(v / 100))
         btn_jump = QPushButton("Jump To Selected Unit")
@@ -209,10 +212,11 @@ class SourceWorkspace(QMainWindow):
         self.insights.setWordWrap(True)
         self.unit_hl_list = QListWidget()
         self.source_hl_tree = QTreeWidget(); self.source_hl_tree.setHeaderLabels(["Page", "Context", "Quote"])
-        self.source_hl_tree.itemDoubleClicked.connect(lambda it, _col: it.data(0, 256) and self.pdf.set_page(int(it.data(0, 256))))
+        self.source_hl_tree.itemDoubleClicked.connect(self.on_source_highlight_double_clicked)
         tabs = QTabWidget()
         tab_ins = QWidget(); l1 = QVBoxLayout(tab_ins); l1.addWidget(self.insights); l1.addStretch()
         tab_unit = QWidget(); l2 = QVBoxLayout(tab_unit); l2.addWidget(self.unit_hl_list)
+        self.unit_hl_list.itemDoubleClicked.connect(self.edit_unit_highlight)
         tab_src = QWidget(); l3 = QVBoxLayout(tab_src); l3.addWidget(self.source_hl_tree)
         tabs.addTab(tab_ins, "Insights")
         tabs.addTab(tab_unit, "Unit Highlights")
@@ -327,8 +331,66 @@ class SourceWorkspace(QMainWindow):
         note, ok2 = QInputDialog.getText(self, "Optional note", "Note (optional)")
         if not ok2:
             note = ""
-        self.highlight_repo.add_highlight(self.source_id, page, quote, note)
+        self.highlight_repo.add_highlight(self.source_id, page, quote, note, "#2d9cdb")
         self.refresh_highlights()
+
+    def _color_actions(self):
+        return [
+            ("Blue", "#2d9cdb"),
+            ("Purple", "#8b5cf6"),
+            ("Green", "#27ae60"),
+            ("Yellow", "#f1c40f"),
+            ("Red", "#e74c3c"),
+        ]
+
+    def open_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
+        quote = (selected_text or "").strip()
+        if not quote:
+            return
+        menu = QMenu(self)
+        add_menu = menu.addMenu("Highlight selection")
+        for label, color in self._color_actions():
+            act = add_menu.addAction(label)
+            act.triggered.connect(lambda _=False, c=color: self._create_highlight(page, quote, c))
+        menu.addSeparator()
+        existing = self.highlight_repo.find_exact(self.source_id, page, quote)
+        if existing:
+            remove_act = menu.addAction("Remove matching highlight")
+            remove_act.triggered.connect(lambda: self._remove_highlight(int(existing["id"])))
+        menu.exec(global_pos)
+
+    def _create_highlight(self, page: int, quote: str, color: str) -> None:
+        self.highlight_repo.add_highlight(self.source_id, page, quote, "", color)
+        self.refresh_highlights()
+
+    def _remove_highlight(self, highlight_id: int) -> None:
+        self.highlight_repo.delete_highlight(highlight_id)
+        self.refresh_highlights()
+
+    def on_source_highlight_double_clicked(self, item, _col):
+        hid = item.data(0, 258)
+        page = item.data(0, 256)
+        if page:
+            self.pdf.set_page(int(page))
+        if hid:
+            note = item.data(0, 259) or ""
+            text, ok = QInputDialog.getMultiLineText(self, "Edit highlight note", "Note", note)
+            if ok:
+                self.highlight_repo.update_highlight_note(int(hid), text)
+                self.refresh_highlights()
+
+    def edit_unit_highlight(self, item):
+        hid = item.data(256)
+        page = item.data(257)
+        if page:
+            self.pdf.set_page(int(page))
+        if not hid:
+            return
+        note = item.data(258) or ""
+        text, ok = QInputDialog.getMultiLineText(self, "Edit highlight note", "Note", note)
+        if ok:
+            self.highlight_repo.update_highlight_note(int(hid), text)
+            self.refresh_highlights()
 
     def _selected_unit_id(self) -> int | None:
         items = self.tree.selectedItems()
@@ -343,7 +405,15 @@ class SourceWorkspace(QMainWindow):
         self.unit_hl_list.clear()
         if unit_id:
             for h in self.highlight_repo.list_unit_highlights(unit_id):
-                self.unit_hl_list.addItem(f"p{h['page']} · {h['quote_text'][:120]}")
+                txt = f"p{h['page']} · {h['quote_text'][:100]}"
+                if h['note']:
+                    txt += f"\n📝 {h['note'][:90]}"
+                item = QListWidgetItem(txt)
+                item.setData(256, int(h["id"]))
+                item.setData(257, int(h["page"]))
+                item.setData(258, h["note"] or "")
+                item.setForeground(QBrush(QColor(h["color"] or "#2d9cdb")))
+                self.unit_hl_list.addItem(item)
 
         self.source_hl_tree.clear()
         group_nodes = {}
@@ -353,8 +423,16 @@ class SourceWorkspace(QMainWindow):
                 parent = QTreeWidgetItem(["", ctx, ""])
                 self.source_hl_tree.addTopLevelItem(parent)
                 group_nodes[ctx] = parent
-            item = QTreeWidgetItem([str(h["page"]), ctx, h["quote_text"][:140]])
+            quote = h["quote_text"][:120]
+            if h["note"]:
+                quote = f"{quote}   📝 {h['note'][:70]}"
+            item = QTreeWidgetItem([str(h["page"]), ctx, quote])
             item.setData(0, 256, h["page"])
+            item.setData(0, 258, h["id"])
+            item.setData(0, 259, h["note"] or "")
+            color = QColor(h["color"] or "#2d9cdb")
+            item.setForeground(0, QBrush(color))
+            item.setForeground(2, QBrush(color))
             group_nodes[ctx].addChild(item)
         self.source_hl_tree.expandAll()
 

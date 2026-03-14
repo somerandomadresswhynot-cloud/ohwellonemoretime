@@ -214,7 +214,7 @@ class HighlightRepo:
     def __init__(self, db: Database):
         self.db = db
 
-    def add_highlight(self, source_id: int, page: int, quote_text: str, note: str = "") -> int:
+    def add_highlight(self, source_id: int, page: int, quote_text: str, note: str = "", color: str = "#2d9cdb") -> int:
         unit_row = self.db.conn.execute(
             """SELECT u.id AS unit_id, n.depth AS depth, (u.end_page-u.start_page) AS span
             FROM units u JOIN outline_nodes n ON n.id=u.node_id
@@ -225,11 +225,31 @@ class HighlightRepo:
         ).fetchone()
         unit_id = unit_row["unit_id"] if unit_row else None
         cur = self.db.conn.execute(
-            "INSERT INTO highlights(source_id,unit_id,page,quote_text,note,created_at) VALUES(?,?,?,?,?,?)",
-            (source_id, unit_id, page, quote_text, note, utcnow_iso()),
+            "INSERT INTO highlights(source_id,unit_id,page,quote_text,note,color,created_at) VALUES(?,?,?,?,?,?,?)",
+            (source_id, unit_id, page, quote_text, note, color, utcnow_iso()),
         )
         self.db.conn.commit()
         return int(cur.lastrowid)
+
+    def find_exact(self, source_id: int, page: int, quote_text: str):
+        return self.db.conn.execute(
+            """SELECT * FROM highlights
+            WHERE source_id=? AND page=? AND quote_text=?
+            ORDER BY created_at DESC LIMIT 1""",
+            (source_id, page, quote_text),
+        ).fetchone()
+
+    def delete_highlight(self, highlight_id: int) -> None:
+        self.db.conn.execute("DELETE FROM highlights WHERE id=?", (highlight_id,))
+        self.db.conn.commit()
+
+    def update_highlight_note(self, highlight_id: int, note: str) -> None:
+        self.db.conn.execute("UPDATE highlights SET note=? WHERE id=?", (note, highlight_id))
+        self.db.conn.commit()
+
+    def update_highlight_color(self, highlight_id: int, color: str) -> None:
+        self.db.conn.execute("UPDATE highlights SET color=? WHERE id=?", (color, highlight_id))
+        self.db.conn.commit()
 
     def list_unit_highlights(self, unit_id: int):
         return self.db.conn.execute(

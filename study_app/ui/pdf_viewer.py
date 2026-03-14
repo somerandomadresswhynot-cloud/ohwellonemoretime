@@ -4,6 +4,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
 try:
@@ -12,8 +13,6 @@ try:
 except Exception:  # runtime guard if QtPdf missing
     QPdfDocument = None
     QPdfView = None
-
-
 
 
 class _ViewerFullscreenHost(QWidget):
@@ -38,6 +37,7 @@ class PersistentPdfViewer(QWidget):
         self._label.setAlignment(Qt.AlignCenter)
         self._last_page = 1
         self._last_location = (0.0, 0.0)
+        self._selection_menu_handler = None
 
         self._doc_cache: OrderedDict[str, QPdfDocument] = OrderedDict()
         self._cache_limit = 8
@@ -73,16 +73,57 @@ class PersistentPdfViewer(QWidget):
                 controls.addWidget(w)
             controls.addStretch()
             root.addLayout(controls)
-            tip = QLabel("Tip: drag to select text in digital PDFs, then Ctrl+C to copy.")
+            tip = QLabel("Tip: select text, then right-click for highlight menu (or Ctrl+C + Add Highlight).")
             tip.setStyleSheet("color:#8ea2da; font-size:11px;")
             root.addWidget(tip)
         else:
             root.addWidget(self._label)
 
+    def set_selection_menu_handler(self, handler) -> None:
+        self._selection_menu_handler = handler
+        if not self._view:
+            return
+        self._view.setContextMenuPolicy(Qt.CustomContextMenu)
+        try:
+            self._view.customContextMenuRequested.disconnect()
+        except Exception:
+            pass
+        self._view.customContextMenuRequested.connect(self._on_context_menu)
+
+    def _on_context_menu(self, _pos) -> None:
+        if self._selection_menu_handler:
+            self._selection_menu_handler(QCursor.pos(), self.selected_text(), int(self.view_state().get("page", 1)))
+
+    def selected_text(self) -> str:
+        if not self._view:
+            return ""
+        # Try direct selection APIs first.
+        try:
+            if hasattr(self._view, "selectedText"):
+                txt = self._view.selectedText()
+                if txt:
+                    return str(txt).strip()
+        except Exception:
+            pass
+        try:
+            if hasattr(self._view, "selection"):
+                sel = self._view.selection()
+                txt = getattr(sel, "text", lambda: "")()
+                if txt:
+                    return str(txt).strip()
+        except Exception:
+            pass
+        # Fallback: clipboard text (user can Ctrl+C selected fragment).
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            return (QApplication.clipboard().text() or "").strip()
+        except Exception:
+            return ""
+
     def _enable_text_selection_mode(self) -> None:
         if not self._view:
             return
-        # QtPdf API varies by version; try supported selection hooks defensively.
         try:
             enum_cls = getattr(QPdfView, "SelectionMode", None)
             if enum_cls is not None:
@@ -125,7 +166,6 @@ class PersistentPdfViewer(QWidget):
             self._doc_cache.move_to_end(path)
             return
         doc = QPdfDocument(self)
-        # QPdfDocument load/error enums differ across Qt versions; cache doc directly after load call.
         doc.load(path)
         self._cache_doc(path, doc)
 

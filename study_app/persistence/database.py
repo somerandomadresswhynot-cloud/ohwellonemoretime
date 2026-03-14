@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS highlights (
     page INTEGER NOT NULL,
     quote_text TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '',
+    color TEXT NOT NULL DEFAULT '#2d9cdb',
     created_at TEXT NOT NULL,
     FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
     FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE SET NULL
@@ -107,7 +108,13 @@ class Database:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate_schema()
         self.conn.commit()
+
+    def _migrate_schema(self) -> None:
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(highlights)").fetchall()}
+        if "color" not in cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN color TEXT NOT NULL DEFAULT '#2d9cdb'")
 
     def close(self) -> None:
         self.conn.close()
