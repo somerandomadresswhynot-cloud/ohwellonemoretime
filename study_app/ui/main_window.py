@@ -1,0 +1,465 @@
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QSplitter,
+    QTabWidget,
+    QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from study_app.persistence.repositories import OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
+from study_app.pdf.pdf_service import PdfService
+from study_app.services.outline_service import entries_to_text, seed_outline_from_pages
+from study_app.services.scheduler import choose_new_units_allowed, compute_next, retention_estimate
+from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
+from study_app.ui.pdf_viewer import PersistentPdfViewer
+
+
+class SourcesPage(QWidget):
+    open_workspace = Signal(int)
+
+    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, pdf_service: PdfService):
+        super().__init__()
+        self.source_repo = source_repo
+        self.outline_repo = outline_repo
+        self.pdf_service = pdf_service
+        self.current_source_id = None
+
+        search = QLineEdit()
+        search.setPlaceholderText("Search sources...")
+        search.textChanged.connect(self.refresh)
+        self.search = search
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(self._on_select)
+
+        left = QVBoxLayout()
+        left.addWidget(search)
+        left.addWidget(self.list)
+        import_btn = QPushButton("Import PDF")
+        import_btn.setObjectName("accent")
+        import_btn.clicked.connect(self.import_pdf)
+        left.addWidget(import_btn)
+
+        self.detail = QLabel("Select a source")
+        self.detail.setWordWrap(True)
+        btn_open = QPushButton("Open Workspace")
+        btn_edit = QPushButton("Edit Metadata")
+        btn_relink = QPushButton("Relink File")
+        btn_archive = QPushButton("Toggle Active")
+        btn_delete = QPushButton("Delete Source")
+        btn_open.clicked.connect(lambda: self.current_source_id and self.open_workspace.emit(self.current_source_id))
+        btn_edit.clicked.connect(self.edit_source)
+        btn_relink.clicked.connect(self.relink_source)
+        btn_archive.clicked.connect(self.toggle_active)
+        btn_delete.clicked.connect(self.delete_source)
+        right = QVBoxLayout()
+        right.addWidget(self.detail)
+        for b in [btn_open, btn_edit, btn_relink, btn_archive, btn_delete]:
+            right.addWidget(b)
+        right.addStretch()
+
+        split = QSplitter()
+        lw = QWidget(); lw.setLayout(left)
+        rw = QWidget(); rw.setLayout(right)
+        split.addWidget(lw); split.addWidget(rw)
+        split.setSizes([700, 300])
+        lay = QVBoxLayout(self)
+        lay.addWidget(split)
+        self.refresh()
+
+    def refresh(self):
+        q = self.search.text().strip()
+        self.sources = self.source_repo.list_sources(q)
+        self.list.clear()
+        for s in self.sources:
+            suffix = "" if s.file_exists else " (missing file)"
+            item = QListWidgetItem(f"{s.title} · {s.page_count}p{suffix}")
+            item.setData(256, s.id)
+            self.list.addItem(item)
+        if self.list.count() > 0:
+            self.list.setCurrentRow(0)
+
+    def _on_select(self, idx):
+        if idx < 0:
+            return
+        s = self.sources[idx]
+        self.current_source_id = s.id
+        self.detail.setText(
+            f"Title: {s.title}\nActive: {s.is_active}\nFile: {s.file_path}\nExists: {s.file_exists}\nPages: {s.page_count}"
+        )
+
+    def import_pdf(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import PDF", "", "PDF files (*.pdf)")
+        if not path:
+            return
+        try:
+            size, pages = self.pdf_service.inspect(path)
+            source_id = self.source_repo.create(Path(path).stem, path, size, pages)
+            entries = seed_outline_from_pages(pages, Path(path).stem)
+            self.outline_repo.replace_outline(source_id, entries)
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.critical(self, "Import failed", str(exc))
+
+    def edit_source(self):
+        if not self.current_source_id:
+            return
+        s = self.source_repo.get(self.current_source_id)
+        dlg = SourceMetadataDialog(s.title, s.is_active, self)
+        if dlg.exec():
+            active = dlg.active_edit.text().strip().lower() in {"y", "yes", "true", "1"}
+            self.source_repo.update_metadata(s.id, dlg.title_edit.text().strip() or s.title, active)
+            self.refresh()
+
+    def relink_source(self):
+        if not self.current_source_id:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Relink PDF", "", "PDF files (*.pdf)")
+        if not path:
+            return
+        size, pages = self.pdf_service.inspect(path)
+        self.source_repo.relink(self.current_source_id, path, size, pages)
+        self.refresh()
+
+    def toggle_active(self):
+        if not self.current_source_id:
+            return
+        s = self.source_repo.get(self.current_source_id)
+        self.source_repo.update_metadata(s.id, s.title, not s.is_active)
+        self.refresh()
+
+    def delete_source(self):
+        if self.current_source_id:
+            self.source_repo.delete(self.current_source_id)
+            self.current_source_id = None
+            self.refresh()
+
+
+class SourceWorkspace(QMainWindow):
+    def __init__(self, source_id: int, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo):
+        super().__init__()
+        self.source_id = source_id
+        self.source_repo = source_repo
+        self.outline_repo = outline_repo
+        self.review_repo = review_repo
+        self.setWindowTitle("Source Workspace")
+        root = QWidget(); self.setCentralWidget(root)
+        split = QSplitter()
+
+        self.search = QLineEdit(); self.search.setPlaceholderText("Filter outline")
+        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Outline", "Queue"])
+        self.tree.itemSelectionChanged.connect(self.on_item_select)
+        self.tree.itemChanged.connect(self.on_item_changed)
+        btn_all = QPushButton("Enable All")
+        btn_none = QPushButton("Disable All")
+        btn_edit = QPushButton("Edit Outline Text")
+        btn_all.clicked.connect(lambda: self._bulk(True))
+        btn_none.clicked.connect(lambda: self._bulk(False))
+        btn_edit.clicked.connect(self.edit_outline)
+        left_l = QVBoxLayout(); left_l.addWidget(self.search); left_l.addWidget(self.tree); left_l.addWidget(btn_all); left_l.addWidget(btn_none); left_l.addWidget(btn_edit)
+        self.search.textChanged.connect(self.refresh_tree)
+
+        self.pdf = PersistentPdfViewer()
+        self.zoom = QSpinBox(); self.zoom.setRange(50, 250); self.zoom.setValue(100)
+        self.zoom.valueChanged.connect(lambda v: self.pdf.set_zoom(v / 100))
+        btn_jump = QPushButton("Jump To Selected Unit")
+        btn_jump.clicked.connect(self.jump_to_selected)
+        self.page_label = QLabel("Page: -")
+        c_l = QVBoxLayout(); c_l.addWidget(self.zoom); c_l.addWidget(btn_jump); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
+
+        self.insights = QLabel()
+        self.insights.setWordWrap(True)
+        right_l = QVBoxLayout(); right_l.addWidget(QLabel("Insights")); right_l.addWidget(self.insights); right_l.addStretch()
+
+        lw = QWidget(); lw.setLayout(left_l)
+        cw = QWidget(); cw.setLayout(c_l)
+        rw = QWidget(); rw.setLayout(right_l)
+        split.addWidget(lw); split.addWidget(cw); split.addWidget(rw)
+        split.setSizes([300, 700, 320])
+        lay = QHBoxLayout(root); lay.addWidget(split)
+
+        self._selected_node = None
+        self.load_source()
+
+    def load_source(self):
+        self.source = self.source_repo.get(self.source_id)
+        self.pdf.load_if_needed(self.source.file_path)
+        self.refresh_tree()
+        self.refresh_insights()
+
+    def refresh_tree(self):
+        filt = self.search.text().strip().lower()
+        rows = self.outline_repo.nodes_for_source(self.source_id)
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        id_to_item = {}
+        for r in rows:
+            if filt and filt not in r["title"].lower():
+                continue
+            txt = r["title"]
+            if r["start_page"]:
+                txt += f" [{r['start_page']}-{r['end_page']}]"
+            item = QTreeWidgetItem([txt, "on" if r["queue_enabled"] else "off"])
+            item.setData(0, 256, r["id"])
+            item.setData(0, 257, r["start_page"])
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+            item.setCheckState(1, Qt.Checked if r["queue_enabled"] else Qt.Unchecked)
+            pid = r["parent_id"]
+            if pid and pid in id_to_item:
+                id_to_item[pid].addChild(item)
+            else:
+                self.tree.addTopLevelItem(item)
+            id_to_item[r["id"]] = item
+        self.tree.expandAll()
+        self.tree.blockSignals(False)
+
+    def on_item_select(self):
+        items = self.tree.selectedItems()
+        if not items:
+            return
+        it = items[0]
+        self._selected_node = it.data(0, 256)
+        page = it.data(0, 257)
+        if page:
+            self.page_label.setText(f"Page: {page}")
+        self.refresh_insights()
+
+    def on_item_changed(self, item, col):
+        if col != 1:
+            return
+        enabled = item.checkState(1) == Qt.Checked
+        self.outline_repo.set_queue_enabled(item.data(0, 256), enabled)
+
+    def jump_to_selected(self):
+        items = self.tree.selectedItems()
+        if not items:
+            return
+        page = items[0].data(0, 257)
+        if page:
+            self.pdf.set_page(page)
+
+    def edit_outline(self):
+        nodes = self.outline_repo.nodes_for_source(self.source_id)
+        entries = [{
+            "depth": n["depth"], "title": n["title"], "start_page": n["start_page"], "end_page": n["end_page"]
+        } for n in nodes]
+        dlg = OutlineEditorDialog(entries_to_text(entries), self)
+        if dlg.exec() and dlg.parsed_entries is not None:
+            self.outline_repo.replace_outline(self.source_id, dlg.parsed_entries)
+            self.refresh_tree()
+            self.refresh_insights()
+
+    def _bulk(self, enabled: bool):
+        self.outline_repo.bulk_set_source(self.source_id, enabled)
+        self.refresh_tree()
+
+    def refresh_insights(self):
+        units = self.review_repo.source_units(self.source_id)
+        now = datetime.utcnow()
+        untouched = sum(1 for u in units if not u["last_review_at"])
+        low = sum(1 for u in units if retention_estimate(u, now) < 0.45)
+        avg = sum(retention_estimate(u, now) for u in units) / max(1, len(units))
+        self.insights.setText(f"Total units: {len(units)}\nUntouched: {untouched}\nLow retention: {low}\nAvg retention: {avg:.0%}")
+
+
+class StudyQueuePage(QWidget):
+    def __init__(self, source_repo: SourceRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo):
+        super().__init__()
+        self.source_repo = source_repo
+        self.review_repo = review_repo
+        self.settings_repo = settings_repo
+        self.timer_seconds = 0
+        self.timer_running = False
+        self.active_unit = None
+        self.started_at = None
+
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(self.pick_unit)
+        left = QVBoxLayout(); left.addWidget(QLabel("Due Units")); left.addWidget(self.list)
+
+        self.title = QLabel("No unit selected")
+        self.timer_lbl = QLabel("00:00")
+        self.pre = QTextEdit(); self.post = QTextEdit()
+        timer_start = QPushButton("Start/Pause")
+        timer_reset = QPushButton("Reset")
+        timer_start.clicked.connect(self.toggle_timer)
+        timer_reset.clicked.connect(self.reset_timer)
+        self.pdf = PersistentPdfViewer()
+        hist_btn = QPushButton("Review History")
+        hist_btn.clicked.connect(self.open_history)
+        jump_btn = QPushButton("Jump to Unit")
+        jump_btn.clicked.connect(lambda: self.active_unit and self.pdf.set_page(self.active_unit.start_page))
+
+        ratings = QHBoxLayout()
+        for label, r in [("Easy", "easy"), ("With Effort", "with_effort"), ("Hard", "hard"), ("Skip", "skip")]:
+            b = QPushButton(label)
+            b.clicked.connect(lambda _, rr=r: self.rate(rr))
+            ratings.addWidget(b)
+        right = QVBoxLayout(); right.addWidget(self.title)
+        right.addWidget(self.timer_lbl); right.addWidget(timer_start); right.addWidget(timer_reset)
+        right.addWidget(QLabel("Pre-recall note")); right.addWidget(self.pre)
+        right.addWidget(QLabel("Post-recall note")); right.addWidget(self.post)
+        right.addLayout(ratings); right.addWidget(jump_btn); right.addWidget(hist_btn)
+        right.addWidget(self.pdf)
+
+        split = QSplitter(); lw = QWidget(); lw.setLayout(left); rw = QWidget(); rw.setLayout(right)
+        split.addWidget(lw); split.addWidget(rw); split.setSizes([300, 900])
+        lay = QVBoxLayout(self); lay.addWidget(split)
+
+        self.qt_timer = QTimer(self)
+        self.qt_timer.timeout.connect(self.tick)
+        self.qt_timer.start(1000)
+        self.refresh()
+
+    def refresh(self):
+        units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        self.units = units
+        self.list.clear()
+        for u in units:
+            item = QListWidgetItem(f"{u.source_title} · {u.title} [{u.start_page}-{u.end_page}] ({u.review_count}x)")
+            self.list.addItem(item)
+        if self.list.count() > 0:
+            self.list.setCurrentRow(0)
+
+    def pick_unit(self, idx):
+        if idx < 0 or idx >= len(self.units):
+            self.active_unit = None
+            return
+        self.active_unit = self.units[idx]
+        self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
+        s = self.source_repo.get(self.active_unit.source_id)
+        self.pdf.load_if_needed(s.file_path)
+        self.pdf.set_page(self.active_unit.start_page)
+
+    def tick(self):
+        if self.timer_running:
+            self.timer_seconds += 1
+            self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
+
+    def toggle_timer(self):
+        self.timer_running = not self.timer_running
+        if self.timer_running and not self.started_at:
+            self.started_at = datetime.utcnow()
+
+    def reset_timer(self):
+        self.timer_seconds = 0
+        self.started_at = None
+        self.timer_running = False
+        self.timer_lbl.setText("00:00")
+
+    def rate(self, rating: str):
+        if not self.active_unit:
+            return
+        now = datetime.utcnow()
+        unit_row = self.review_repo.unit_by_id(self.active_unit.unit_id)
+        res = compute_next(unit_row, rating, now)
+        payload = {
+            "started_at": (self.started_at or now).isoformat(timespec="seconds"),
+            "ended_at": now.isoformat(timespec="seconds"),
+            "elapsed_seconds": self.timer_seconds,
+            "rating": rating,
+            "pre_note": self.pre.toPlainText(),
+            "post_note": self.post.toPlainText(),
+            "interval_days": res.interval_days,
+            "next_review_at": res.next_review_at,
+        }
+        self.review_repo.add_event(self.active_unit.unit_id, payload)
+        count = unit_row["review_count"] + 1
+        avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy":5,"with_effort":3,"hard":2,"skip":1}[rating]) / count
+        self.review_repo.update_unit_stats(self.active_unit.unit_id, {
+            "last_review_at": now.isoformat(timespec="seconds"),
+            "next_review_at": res.next_review_at,
+            "review_count": count,
+            "ease_factor": res.ease_factor,
+            "interval_days": res.interval_days,
+            "avg_rating": avg,
+        })
+        self.reset_timer(); self.pre.clear(); self.post.clear(); self.refresh()
+
+    def open_history(self):
+        if not self.active_unit:
+            return
+        events = self.review_repo.events_for_unit(self.active_unit.unit_id)
+        dlg = ReviewHistoryDialog(events, self.review_repo, self)
+        dlg.exec()
+
+
+class SettingsPage(QWidget):
+    def __init__(self, settings_repo: SettingsRepo, review_repo: ReviewRepo):
+        super().__init__()
+        self.settings_repo = settings_repo
+        self.review_repo = review_repo
+        form = QFormLayout()
+        self.daily = QSpinBox(); self.daily.setRange(15, 600); self.daily.setValue(int(settings_repo.get("daily_minutes", "90")))
+        self.min_ret = QSpinBox(); self.min_ret.setRange(10, 90); self.min_ret.setValue(int(settings_repo.get("min_retention_percent", "45")))
+        self.new_cap = QSpinBox(); self.new_cap.setRange(0, 50); self.new_cap.setValue(int(settings_repo.get("new_units_cap", "6")))
+        form.addRow("Daily target minutes", self.daily)
+        form.addRow("Low retention threshold %", self.min_ret)
+        form.addRow("Max new units/day", self.new_cap)
+        save = QPushButton("Save Settings")
+        save.clicked.connect(self.save)
+        self.summary = QLabel("")
+        lay = QVBoxLayout(self); lay.addLayout(form); lay.addWidget(save); lay.addWidget(self.summary); lay.addStretch()
+        self.refresh_summary()
+
+    def save(self):
+        self.settings_repo.set("daily_minutes", str(self.daily.value()))
+        self.settings_repo.set("min_retention_percent", str(self.min_ret.value()))
+        self.settings_repo.set("new_units_cap", str(self.new_cap.value()))
+        self.refresh_summary()
+
+    def refresh_summary(self):
+        due = len(self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds")))
+        allow_new = choose_new_units_allowed(due, self.daily.value(), 90)
+        self.summary.setText(f"Due now: {due}\nScheduler recommendation: {'allow new units' if allow_new else 'review-only day'}")
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo, pdf_service: PdfService):
+        super().__init__()
+        self.setWindowTitle("Oh Well One More Time — Study PDF")
+        self.resize(1500, 900)
+
+        root = QWidget(); self.setCentralWidget(root)
+        lay = QVBoxLayout(root)
+        bar = QFrame(); bar.setObjectName("panel")
+        b = QHBoxLayout(bar)
+        b.addWidget(QLabel("📘 Study Dashboard"))
+        b.addStretch()
+        lay.addWidget(bar)
+
+        tabs = QTabWidget()
+        self.queue = StudyQueuePage(source_repo, review_repo, settings_repo)
+        self.sources = SourcesPage(source_repo, outline_repo, pdf_service)
+        self.settings = SettingsPage(settings_repo, review_repo)
+        tabs.addTab(self.queue, "Study Queue")
+        tabs.addTab(self.sources, "Sources")
+        tabs.addTab(self.settings, "Settings")
+        lay.addWidget(tabs)
+
+        self.sources.open_workspace.connect(self.open_workspace)
+        self._workspace_windows = []
+
+    def open_workspace(self, source_id: int):
+        win = SourceWorkspace(source_id, self.sources.source_repo, self.sources.outline_repo, self.queue.review_repo)
+        win.show()
+        self._workspace_windows.append(win)
