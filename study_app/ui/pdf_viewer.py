@@ -44,11 +44,24 @@ class PersistentPdfViewer(QWidget):
     def _apply_default_view_mode(self) -> None:
         if not self._view:
             return
+        self.set_multi_page_mode()
+        self.set_fit_mode()
+
+    def set_multi_page_mode(self) -> None:
+        if not self._view:
+            return
         try:
             self._view.setPageMode(QPdfView.PageMode.MultiPage)
         except Exception:
             pass
-        self.set_fit_mode()
+
+    def set_single_page_mode(self) -> None:
+        if not self._view:
+            return
+        try:
+            self._view.setPageMode(QPdfView.PageMode.SinglePage)
+        except Exception:
+            pass
 
     def load_if_needed(self, path: str) -> None:
         if not path or not Path(path).exists() or not self._doc:
