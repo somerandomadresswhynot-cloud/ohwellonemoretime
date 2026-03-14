@@ -5,11 +5,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QInputDialog,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -27,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from study_app.persistence.repositories import OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
+from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text, seed_outline_from_pages
 from study_app.services.scheduler import choose_new_units_allowed, compute_next, retention_estimate
@@ -161,12 +163,13 @@ class SourcesPage(QWidget):
 
 
 class SourceWorkspace(QMainWindow):
-    def __init__(self, source_id: int, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo):
+    def __init__(self, source_id: int, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo):
         super().__init__()
         self.source_id = source_id
         self.source_repo = source_repo
         self.outline_repo = outline_repo
         self.review_repo = review_repo
+        self.highlight_repo = highlight_repo
         self.setWindowTitle("Source Workspace")
         root = QWidget(); self.setCentralWidget(root)
         split = QSplitter()
@@ -190,12 +193,24 @@ class SourceWorkspace(QMainWindow):
         self.zoom.valueChanged.connect(lambda v: self.pdf.set_zoom(v / 100))
         btn_jump = QPushButton("Jump To Selected Unit")
         btn_jump.clicked.connect(self.jump_to_selected)
+        btn_hl = QPushButton("Add Highlight from Clipboard")
+        btn_hl.clicked.connect(self.add_highlight_from_clipboard)
         self.page_label = QLabel("Page: -")
-        c_l = QVBoxLayout(); c_l.addWidget(self.zoom); c_l.addWidget(btn_jump); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
+        c_l = QVBoxLayout(); c_l.addWidget(self.zoom); c_l.addWidget(btn_jump); c_l.addWidget(btn_hl); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
 
         self.insights = QLabel()
         self.insights.setWordWrap(True)
-        right_l = QVBoxLayout(); right_l.addWidget(QLabel("Insights")); right_l.addWidget(self.insights); right_l.addStretch()
+        self.unit_hl_list = QListWidget()
+        self.source_hl_tree = QTreeWidget(); self.source_hl_tree.setHeaderLabels(["Page", "Context", "Quote"])
+        self.source_hl_tree.itemDoubleClicked.connect(lambda it, _col: it.data(0, 256) and self.pdf.set_page(int(it.data(0, 256))))
+        tabs = QTabWidget()
+        tab_ins = QWidget(); l1 = QVBoxLayout(tab_ins); l1.addWidget(self.insights); l1.addStretch()
+        tab_unit = QWidget(); l2 = QVBoxLayout(tab_unit); l2.addWidget(self.unit_hl_list)
+        tab_src = QWidget(); l3 = QVBoxLayout(tab_src); l3.addWidget(self.source_hl_tree)
+        tabs.addTab(tab_ins, "Insights")
+        tabs.addTab(tab_unit, "Unit Highlights")
+        tabs.addTab(tab_src, "Source Highlights")
+        right_l = QVBoxLayout(); right_l.addWidget(tabs); right_l.addStretch()
 
         lw = QWidget(); lw.setLayout(left_l)
         cw = QWidget(); cw.setLayout(c_l)
@@ -213,6 +228,7 @@ class SourceWorkspace(QMainWindow):
         self.pdf.set_fit_mode()
         self.refresh_tree()
         self.refresh_insights()
+        self.refresh_highlights()
 
     def refresh_tree(self):
         filt = self.search.text().strip().lower()
@@ -250,6 +266,7 @@ class SourceWorkspace(QMainWindow):
         if page:
             self.page_label.setText(f"Page: {page}")
         self.refresh_insights()
+        self.refresh_highlights()
 
     def on_item_changed(self, item, col):
         if col != 1:
@@ -287,6 +304,49 @@ class SourceWorkspace(QMainWindow):
         low = sum(1 for u in units if retention_estimate(u, now) < 0.45)
         avg = sum(retention_estimate(u, now) for u in units) / max(1, len(units))
         self.insights.setText(f"Total units: {len(units)}\nUntouched: {untouched}\nLow retention: {low}\nAvg retention: {avg:.0%}")
+
+    def add_highlight_from_clipboard(self):
+        cb = QApplication.clipboard()
+        quote = (cb.text() or "").strip()
+        if not quote:
+            QMessageBox.information(self, "No text", "Copy selected text first (or any text to clipboard), then add highlight.")
+            return
+        page, ok = QInputDialog.getInt(self, "Highlight Page", "Page number", max(1, int(self.pdf.view_state().get("page", 1))), 1, 100000)
+        if not ok:
+            return
+        note, ok2 = QInputDialog.getText(self, "Optional note", "Note (optional)")
+        if not ok2:
+            note = ""
+        self.highlight_repo.add_highlight(self.source_id, page, quote, note)
+        self.refresh_highlights()
+
+    def _selected_unit_id(self) -> int | None:
+        items = self.tree.selectedItems()
+        if not items:
+            return None
+        node_id = items[0].data(0, 256)
+        row = self.review_repo.db.conn.execute("SELECT id FROM units WHERE node_id=?", (node_id,)).fetchone()
+        return int(row["id"]) if row else None
+
+    def refresh_highlights(self):
+        unit_id = self._selected_unit_id()
+        self.unit_hl_list.clear()
+        if unit_id:
+            for h in self.highlight_repo.list_unit_highlights(unit_id):
+                self.unit_hl_list.addItem(f"p{h['page']} · {h['quote_text'][:120]}")
+
+        self.source_hl_tree.clear()
+        group_nodes = {}
+        for h in self.highlight_repo.list_source_highlights(self.source_id):
+            ctx = h["unit_title"] if h["unit_title"] else "(no unit)"
+            if ctx not in group_nodes:
+                parent = QTreeWidgetItem(["", ctx, ""])
+                self.source_hl_tree.addTopLevelItem(parent)
+                group_nodes[ctx] = parent
+            item = QTreeWidgetItem([str(h["page"]), ctx, h["quote_text"][:140]])
+            item.setData(0, 256, h["page"])
+            group_nodes[ctx].addChild(item)
+        self.source_hl_tree.expandAll()
 
 
 class CornerResizeHandle(QFrame):
@@ -582,9 +642,10 @@ class SettingsPage(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo, pdf_service: PdfService):
+    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo, highlight_repo: HighlightRepo, pdf_service: PdfService):
         super().__init__()
         self.setWindowTitle("Oh Well One More Time — Study PDF")
+        self.highlight_repo = highlight_repo
         self.resize(1500, 900)
 
         root = QWidget(); self.setCentralWidget(root)
@@ -608,6 +669,6 @@ class MainWindow(QMainWindow):
         self._workspace_windows = []
 
     def open_workspace(self, source_id: int):
-        win = SourceWorkspace(source_id, self.sources.source_repo, self.sources.outline_repo, self.queue.review_repo)
+        win = SourceWorkspace(source_id, self.sources.source_repo, self.sources.outline_repo, self.queue.review_repo, self.highlight_repo)
         win.show()
         self._workspace_windows.append(win)

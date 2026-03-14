@@ -208,3 +208,40 @@ class SettingsRepo:
             (key, value),
         )
         self.db.conn.commit()
+
+
+class HighlightRepo:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def add_highlight(self, source_id: int, page: int, quote_text: str, note: str = "") -> int:
+        unit_row = self.db.conn.execute(
+            """SELECT u.id AS unit_id, n.depth AS depth, (u.end_page-u.start_page) AS span
+            FROM units u JOIN outline_nodes n ON n.id=u.node_id
+            WHERE u.source_id=? AND u.start_page<=? AND u.end_page>=?
+            ORDER BY n.depth DESC, span ASC
+            LIMIT 1""",
+            (source_id, page, page),
+        ).fetchone()
+        unit_id = unit_row["unit_id"] if unit_row else None
+        cur = self.db.conn.execute(
+            "INSERT INTO highlights(source_id,unit_id,page,quote_text,note,created_at) VALUES(?,?,?,?,?,?)",
+            (source_id, unit_id, page, quote_text, note, utcnow_iso()),
+        )
+        self.db.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_unit_highlights(self, unit_id: int):
+        return self.db.conn.execute(
+            "SELECT * FROM highlights WHERE unit_id=? ORDER BY created_at DESC", (unit_id,)
+        ).fetchall()
+
+    def list_source_highlights(self, source_id: int):
+        return self.db.conn.execute(
+            """SELECT h.*, u.title AS unit_title, u.start_page, u.end_page
+            FROM highlights h
+            LEFT JOIN units u ON u.id=h.unit_id
+            WHERE h.source_id=?
+            ORDER BY h.page ASC, h.created_at DESC""",
+            (source_id,),
+        ).fetchall()

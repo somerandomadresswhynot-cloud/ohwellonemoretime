@@ -76,6 +76,19 @@ CREATE TABLE IF NOT EXISTS review_revisions (
     FOREIGN KEY(review_event_id) REFERENCES review_events(id) ON DELETE CASCADE
 );
 
+
+CREATE TABLE IF NOT EXISTS highlights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    unit_id INTEGER,
+    page INTEGER NOT NULL,
+    quote_text TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
+    FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

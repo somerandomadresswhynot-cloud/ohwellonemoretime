@@ -14,6 +14,21 @@ except Exception:  # runtime guard if QtPdf missing
     QPdfView = None
 
 
+
+
+class _ViewerFullscreenHost(QWidget):
+    def __init__(self, on_esc, parent=None):
+        super().__init__(parent)
+        self._on_esc = on_esc
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self._on_esc()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class PersistentPdfViewer(QWidget):
     def __init__(self):
         super().__init__()
@@ -199,7 +214,7 @@ class PersistentPdfViewer(QWidget):
             self._view_original_layout = self.layout()
             if self._view_original_layout:
                 self._view_original_layout.removeWidget(self._view)
-            self._fullscreen_host = QWidget()
+            self._fullscreen_host = _ViewerFullscreenHost(self.toggle_fullscreen)
             self._fullscreen_host.setWindowTitle("PDF Viewer")
             self._fullscreen_host.setWindowFlag(Qt.Window)
             lay = QVBoxLayout(self._fullscreen_host)
