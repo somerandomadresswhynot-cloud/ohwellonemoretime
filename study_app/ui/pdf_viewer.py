@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 try:
@@ -29,7 +29,7 @@ class PersistentPdfViewer(QWidget):
             self._doc = QPdfDocument(self)
             self._view = QPdfView(self)
             self._view.setDocument(self._doc)
-            self.set_fit_mode()
+            self._apply_default_view_mode()
             try:
                 self._view.pageNavigator().currentPageChanged.connect(self._on_page_changed)
             except Exception:
@@ -41,6 +41,15 @@ class PersistentPdfViewer(QWidget):
     def _on_page_changed(self, page_zero: int) -> None:
         self._last_page = max(1, int(page_zero) + 1)
 
+    def _apply_default_view_mode(self) -> None:
+        if not self._view:
+            return
+        try:
+            self._view.setPageMode(QPdfView.PageMode.MultiPage)
+        except Exception:
+            pass
+        self.set_fit_mode()
+
     def load_if_needed(self, path: str) -> None:
         if not path or not Path(path).exists() or not self._doc:
             return
@@ -49,22 +58,32 @@ class PersistentPdfViewer(QWidget):
             self.current_path = path
             self._last_page = 1
             self._last_location = (0.0, 0.0)
-            self.set_fit_mode()
+            self._apply_default_view_mode()
 
     def set_fit_mode(self) -> None:
         if self._view:
             try:
-                self._view.setZoomMode(QPdfView.ZoomMode.FitInView)
+                self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
             except Exception:
-                pass
+                try:
+                    self._view.setZoomMode(QPdfView.ZoomMode.FitInView)
+                except Exception:
+                    pass
 
     def set_page(self, page: int, location: tuple[float, float] | None = None) -> None:
-        if self._view:
-            nav = self._view.pageNavigator()
-            x, y = location if location else (0, 0)
-            nav.jump(max(0, page - 1), x, y)
-            self._last_page = max(1, page)
-            self._last_location = (float(x), float(y))
+        if not self._view:
+            return
+        nav = self._view.pageNavigator()
+        x, y = location if location else (0.0, 0.0)
+        try:
+            nav.jump(max(0, page - 1), QPointF(float(x), float(y)), self._view.zoomFactor())
+        except Exception:
+            try:
+                nav.jump(max(0, page - 1), QPointF(float(x), float(y)), 0.0)
+            except Exception:
+                pass
+        self._last_page = max(1, int(page))
+        self._last_location = (float(x), float(y))
 
     def set_zoom(self, factor: float) -> None:
         if self._view:
