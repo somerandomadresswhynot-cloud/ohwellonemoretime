@@ -27,16 +27,29 @@ REM   set KEEP_OPEN_ALWAYS=1    (pause always)
 set "PY_CMD="
 where py >nul 2>&1
 if %errorlevel%==0 (
-    set "PY_CMD=py -3"
-) else (
+    py -3.11 -c "import sys" >nul 2>&1
+    if %errorlevel%==0 set "PY_CMD=py -3.11"
+)
+
+if "%PY_CMD%"=="" (
     where python >nul 2>&1
-    if %errorlevel%==0 (
-        set "PY_CMD=python"
-    ) else (
-        echo [ERROR] Python 3.11+ was not found. Install Python and try again.
-        set "EXITCODE=1"
-        goto :finish
-    )
+    if %errorlevel%==0 set "PY_CMD=python"
+)
+
+if "%PY_CMD%"=="" (
+    echo [ERROR] Python 3.11+ was not found. Install Python 3.11+ and try again.
+    set "EXITCODE=1"
+    goto :finish
+)
+
+%PY_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Detected interpreter is below Python 3.11.
+    %PY_CMD% -c "import sys; print('Detected Python:', sys.version)"
+    echo [ERROR] This app requires Python 3.11+ per pyproject constraints.
+    echo [HINT] Install Python 3.11+ from python.org and ensure "py -3.11" works.
+    set "EXITCODE=1"
+    goto :finish
 )
 
 if /i "%COMMAND%"=="resetdb" (
@@ -55,7 +68,7 @@ if /i "%COMMAND%"=="resetdb" (
 )
 
 if not exist ".venv\Scripts\python.exe" (
-    echo [INFO] Creating virtual environment...
+    echo [INFO] Creating virtual environment using %PY_CMD% ...
     %PY_CMD% -m venv .venv
     if errorlevel 1 (
         echo [ERROR] Failed to create .venv
@@ -67,6 +80,15 @@ if not exist ".venv\Scripts\python.exe" (
 call ".venv\Scripts\activate.bat"
 if errorlevel 1 (
     echo [ERROR] Failed to activate .venv
+    set "EXITCODE=1"
+    goto :finish
+)
+
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] The virtual environment is not using Python 3.11+.
+    python -c "import sys; print('Venv Python:', sys.version)"
+    echo [HINT] Delete .venv and rerun after installing Python 3.11+, or run: py -3.11 -m venv .venv
     set "EXITCODE=1"
     goto :finish
 )
