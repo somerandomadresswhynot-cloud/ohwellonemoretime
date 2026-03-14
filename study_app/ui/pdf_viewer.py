@@ -48,6 +48,7 @@ class PersistentPdfViewer(QWidget):
         root = QVBoxLayout(self)
         if QPdfDocument and QPdfView:
             self._view = QPdfView(self)
+            self._enable_text_selection_mode()
             self._apply_default_view_mode()
             root.addWidget(self._view)
 
@@ -72,8 +73,30 @@ class PersistentPdfViewer(QWidget):
                 controls.addWidget(w)
             controls.addStretch()
             root.addLayout(controls)
+            tip = QLabel("Tip: drag to select text in digital PDFs, then Ctrl+C to copy.")
+            tip.setStyleSheet("color:#8ea2da; font-size:11px;")
+            root.addWidget(tip)
         else:
             root.addWidget(self._label)
+
+    def _enable_text_selection_mode(self) -> None:
+        if not self._view:
+            return
+        # QtPdf API varies by version; try supported selection hooks defensively.
+        try:
+            enum_cls = getattr(QPdfView, "SelectionMode", None)
+            if enum_cls is not None:
+                for member in ("TextSelection", "TextSelector", "SelectText"):
+                    if hasattr(enum_cls, member):
+                        self._view.setSelectionMode(getattr(enum_cls, member))
+                        return
+        except Exception:
+            pass
+        try:
+            if hasattr(self._view, "setSelectionEnabled"):
+                self._view.setSelectionEnabled(True)
+        except Exception:
+            pass
 
     def _attach_page_changed(self, doc: QPdfDocument) -> None:
         try:
