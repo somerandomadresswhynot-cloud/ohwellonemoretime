@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.venv/
+study_app.db
