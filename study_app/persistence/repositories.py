@@ -137,6 +137,39 @@ class ReviewRepo:
             next_review_at=r["next_review_at"], last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
         ) for r in rows]
 
+    def avg_elapsed_seconds_for_unit(self, unit_id: int) -> float | None:
+        row = self.db.conn.execute(
+            """SELECT AVG(elapsed_seconds) AS avg_elapsed
+            FROM review_events
+            WHERE unit_id=? AND deleted_at IS NULL""",
+            (unit_id,),
+        ).fetchone()
+        if not row or row["avg_elapsed"] is None:
+            return None
+        return float(row["avg_elapsed"])
+
+    def avg_elapsed_seconds_for_source(self, source_id: int) -> float | None:
+        row = self.db.conn.execute(
+            """SELECT AVG(re.elapsed_seconds) AS avg_elapsed
+            FROM review_events re
+            JOIN units u ON u.id=re.unit_id
+            WHERE u.source_id=? AND re.deleted_at IS NULL""",
+            (source_id,),
+        ).fetchone()
+        if not row or row["avg_elapsed"] is None:
+            return None
+        return float(row["avg_elapsed"])
+
+    def avg_elapsed_seconds_global(self) -> float | None:
+        row = self.db.conn.execute(
+            """SELECT AVG(elapsed_seconds) AS avg_elapsed
+            FROM review_events
+            WHERE deleted_at IS NULL"""
+        ).fetchone()
+        if not row or row["avg_elapsed"] is None:
+            return None
+        return float(row["avg_elapsed"])
+
     def source_units(self, source_id: int):
         return self.db.conn.execute("SELECT * FROM units WHERE source_id=? ORDER BY start_page,title", (source_id,)).fetchall()
 

@@ -708,9 +708,13 @@ class SettingsPage(QWidget):
         self.daily = QSpinBox(); self.daily.setRange(15, 600); self.daily.setValue(int(settings_repo.get("daily_minutes", "90")))
         self.min_ret = QSpinBox(); self.min_ret.setRange(10, 90); self.min_ret.setValue(int(settings_repo.get("min_retention_percent", "45")))
         self.new_cap = QSpinBox(); self.new_cap.setRange(0, 50); self.new_cap.setValue(int(settings_repo.get("new_units_cap", "6")))
+        self.fallback_unit_seconds = QSpinBox(); self.fallback_unit_seconds.setRange(10, 3600); self.fallback_unit_seconds.setValue(int(settings_repo.get("fallback_review_seconds_per_unit", "90")))
+        self.fallback_page_seconds = QSpinBox(); self.fallback_page_seconds.setRange(5, 1800); self.fallback_page_seconds.setValue(int(settings_repo.get("fallback_review_seconds_per_page", "60")))
         form.addRow("Daily target minutes", self.daily)
         form.addRow("Low retention threshold %", self.min_ret)
         form.addRow("Max new units/day", self.new_cap)
+        form.addRow("Fallback sec/unit", self.fallback_unit_seconds)
+        form.addRow("Fallback sec/page", self.fallback_page_seconds)
         save = QPushButton("Save Settings")
         save.clicked.connect(self.save)
         self.summary = QLabel("")
@@ -721,6 +725,8 @@ class SettingsPage(QWidget):
         self.settings_repo.set("daily_minutes", str(self.daily.value()))
         self.settings_repo.set("min_retention_percent", str(self.min_ret.value()))
         self.settings_repo.set("new_units_cap", str(self.new_cap.value()))
+        self.settings_repo.set("fallback_review_seconds_per_unit", str(self.fallback_unit_seconds.value()))
+        self.settings_repo.set("fallback_review_seconds_per_page", str(self.fallback_page_seconds.value()))
         self.refresh_summary()
 
     def refresh_summary(self):
