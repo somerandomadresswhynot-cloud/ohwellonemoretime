@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -10,8 +11,22 @@ from study_app.persistence.database import Database
 
 
 class SourceRepo:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, library_dir: str | Path = "library"):
         self.db = db
+        self.library_dir = Path(library_dir)
+        self.library_dir.mkdir(parents=True, exist_ok=True)
+
+    def _managed_path_for(self, source_id: int, original_path: str) -> Path:
+        ext = Path(original_path).suffix.lower() or ".pdf"
+        return (self.library_dir / f"{source_id}{ext}").resolve()
+
+    def _copy_to_managed_storage(self, source_id: int, original_path: str) -> Path:
+        src = Path(original_path).resolve()
+        dst = self._managed_path_for(source_id, original_path)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src != dst:
+            shutil.copy2(src, dst)
+        return dst
 
     def list_sources(self, q: str = "") -> list[Source]:
         sql = "SELECT * FROM sources WHERE 1=1"
@@ -46,10 +61,16 @@ class SourceRepo:
         now = utcnow_iso()
         cur = self.db.conn.execute(
             "INSERT INTO sources(title,file_path,file_size,page_count,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            (title, file_path, file_size, page_count, now, now),
+            (title, "", file_size, page_count, now, now),
+        )
+        source_id = int(cur.lastrowid)
+        managed_path = self._copy_to_managed_storage(source_id, file_path)
+        self.db.conn.execute(
+            "UPDATE sources SET file_path=? WHERE id=?",
+            (str(managed_path), source_id),
         )
         self.db.conn.commit()
-        return int(cur.lastrowid)
+        return source_id
 
     def update_metadata(self, source_id: int, title: str, is_active: bool) -> None:
         self.db.conn.execute(
@@ -59,9 +80,17 @@ class SourceRepo:
         self.db.conn.commit()
 
     def relink(self, source_id: int, file_path: str, file_size: int, page_count: int) -> None:
+        managed_path = self._copy_to_managed_storage(source_id, file_path)
         self.db.conn.execute(
             "UPDATE sources SET file_path=?, file_size=?, page_count=?, updated_at=? WHERE id=?",
-            (file_path, file_size, page_count, utcnow_iso(), source_id),
+            (str(managed_path), file_size, page_count, utcnow_iso(), source_id),
+        )
+        self.db.conn.commit()
+
+    def relink_external(self, source_id: int, file_path: str, file_size: int, page_count: int) -> None:
+        self.db.conn.execute(
+            "UPDATE sources SET file_path=?, file_size=?, page_count=?, updated_at=? WHERE id=?",
+            (str(Path(file_path).resolve()), file_size, page_count, utcnow_iso(), source_id),
         )
         self.db.conn.commit()
 

@@ -125,7 +125,8 @@ class SourcesPage(QWidget):
         try:
             size, pages = self.pdf_service.inspect(path)
             source_id = self.source_repo.create(Path(path).stem, path, size, pages)
-            entries = self.pdf_service.generate_outline_entries(path, Path(path).stem, pages)
+            source = self.source_repo.get(source_id)
+            entries = self.pdf_service.generate_outline_entries(source.file_path, Path(path).stem, pages)
             self.outline_repo.replace_outline(source_id, entries)
             self.refresh()
             self.library_changed.emit()
@@ -150,7 +151,17 @@ class SourcesPage(QWidget):
         if not path:
             return
         size, pages = self.pdf_service.inspect(path)
-        self.source_repo.relink(self.current_source_id, path, size, pages)
+        choice = QMessageBox.question(
+            self,
+            "Relink PDF",
+            "Copy this PDF into managed library storage?\nChoose No to keep an external file link.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if choice == QMessageBox.Yes:
+            self.source_repo.relink(self.current_source_id, path, size, pages)
+        else:
+            self.source_repo.relink_external(self.current_source_id, path, size, pages)
         self.refresh()
         self.library_changed.emit()
 
