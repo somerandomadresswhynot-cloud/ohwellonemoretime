@@ -125,14 +125,26 @@ class ReviewRepo:
 
     def due_units(self, now_iso: str) -> list[UnitView]:
         rows = self.db.conn.execute(
-            """SELECT u.*, s.title AS source_title FROM units u
+            """WITH RECURSIVE node_path(node_id, path) AS (
+                SELECT n.id, n.title
+                FROM outline_nodes n
+                WHERE n.parent_id IS NULL
+                UNION ALL
+                SELECT c.id, node_path.path || ' › ' || c.title
+                FROM outline_nodes c
+                JOIN node_path ON c.parent_id=node_path.node_id
+            )
+            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path
+            FROM units u
             JOIN sources s ON s.id=u.source_id
+            LEFT JOIN node_path ON node_path.node_id=u.node_id
             WHERE s.is_active=1 AND u.queue_enabled=1 AND (u.next_review_at IS NULL OR u.next_review_at<=?)
             ORDER BY COALESCE(u.next_review_at,'') ASC""",
             (now_iso,),
         ).fetchall()
         return [UnitView(
-            unit_id=r["id"], source_id=r["source_id"], source_title=r["source_title"], title=r["title"],
+            unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
+            title=r["title"], hierarchy_path=r["hierarchy_path"],
             start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
             next_review_at=r["next_review_at"], last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
         ) for r in rows]

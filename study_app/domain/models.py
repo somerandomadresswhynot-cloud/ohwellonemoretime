@@ -35,9 +35,11 @@ class OutlineNode:
 @dataclass
 class UnitView:
     unit_id: int
+    node_id: int
     source_id: int
     source_title: str
     title: str
+    hierarchy_path: str
     start_page: int
     end_page: int
     queue_enabled: bool

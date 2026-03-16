@@ -679,8 +679,11 @@ class StudyQueuePage(QWidget):
         title.setObjectName("tileTitle")
         title.setWordWrap(True)
 
-        meta = QLabel(f"{unit.source_title} · reviews: {unit.review_count}")
+        hierarchy_tail = unit.hierarchy_path
+        source_prefix = f"{unit.source_title}"
+        meta = QLabel(f"{source_prefix} · {hierarchy_tail} · reviews: {unit.review_count}")
         meta.setObjectName("tileMeta")
+        meta.setWordWrap(True)
 
         badge_row = QHBoxLayout()
         badge_row.setSpacing(6)
