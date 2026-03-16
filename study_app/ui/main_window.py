@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QFormLayout,
@@ -34,9 +35,17 @@ from PySide6.QtWidgets import (
 from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
-from study_app.services.scheduler import choose_new_units_allowed, compute_next, retention_estimate
+from study_app.services.queue_planner import plan_session_queue
+from study_app.services.scheduler import allocate_new_units, compute_next, recommend_new_units_with_guardrail, retention_estimate
 from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
+
+
+def _enable_smooth_scroll(view: QAbstractItemView) -> None:
+    view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+    view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+    view.verticalScrollBar().setSingleStep(18)
+    view.horizontalScrollBar().setSingleStep(18)
 
 
 class SourcesPage(QWidget):
@@ -55,6 +64,7 @@ class SourcesPage(QWidget):
         search.textChanged.connect(self.refresh)
         self.search = search
         self.list = QListWidget()
+        _enable_smooth_scroll(self.list)
         self.list.currentRowChanged.connect(self._on_select)
         self.list.itemDoubleClicked.connect(self._open_current_workspace)
 
@@ -185,6 +195,7 @@ class SourceWorkspace(QMainWindow):
 
         self.search = QLineEdit(); self.search.setPlaceholderText("Filter outline")
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Outline", "Queue"])
+        _enable_smooth_scroll(self.tree)
         self.tree.itemSelectionChanged.connect(self.on_item_select)
         self.tree.itemChanged.connect(self.on_item_changed)
         self.tree.itemDoubleClicked.connect(lambda *_: self.jump_to_selected())
@@ -211,7 +222,9 @@ class SourceWorkspace(QMainWindow):
         self.insights = QLabel()
         self.insights.setWordWrap(True)
         self.unit_hl_list = QListWidget()
+        _enable_smooth_scroll(self.unit_hl_list)
         self.source_hl_tree = QTreeWidget(); self.source_hl_tree.setHeaderLabels(["Page", "Context", "Quote"])
+        _enable_smooth_scroll(self.source_hl_tree)
         self.source_hl_tree.itemDoubleClicked.connect(self.on_source_highlight_double_clicked)
         tabs = QTabWidget()
         tab_ins = QWidget(); l1 = QVBoxLayout(tab_ins); l1.addWidget(self.insights); l1.addStretch()
@@ -478,9 +491,15 @@ class StudyQueuePage(QWidget):
         self.source_path_cache: dict[int, str] = {}
 
         self.list = QListWidget()
+        _enable_smooth_scroll(self.list)
+        self.list.setSpacing(6)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.viewport().installEventFilter(self)
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
-        left = QVBoxLayout(); left.addWidget(QLabel("Due Units")); left.addWidget(self.list)
+        self.queue_banner = QLabel("")
+        self.queue_banner.setWordWrap(True)
+        left = QVBoxLayout(); left.addWidget(QLabel("Due Units")); left.addWidget(self.queue_banner); left.addWidget(self.list)
 
         self.title = QLabel("No unit selected")
         self.timer_lbl = QLabel("00:00")
@@ -536,6 +555,8 @@ class StudyQueuePage(QWidget):
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
+        controls_scroll.verticalScrollBar().setSingleStep(18)
+        controls_scroll.horizontalScrollBar().setSingleStep(18)
         controls_scroll.setWidget(content)
 
         split = QSplitter(); lw = QWidget(); lw.setLayout(left)
@@ -597,20 +618,163 @@ class StudyQueuePage(QWidget):
         self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
 
     def refresh(self):
-        units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
-        self.units = units
+        due_units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        available_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        plan = plan_session_queue(due_units, available_minutes, self._estimate_review_seconds)
+        self.units = plan.selected_units
         self.list.clear()
         self.source_path_cache = {}
-        for u in units:
-            item = QListWidgetItem(f"{u.source_title} · {u.title} [{u.start_page}-{u.end_page}] ({u.review_count}x)")
+        self.queue_banner.setText(
+            f"Showing {len(self.units)}/{len(due_units)} due units · "
+            f"Projected {plan.projected_minutes:.1f} min"
+            + (f" · {plan.overflow_count} deferred" if plan.overflow_count else "")
+        )
+        for u in self.units:
+            est_seconds = self._estimate_review_seconds(u)
+            retention = self._estimate_retention(u)
+            tile = self._build_queue_tile(u, est_seconds, retention)
+            item = QListWidgetItem()
             self.list.addItem(item)
+            self.list.setItemWidget(item, tile)
             if u.source_id not in self.source_path_cache:
                 s = self.source_repo.get(u.source_id)
                 if s:
                     self.source_path_cache[u.source_id] = s.file_path
                     self.pdf.prime_path(s.file_path)
+        self._relayout_queue_tiles()
         if self.list.count() > 0:
             self.list.setCurrentRow(0)
+        else:
+            self.active_unit = None
+            self.title.setText("No unit selected")
+
+    def eventFilter(self, obj, event):
+        if obj is self.list.viewport() and event.type() == QEvent.Resize:
+            self._relayout_queue_tiles()
+        return super().eventFilter(obj, event)
+
+    def _relayout_queue_tiles(self):
+        tile_w = max(220, self.list.viewport().width() - 14)
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            tile = self.list.itemWidget(item)
+            if not tile:
+                continue
+            tile.setFixedWidth(tile_w)
+            tile.adjustSize()
+            item.setSizeHint(self._queue_tile_size_hint(tile, tile_w))
+
+    def _estimate_review_seconds(self, unit) -> float:
+        pages = max(1, (unit.end_page - unit.start_page) + 1)
+        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
+        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        if int(unit.review_count or 0) == 0:
+            return max(1.0, pages * fallback_per_page, fallback_per_unit)
+
+        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit.unit_id)
+        if unit_avg is not None:
+            return unit_avg
+
+        source_avg = self.review_repo.avg_elapsed_seconds_for_source(unit.source_id)
+        if source_avg is not None:
+            return source_avg
+
+        global_avg = self.review_repo.avg_elapsed_seconds_global()
+        if global_avg is not None:
+            return global_avg
+        return max(1.0, pages * fallback_per_page, fallback_per_unit)
+
+    def _estimate_retention(self, unit) -> float | None:
+        if int(unit.review_count or 0) == 0:
+            return None
+        row = self.review_repo.unit_by_id(unit.unit_id)
+        if not row:
+            return None
+        return retention_estimate(row, datetime.utcnow())
+
+    def _queue_tile_size_hint(self, tile: QWidget, width: int) -> QSize:
+        min_h = 110
+        max_h = 360
+        fallback_h = 136
+        try:
+            size = tile.sizeHint()
+            height = max(min_h, min(max_h, int(size.height()) + 8))
+            return QSize(max(220, width), height)
+        except Exception:
+            return QSize(max(220, width), fallback_h)
+
+    def _build_queue_tile(self, unit, est_seconds: float, retention: float | None) -> QWidget:
+        root = QFrame()
+        root.setObjectName("queueTile")
+        root.setStyleSheet(
+            "#queueTile { border: 1px solid #2e3a46; border-radius: 10px; padding: 8px; }"
+            "QLabel#tileTitle { font-size: 15px; font-weight: 600; color: #f2f5f7; }"
+            "QLabel#tileMeta { color: #9aa7b2; font-size: 11px; }"
+            "QLabel#badge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d8e1e8; background: #2b3440; }"
+        )
+
+        lay = QVBoxLayout(root)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        title = QLabel(unit.title)
+        title.setObjectName("tileTitle")
+        title.setWordWrap(True)
+
+        hierarchy_tail = unit.hierarchy_path
+        source_prefix = f"{unit.source_title}"
+        meta = QLabel(f"{source_prefix} · {hierarchy_tail} · reviews: {unit.review_count}")
+        meta.setObjectName("tileMeta")
+        meta.setWordWrap(True)
+
+        badge_row = QHBoxLayout()
+        badge_row.setSpacing(6)
+        pages = QLabel(f"pages {unit.start_page}-{unit.end_page}"); pages.setObjectName("badge")
+        mins = QLabel(self._format_estimated_time(est_seconds)); mins.setObjectName("badge")
+        if retention is None:
+            retention_lbl = QLabel("new")
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d9e8ff; background: #22345a;")
+            ret_pct = None
+        else:
+            ret_pct = max(1, min(99, int(round(retention * 100))))
+            retention_lbl = QLabel(f"retention {ret_pct}%")
+        retention_lbl.setObjectName("badge")
+        if ret_pct is None:
+            pass
+        elif ret_pct < 35:
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffd7d7; background: #5a2222;")
+        elif ret_pct < 60:
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffeecf; background: #5a4a22;")
+        else:
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d2f2dc; background: #1f4d32;")
+
+        for w in [pages, mins, retention_lbl]:
+            badge_row.addWidget(w)
+        badge_row.addStretch()
+
+        retention_text = "new" if retention is None else f"{int(round(max(0.01, min(0.99, retention)) * 100))}%"
+        hover = (
+            f"Source: {unit.source_title}\n"
+            f"Hierarchy: {unit.hierarchy_path}\n"
+            f"Pages: {unit.start_page}-{unit.end_page}\n"
+            f"Estimated review: {self._format_estimated_time(est_seconds)}\n"
+            f"Retention: {retention_text}\n"
+            f"Reviews done: {unit.review_count}\n"
+            f"Next due: {unit.next_review_at or 'now'}"
+        )
+        root.setToolTip(hover)
+
+        lay.addWidget(title)
+        lay.addWidget(meta)
+        lay.addLayout(badge_row)
+        return root
+
+    def _format_estimated_time(self, est_seconds: float) -> str:
+        seconds = max(1, int(round(est_seconds)))
+        if seconds < 90:
+            return f"~{seconds}s"
+        mins = seconds / 60.0
+        return f"~{mins:.1f} min"
 
     def pick_unit(self, idx):
         self._save_current_draft()
@@ -700,6 +864,8 @@ class StudyQueuePage(QWidget):
 
 
 class SettingsPage(QWidget):
+    settings_changed = Signal()
+
     def __init__(self, settings_repo: SettingsRepo, review_repo: ReviewRepo):
         super().__init__()
         self.settings_repo = settings_repo
@@ -708,9 +874,13 @@ class SettingsPage(QWidget):
         self.daily = QSpinBox(); self.daily.setRange(15, 600); self.daily.setValue(int(settings_repo.get("daily_minutes", "90")))
         self.min_ret = QSpinBox(); self.min_ret.setRange(10, 90); self.min_ret.setValue(int(settings_repo.get("min_retention_percent", "45")))
         self.new_cap = QSpinBox(); self.new_cap.setRange(0, 50); self.new_cap.setValue(int(settings_repo.get("new_units_cap", "6")))
+        self.fallback_unit_seconds = QSpinBox(); self.fallback_unit_seconds.setRange(10, 3600); self.fallback_unit_seconds.setValue(int(settings_repo.get("fallback_review_seconds_per_unit", "90")))
+        self.fallback_page_seconds = QSpinBox(); self.fallback_page_seconds.setRange(5, 1800); self.fallback_page_seconds.setValue(int(settings_repo.get("fallback_review_seconds_per_page", "60")))
         form.addRow("Daily target minutes", self.daily)
         form.addRow("Low retention threshold %", self.min_ret)
         form.addRow("Max new units/day", self.new_cap)
+        form.addRow("Fallback sec/unit", self.fallback_unit_seconds)
+        form.addRow("Fallback sec/page", self.fallback_page_seconds)
         save = QPushButton("Save Settings")
         save.clicked.connect(self.save)
         self.summary = QLabel("")
@@ -721,12 +891,63 @@ class SettingsPage(QWidget):
         self.settings_repo.set("daily_minutes", str(self.daily.value()))
         self.settings_repo.set("min_retention_percent", str(self.min_ret.value()))
         self.settings_repo.set("new_units_cap", str(self.new_cap.value()))
+        self.settings_repo.set("fallback_review_seconds_per_unit", str(self.fallback_unit_seconds.value()))
+        self.settings_repo.set("fallback_review_seconds_per_page", str(self.fallback_page_seconds.value()))
         self.refresh_summary()
+        self.settings_changed.emit()
 
     def refresh_summary(self):
-        due = len(self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds")))
-        allow_new = choose_new_units_allowed(due, self.daily.value(), 90)
-        self.summary.setText(f"Due now: {due}\nScheduler recommendation: {'allow new units' if allow_new else 'review-only day'}")
+        due_units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        due_review_minutes = sum(self._estimate_review_seconds(u) for u in due_units) / 60.0
+        avg_new_unit_seconds = self.review_repo.avg_elapsed_seconds_global() or float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        allocation = allocate_new_units(
+            due_review_minutes=due_review_minutes,
+            daily_minutes=self.daily.value(),
+            avg_new_unit_seconds=avg_new_unit_seconds,
+            new_units_cap=self.new_cap.value(),
+        )
+        guardrail = recommend_new_units_with_guardrail(
+            due_review_minutes=due_review_minutes,
+            daily_minutes=self.daily.value(),
+            avg_new_unit_seconds=avg_new_unit_seconds,
+            new_units_cap=self.new_cap.value(),
+            horizon_days=10,
+            safety_threshold=0.9,
+        )
+        recommendation = "review-only day" if guardrail.recommended_new_units == 0 else f"up to {guardrail.recommended_new_units} new units"
+        explanation = ""
+        if guardrail.limiting_day is not None and guardrail.recommended_new_units < allocation.suggested_new_units:
+            explanation = (
+                f"\nGuardrail: capped to avoid day {guardrail.limiting_day} exceeding ~90% budget "
+                f"({guardrail.limiting_projected_minutes:.1f} min projected)."
+            )
+        self.summary.setText(
+            f"Due now: {len(due_units)}\n"
+            f"Projected review load: {allocation.review_minutes:.1f} min\n"
+            f"Free budget after reviews: {allocation.free_minutes:.1f} min\n"
+            f"Scheduler recommendation: {recommendation}"
+            f"{explanation}"
+        )
+
+    def _estimate_review_seconds(self, unit) -> float:
+        pages = max(1, (unit.end_page - unit.start_page) + 1)
+        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
+        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        if int(unit.review_count or 0) == 0:
+            return max(1.0, pages * fallback_per_page, fallback_per_unit)
+
+        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit.unit_id)
+        if unit_avg is not None:
+            return unit_avg
+
+        source_avg = self.review_repo.avg_elapsed_seconds_for_source(unit.source_id)
+        if source_avg is not None:
+            return source_avg
+
+        global_avg = self.review_repo.avg_elapsed_seconds_global()
+        if global_avg is not None:
+            return global_avg
+        return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
 
 class MainWindow(QMainWindow):
@@ -755,6 +976,7 @@ class MainWindow(QMainWindow):
 
         self.sources.open_workspace.connect(self.open_workspace)
         self.sources.library_changed.connect(self.sync_queue_views)
+        self.settings.settings_changed.connect(self.sync_queue_views)
         self._workspace_windows = []
 
     def sync_queue_views(self):

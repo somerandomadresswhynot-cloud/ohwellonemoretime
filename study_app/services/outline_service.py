@@ -46,7 +46,28 @@ def parse_outline_text(text: str) -> tuple[list[dict], list[ParseError]]:
             "is_unit": bool(sp),
             "queue_enabled": True,
         })
-    return entries, errors
+    return _mark_leaf_units(entries), errors
+
+
+def _mark_leaf_units(entries: list[dict]) -> list[dict]:
+    out = [dict(e) for e in entries]
+    for i, entry in enumerate(out):
+        if not entry.get("start_page"):
+            entry["is_unit"] = False
+            continue
+
+        depth = int(entry.get("depth") or 1)
+        has_child = False
+        j = i + 1
+        while j < len(out):
+            next_depth = int(out[j].get("depth") or 1)
+            if next_depth <= depth:
+                break
+            has_child = True
+            j += 1
+
+        entry["is_unit"] = not has_child
+    return out
 
 
 def seed_outline_from_pages(page_count: int, title: str) -> list[dict]:
@@ -100,7 +121,7 @@ def entries_from_bookmarks(bookmarks: list[tuple[int, str, int]], page_count: in
             "is_unit": True,
             "queue_enabled": True,
         })
-    return out
+    return _mark_leaf_units(out)
 
 
 def entries_from_headings(headings: list[tuple[int, str, int]], page_count: int, root_title: str) -> list[dict]:
@@ -126,4 +147,4 @@ def entries_from_headings(headings: list[tuple[int, str, int]], page_count: int,
             "is_unit": True,
             "queue_enabled": True,
         })
-    return out
+    return _mark_leaf_units(out)
