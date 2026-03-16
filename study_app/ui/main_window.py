@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import math
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QBrush, QFont, QFontMetrics
+from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -616,10 +615,14 @@ class StudyQueuePage(QWidget):
         for u in self.units:
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
+            tile = self._build_queue_tile(u, est_seconds, retention)
+            tile_w = max(220, self.list.viewport().width() - 18)
+            tile.setFixedWidth(tile_w)
+            tile.adjustSize()
             item = QListWidgetItem()
-            item.setSizeHint(self._queue_tile_size_hint(u))
+            item.setSizeHint(self._queue_tile_size_hint(tile))
             self.list.addItem(item)
-            self.list.setItemWidget(item, self._build_queue_tile(u, est_seconds, retention))
+            self.list.setItemWidget(item, tile)
             if u.source_id not in self.source_path_cache:
                 s = self.source_repo.get(u.source_id)
                 if s:
@@ -659,27 +662,15 @@ class StudyQueuePage(QWidget):
             return None
         return retention_estimate(row, datetime.utcnow())
 
-    def _queue_tile_size_hint(self, unit) -> QSize:
-        min_h = 96
-        max_h = 180
-        fallback_h = 112
+    def _queue_tile_size_hint(self, tile: QWidget) -> QSize:
+        min_h = 110
+        max_h = 360
+        fallback_h = 136
         try:
-            viewport_w = max(220, self.list.viewport().width() - 24)
-            content_w = max(180, viewport_w - 16)
-
-            title_font = QFont(self.font())
-            title_font.setPointSize(max(11, self.font().pointSize() + 2))
-            title_fm = QFontMetrics(title_font)
-            title_h = title_fm.boundingRect(0, 0, content_w, 1000, Qt.TextWordWrap, unit.title).height()
-
-            meta_font = QFont(self.font())
-            meta_font.setPointSize(max(9, self.font().pointSize() - 1))
-            meta_fm = QFontMetrics(meta_font)
-            meta_text = f"{unit.source_title} · {unit.hierarchy_path} · reviews: {unit.review_count}"
-            meta_h = meta_fm.boundingRect(0, 0, content_w, 1000, Qt.TextWordWrap, meta_text).height()
-
-            est_h = 24 + title_h + meta_h + 28
-            return QSize(viewport_w, max(min_h, min(max_h, int(math.ceil(est_h)))))
+            size = tile.sizeHint()
+            width = max(220, int(size.width()))
+            height = max(min_h, min(max_h, int(size.height()) + 8))
+            return QSize(width, height)
         except Exception:
             return QSize(260, fallback_h)
 
