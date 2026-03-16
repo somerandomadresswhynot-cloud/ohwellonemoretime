@@ -32,6 +32,13 @@ class QueuePlannerTests(unittest.TestCase):
         self.assertEqual(plan.overflow_count, 0)
         self.assertAlmostEqual(plan.projected_minutes, 3 / 60)
 
+    def test_skips_oversized_unit_and_keeps_scanning(self):
+        due = [FakeUnit("A", 60), FakeUnit("B", 600), FakeUnit("C", 60), FakeUnit("D", 60)]
+        plan = plan_session_queue(due, available_minutes=4, estimate_seconds=lambda u: u.sec)
+        self.assertEqual([u.name for u in plan.selected_units], ["A", "C", "D"])
+        self.assertEqual(plan.overflow_count, 1)
+        self.assertAlmostEqual(plan.projected_minutes, 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

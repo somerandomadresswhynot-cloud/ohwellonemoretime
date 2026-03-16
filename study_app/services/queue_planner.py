@@ -35,7 +35,9 @@ def plan_session_queue(
             selected.append(unit)
             used_seconds += estimated
         else:
-            break
+            # Skip oversized items and keep scanning so one large early unit
+            # does not block many small due units that still fit the session.
+            continue
 
     overflow_count = max(0, len(due_units) - len(selected))
     projected_minutes = used_seconds / 60.0
@@ -44,4 +46,3 @@ def plan_session_queue(
         overflow_count=overflow_count,
         projected_minutes=projected_minutes,
     )
-
