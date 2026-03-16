@@ -35,7 +35,7 @@ from study_app.persistence.repositories import HighlightRepo, OutlineRepo, Revie
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
-from study_app.services.scheduler import allocate_new_units, compute_next, retention_estimate
+from study_app.services.scheduler import allocate_new_units, compute_next, recommend_new_units_with_guardrail, retention_estimate
 from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 
@@ -773,12 +773,27 @@ class SettingsPage(QWidget):
             avg_new_unit_seconds=avg_new_unit_seconds,
             new_units_cap=self.new_cap.value(),
         )
-        recommendation = "review-only day" if allocation.review_only else f"up to {allocation.suggested_new_units} new units"
+        guardrail = recommend_new_units_with_guardrail(
+            due_review_minutes=due_review_minutes,
+            daily_minutes=self.daily.value(),
+            avg_new_unit_seconds=avg_new_unit_seconds,
+            new_units_cap=self.new_cap.value(),
+            horizon_days=10,
+            safety_threshold=0.9,
+        )
+        recommendation = "review-only day" if guardrail.recommended_new_units == 0 else f"up to {guardrail.recommended_new_units} new units"
+        explanation = ""
+        if guardrail.limiting_day is not None and guardrail.recommended_new_units < allocation.suggested_new_units:
+            explanation = (
+                f"\nGuardrail: capped to avoid day {guardrail.limiting_day} exceeding ~90% budget "
+                f"({guardrail.limiting_projected_minutes:.1f} min projected)."
+            )
         self.summary.setText(
             f"Due now: {len(due_units)}\n"
             f"Projected review load: {allocation.review_minutes:.1f} min\n"
             f"Free budget after reviews: {allocation.free_minutes:.1f} min\n"
             f"Scheduler recommendation: {recommendation}"
+            f"{explanation}"
         )
 
     def _estimate_review_seconds(self, unit) -> float:
