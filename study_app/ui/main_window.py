@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication,
@@ -481,6 +481,7 @@ class StudyQueuePage(QWidget):
         self.list = QListWidget()
         self.list.setSpacing(6)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.viewport().installEventFilter(self)
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
         self.queue_banner = QLabel("")
@@ -617,11 +618,7 @@ class StudyQueuePage(QWidget):
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
             tile = self._build_queue_tile(u, est_seconds, retention)
-            tile_w = max(220, self.list.viewport().width() - 18)
-            tile.setFixedWidth(tile_w)
-            tile.adjustSize()
             item = QListWidgetItem()
-            item.setSizeHint(self._queue_tile_size_hint(tile))
             self.list.addItem(item)
             self.list.setItemWidget(item, tile)
             if u.source_id not in self.source_path_cache:
@@ -629,11 +626,28 @@ class StudyQueuePage(QWidget):
                 if s:
                     self.source_path_cache[u.source_id] = s.file_path
                     self.pdf.prime_path(s.file_path)
+        self._relayout_queue_tiles()
         if self.list.count() > 0:
             self.list.setCurrentRow(0)
         else:
             self.active_unit = None
             self.title.setText("No unit selected")
+
+    def eventFilter(self, obj, event):
+        if obj is self.list.viewport() and event.type() == QEvent.Resize:
+            self._relayout_queue_tiles()
+        return super().eventFilter(obj, event)
+
+    def _relayout_queue_tiles(self):
+        tile_w = max(220, self.list.viewport().width() - 14)
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            tile = self.list.itemWidget(item)
+            if not tile:
+                continue
+            tile.setFixedWidth(tile_w)
+            tile.adjustSize()
+            item.setSizeHint(self._queue_tile_size_hint(tile, tile_w))
 
     def _estimate_review_seconds(self, unit) -> float:
         pages = max(1, (unit.end_page - unit.start_page) + 1)
@@ -663,17 +677,16 @@ class StudyQueuePage(QWidget):
             return None
         return retention_estimate(row, datetime.utcnow())
 
-    def _queue_tile_size_hint(self, tile: QWidget) -> QSize:
+    def _queue_tile_size_hint(self, tile: QWidget, width: int) -> QSize:
         min_h = 110
         max_h = 360
         fallback_h = 136
         try:
             size = tile.sizeHint()
-            width = max(220, int(size.width()))
             height = max(min_h, min(max_h, int(size.height()) + 8))
-            return QSize(width, height)
+            return QSize(max(220, width), height)
         except Exception:
-            return QSize(260, fallback_h)
+            return QSize(max(220, width), fallback_h)
 
     def _build_queue_tile(self, unit, est_seconds: float, retention: float | None) -> QWidget:
         root = QFrame()
