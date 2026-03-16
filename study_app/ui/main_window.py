@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
+from study_app.services.queue_planner import plan_session_queue
 from study_app.services.scheduler import choose_new_units_allowed, compute_next, retention_estimate
 from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
@@ -480,7 +481,9 @@ class StudyQueuePage(QWidget):
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
-        left = QVBoxLayout(); left.addWidget(QLabel("Due Units")); left.addWidget(self.list)
+        self.queue_banner = QLabel("")
+        self.queue_banner.setWordWrap(True)
+        left = QVBoxLayout(); left.addWidget(QLabel("Due Units")); left.addWidget(self.queue_banner); left.addWidget(self.list)
 
         self.title = QLabel("No unit selected")
         self.timer_lbl = QLabel("00:00")
@@ -597,11 +600,18 @@ class StudyQueuePage(QWidget):
         self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
 
     def refresh(self):
-        units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
-        self.units = units
+        due_units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        available_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        plan = plan_session_queue(due_units, available_minutes, self._estimate_review_seconds)
+        self.units = plan.selected_units
         self.list.clear()
         self.source_path_cache = {}
-        for u in units:
+        self.queue_banner.setText(
+            f"Showing {len(self.units)}/{len(due_units)} due units · "
+            f"Projected {plan.projected_minutes:.1f} min"
+            + (f" · {plan.overflow_count} deferred" if plan.overflow_count else "")
+        )
+        for u in self.units:
             item = QListWidgetItem(f"{u.source_title} · {u.title} [{u.start_page}-{u.end_page}] ({u.review_count}x)")
             self.list.addItem(item)
             if u.source_id not in self.source_path_cache:
@@ -611,6 +621,27 @@ class StudyQueuePage(QWidget):
                     self.pdf.prime_path(s.file_path)
         if self.list.count() > 0:
             self.list.setCurrentRow(0)
+        else:
+            self.active_unit = None
+            self.title.setText("No unit selected")
+
+    def _estimate_review_seconds(self, unit) -> float:
+        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit.unit_id)
+        if unit_avg is not None:
+            return unit_avg
+
+        source_avg = self.review_repo.avg_elapsed_seconds_for_source(unit.source_id)
+        if source_avg is not None:
+            return source_avg
+
+        global_avg = self.review_repo.avg_elapsed_seconds_global()
+        if global_avg is not None:
+            return global_avg
+
+        pages = max(1, (unit.end_page - unit.start_page) + 1)
+        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
+        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
     def pick_unit(self, idx):
         self._save_current_draft()
