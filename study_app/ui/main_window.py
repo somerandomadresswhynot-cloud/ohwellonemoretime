@@ -479,6 +479,7 @@ class StudyQueuePage(QWidget):
         self.source_path_cache: dict[int, str] = {}
 
         self.list = QListWidget()
+        self.list.setSpacing(6)
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
         self.queue_banner = QLabel("")
@@ -630,6 +631,12 @@ class StudyQueuePage(QWidget):
             self.title.setText("No unit selected")
 
     def _estimate_review_seconds(self, unit) -> float:
+        pages = max(1, (unit.end_page - unit.start_page) + 1)
+        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
+        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        if int(unit.review_count or 0) == 0:
+            return max(1.0, pages * fallback_per_page, fallback_per_unit)
+
         unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit.unit_id)
         if unit_avg is not None:
             return unit_avg
@@ -641,22 +648,20 @@ class StudyQueuePage(QWidget):
         global_avg = self.review_repo.avg_elapsed_seconds_global()
         if global_avg is not None:
             return global_avg
-
-        pages = max(1, (unit.end_page - unit.start_page) + 1)
-        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
-        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
-    def _estimate_retention(self, unit) -> float:
+    def _estimate_retention(self, unit) -> float | None:
+        if int(unit.review_count or 0) == 0:
+            return None
         row = self.review_repo.unit_by_id(unit.unit_id)
         if not row:
-            return 0.15
+            return None
         return retention_estimate(row, datetime.utcnow())
 
     def _queue_tile_size_hint(self):
         return QSize(260, 96)
 
-    def _build_queue_tile(self, unit, est_seconds: float, retention: float) -> QWidget:
+    def _build_queue_tile(self, unit, est_seconds: float, retention: float | None) -> QWidget:
         root = QFrame()
         root.setObjectName("queueTile")
         root.setStyleSheet(
@@ -680,11 +685,18 @@ class StudyQueuePage(QWidget):
         badge_row = QHBoxLayout()
         badge_row.setSpacing(6)
         pages = QLabel(f"pages {unit.start_page}-{unit.end_page}"); pages.setObjectName("badge")
-        mins = QLabel(f"~{max(1, round(est_seconds / 60))} min"); mins.setObjectName("badge")
-        ret_pct = max(1, min(99, int(round(retention * 100))))
-        retention_lbl = QLabel(f"retention {ret_pct}%")
+        mins = QLabel(self._format_estimated_time(est_seconds)); mins.setObjectName("badge")
+        if retention is None:
+            retention_lbl = QLabel("new")
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d9e8ff; background: #22345a;")
+            ret_pct = None
+        else:
+            ret_pct = max(1, min(99, int(round(retention * 100))))
+            retention_lbl = QLabel(f"retention {ret_pct}%")
         retention_lbl.setObjectName("badge")
-        if ret_pct < 35:
+        if ret_pct is None:
+            pass
+        elif ret_pct < 35:
             retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffd7d7; background: #5a2222;")
         elif ret_pct < 60:
             retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffeecf; background: #5a4a22;")
@@ -699,6 +711,13 @@ class StudyQueuePage(QWidget):
         lay.addWidget(meta)
         lay.addLayout(badge_row)
         return root
+
+    def _format_estimated_time(self, est_seconds: float) -> str:
+        seconds = max(1, int(round(est_seconds)))
+        if seconds < 90:
+            return f"~{seconds}s"
+        mins = seconds / 60.0
+        return f"~{mins:.1f} min"
 
     def pick_unit(self, idx):
         self._save_current_draft()
@@ -854,6 +873,12 @@ class SettingsPage(QWidget):
         )
 
     def _estimate_review_seconds(self, unit) -> float:
+        pages = max(1, (unit.end_page - unit.start_page) + 1)
+        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
+        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        if int(unit.review_count or 0) == 0:
+            return max(1.0, pages * fallback_per_page, fallback_per_unit)
+
         unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit.unit_id)
         if unit_avg is not None:
             return unit_avg
@@ -865,10 +890,6 @@ class SettingsPage(QWidget):
         global_avg = self.review_repo.avg_elapsed_seconds_global()
         if global_avg is not None:
             return global_avg
-
-        pages = max(1, (unit.end_page - unit.start_page) + 1)
-        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
-        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
 
