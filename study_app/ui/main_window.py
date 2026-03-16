@@ -35,7 +35,7 @@ from study_app.persistence.repositories import HighlightRepo, OutlineRepo, Revie
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
-from study_app.services.scheduler import choose_new_units_allowed, compute_next, retention_estimate
+from study_app.services.scheduler import allocate_new_units, compute_next, retention_estimate
 from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 
@@ -764,9 +764,40 @@ class SettingsPage(QWidget):
         self.settings_changed.emit()
 
     def refresh_summary(self):
-        due = len(self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds")))
-        allow_new = choose_new_units_allowed(due, self.daily.value(), 90)
-        self.summary.setText(f"Due now: {due}\nScheduler recommendation: {'allow new units' if allow_new else 'review-only day'}")
+        due_units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        due_review_minutes = sum(self._estimate_review_seconds(u) for u in due_units) / 60.0
+        avg_new_unit_seconds = self.review_repo.avg_elapsed_seconds_global() or float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        allocation = allocate_new_units(
+            due_review_minutes=due_review_minutes,
+            daily_minutes=self.daily.value(),
+            avg_new_unit_seconds=avg_new_unit_seconds,
+            new_units_cap=self.new_cap.value(),
+        )
+        recommendation = "review-only day" if allocation.review_only else f"up to {allocation.suggested_new_units} new units"
+        self.summary.setText(
+            f"Due now: {len(due_units)}\n"
+            f"Projected review load: {allocation.review_minutes:.1f} min\n"
+            f"Free budget after reviews: {allocation.free_minutes:.1f} min\n"
+            f"Scheduler recommendation: {recommendation}"
+        )
+
+    def _estimate_review_seconds(self, unit) -> float:
+        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit.unit_id)
+        if unit_avg is not None:
+            return unit_avg
+
+        source_avg = self.review_repo.avg_elapsed_seconds_for_source(unit.source_id)
+        if source_avg is not None:
+            return source_avg
+
+        global_avg = self.review_repo.avg_elapsed_seconds_global()
+        if global_avg is not None:
+            return global_avg
+
+        pages = max(1, (unit.end_page - unit.start_page) + 1)
+        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
+        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
 
 class MainWindow(QMainWindow):

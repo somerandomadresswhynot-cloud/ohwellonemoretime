@@ -21,6 +21,14 @@ class ScheduleResult:
     retention: float
 
 
+@dataclass
+class NewUnitAllocation:
+    review_minutes: float
+    free_minutes: float
+    suggested_new_units: int
+    review_only: bool
+
+
 def compute_next(unit_row, rating: str, now: datetime) -> ScheduleResult:
     prev_interval = float(unit_row["interval_days"] or 0)
     ef = float(unit_row["ease_factor"] or 2.5)
@@ -52,3 +60,25 @@ def choose_new_units_allowed(due_count: int, daily_minutes: int, avg_review_seco
     due_cost = due_count * max(avg_review_seconds, 45) / 60
     projected = due_cost * 1.3
     return projected < daily_minutes * 0.85
+
+
+def allocate_new_units(
+    due_review_minutes: float,
+    daily_minutes: int,
+    avg_new_unit_seconds: float,
+    new_units_cap: int,
+) -> NewUnitAllocation:
+    review_minutes = max(0.0, float(due_review_minutes))
+    session_minutes = max(0.0, float(daily_minutes))
+    free_minutes = max(0.0, session_minutes - review_minutes)
+
+    safe_new_unit_seconds = max(1.0, float(avg_new_unit_seconds))
+    max_by_time = int((free_minutes * 60.0) // safe_new_unit_seconds)
+    suggested_new_units = max(0, min(int(new_units_cap), max_by_time))
+
+    return NewUnitAllocation(
+        review_minutes=review_minutes,
+        free_minutes=free_minutes,
+        suggested_new_units=suggested_new_units,
+        review_only=suggested_new_units == 0,
+    )
