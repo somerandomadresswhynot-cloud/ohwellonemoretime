@@ -109,8 +109,28 @@ class OutlineRepo:
         self.db.conn.commit()
 
     def set_queue_enabled(self, node_id: int, enabled: bool) -> None:
-        self.db.conn.execute("UPDATE outline_nodes SET queue_enabled=? WHERE id=?", (int(enabled), node_id))
-        self.db.conn.execute("UPDATE units SET queue_enabled=? WHERE node_id=?", (int(enabled), node_id))
+        self.db.conn.execute(
+            """WITH RECURSIVE subtree(id) AS (
+                SELECT id FROM outline_nodes WHERE id=?
+                UNION ALL
+                SELECT n.id FROM outline_nodes n
+                JOIN subtree s ON n.parent_id=s.id
+            )
+            UPDATE outline_nodes SET queue_enabled=? WHERE id IN (SELECT id FROM subtree)
+            """,
+            (node_id, int(enabled)),
+        )
+        self.db.conn.execute(
+            """WITH RECURSIVE subtree(id) AS (
+                SELECT id FROM outline_nodes WHERE id=?
+                UNION ALL
+                SELECT n.id FROM outline_nodes n
+                JOIN subtree s ON n.parent_id=s.id
+            )
+            UPDATE units SET queue_enabled=? WHERE node_id IN (SELECT id FROM subtree)
+            """,
+            (node_id, int(enabled)),
+        )
         self.db.conn.commit()
 
     def bulk_set_source(self, source_id: int, enabled: bool) -> None:

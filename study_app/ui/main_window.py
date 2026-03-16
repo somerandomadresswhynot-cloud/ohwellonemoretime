@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -49,13 +50,15 @@ def _enable_smooth_scroll(view: QAbstractItemView) -> None:
 
 
 class SourcesPage(QWidget):
-    open_workspace = Signal(int)
+    queue_changed = Signal()
     library_changed = Signal()
 
-    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, pdf_service: PdfService):
+    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo, pdf_service: PdfService):
         super().__init__()
         self.source_repo = source_repo
         self.outline_repo = outline_repo
+        self._review_repo = review_repo
+        self._highlight_repo = highlight_repo
         self.pdf_service = pdf_service
         self.current_source_id = None
 
@@ -99,13 +102,47 @@ class SourcesPage(QWidget):
         rw = QWidget(); rw.setLayout(right)
         split.addWidget(lw); split.addWidget(rw)
         split.setSizes([700, 300])
+        self.list_view = QWidget()
+        list_view_layout = QVBoxLayout(self.list_view)
+        list_view_layout.setContentsMargins(0, 0, 0, 0)
+        list_view_layout.addWidget(split)
+
+        self.back_btn = QPushButton("← Back to Sources")
+        self.back_btn.clicked.connect(self.show_list)
+        self.workspace_host = QWidget()
+        self.workspace_host_layout = QVBoxLayout(self.workspace_host)
+        self.workspace_host_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.workspace_view = QWidget()
+        workspace_layout = QVBoxLayout(self.workspace_view)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.addWidget(self.back_btn)
+        workspace_layout.addWidget(self.workspace_host)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.list_view)
+        self.stack.addWidget(self.workspace_view)
+
         lay = QVBoxLayout(self)
-        lay.addWidget(split)
+        lay.addWidget(self.stack)
+        self.current_workspace = None
         self.refresh()
 
     def _open_current_workspace(self, *_):
         if self.current_source_id:
-            self.open_workspace.emit(self.current_source_id)
+            self.show_workspace(self.current_source_id)
+
+    def show_workspace(self, source_id: int):
+        if self.current_workspace is not None:
+            self.current_workspace.setParent(None)
+            self.current_workspace.deleteLater()
+        self.current_workspace = SourceWorkspace(source_id, self.source_repo, self.outline_repo, self._review_repo, self._highlight_repo)
+        self.current_workspace.queue_changed.connect(self.queue_changed.emit)
+        self.workspace_host_layout.addWidget(self.current_workspace)
+        self.stack.setCurrentWidget(self.workspace_view)
+
+    def show_list(self):
+        self.stack.setCurrentWidget(self.list_view)
 
     def refresh(self):
         q = self.search.text().strip()
@@ -180,7 +217,7 @@ class SourcesPage(QWidget):
             self.library_changed.emit()
 
 
-class SourceWorkspace(QMainWindow):
+class SourceWorkspace(QWidget):
     queue_changed = Signal()
     def __init__(self, source_id: int, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo):
         super().__init__()
@@ -189,8 +226,7 @@ class SourceWorkspace(QMainWindow):
         self.outline_repo = outline_repo
         self.review_repo = review_repo
         self.highlight_repo = highlight_repo
-        self.setWindowTitle("Source Workspace")
-        root = QWidget(); self.setCentralWidget(root)
+        root = self
         split = QSplitter()
 
         self.search = QLineEdit(); self.search.setPlaceholderText("Filter outline")
@@ -244,6 +280,7 @@ class SourceWorkspace(QMainWindow):
         lay = QHBoxLayout(root); lay.addWidget(split)
 
         self._selected_node = None
+        self._tree_syncing = False
         self.load_source()
 
     def load_source(self):
@@ -257,9 +294,12 @@ class SourceWorkspace(QMainWindow):
     def refresh_tree(self):
         filt = self.search.text().strip().lower()
         rows = self.outline_repo.nodes_for_source(self.source_id)
+        self._tree_syncing = True
         self.tree.blockSignals(True)
         self.tree.clear()
         id_to_item = {}
+        child_ids: dict[int, list[int]] = {}
+        queue_by_id: dict[int, bool] = {}
         for r in rows:
             if filt and filt not in r["title"].lower():
                 continue
@@ -269,16 +309,38 @@ class SourceWorkspace(QMainWindow):
             item = QTreeWidgetItem([txt, "on" if r["queue_enabled"] else "off"])
             item.setData(0, 256, r["id"])
             item.setData(0, 257, r["start_page"])
+            item.setData(0, 258, "unit" if r["is_unit"] else "container")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
             item.setCheckState(1, Qt.Checked if r["queue_enabled"] else Qt.Unchecked)
+            queue_by_id[r["id"]] = bool(r["queue_enabled"])
             pid = r["parent_id"]
             if pid and pid in id_to_item:
                 id_to_item[pid].addChild(item)
+                child_ids.setdefault(pid, []).append(r["id"])
             else:
                 self.tree.addTopLevelItem(item)
             id_to_item[r["id"]] = item
+
+        state_cache = {}
+
+        def _state(node_id: int):
+            kids = child_ids.get(node_id, [])
+            if not kids:
+                return Qt.Checked if queue_by_id.get(node_id, False) else Qt.Unchecked
+            child_states = [_state(k) for k in kids]
+            if all(s == Qt.Checked for s in child_states):
+                return Qt.Checked
+            if all(s == Qt.Unchecked for s in child_states):
+                return Qt.Unchecked
+            return Qt.PartiallyChecked
+
+        for node_id, item in id_to_item.items():
+            state_cache[node_id] = _state(node_id)
+            item.setCheckState(1, state_cache[node_id])
+
         self.tree.expandAll()
         self.tree.blockSignals(False)
+        self._tree_syncing = False
 
     def on_item_select(self):
         items = self.tree.selectedItems()
@@ -293,10 +355,13 @@ class SourceWorkspace(QMainWindow):
         self.refresh_highlights()
 
     def on_item_changed(self, item, col):
-        if col != 1:
+        if col != 1 or self._tree_syncing:
+            return
+        if item.checkState(1) == Qt.PartiallyChecked:
             return
         enabled = item.checkState(1) == Qt.Checked
         self.outline_repo.set_queue_enabled(item.data(0, 256), enabled)
+        self.refresh_tree()
         self.queue_changed.emit()
 
     def jump_to_selected(self):
@@ -967,24 +1032,17 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         self.queue = StudyQueuePage(source_repo, review_repo, settings_repo)
-        self.sources = SourcesPage(source_repo, outline_repo, pdf_service)
+        self.sources = SourcesPage(source_repo, outline_repo, review_repo, highlight_repo, pdf_service)
         self.settings = SettingsPage(settings_repo, review_repo)
         tabs.addTab(self.queue, "Study Queue")
         tabs.addTab(self.sources, "Sources")
         tabs.addTab(self.settings, "Settings")
         lay.addWidget(tabs)
 
-        self.sources.open_workspace.connect(self.open_workspace)
         self.sources.library_changed.connect(self.sync_queue_views)
+        self.sources.queue_changed.connect(self.sync_queue_views)
         self.settings.settings_changed.connect(self.sync_queue_views)
-        self._workspace_windows = []
 
     def sync_queue_views(self):
         self.queue.refresh()
         self.settings.refresh_summary()
-
-    def open_workspace(self, source_id: int):
-        win = SourceWorkspace(source_id, self.sources.source_repo, self.sources.outline_repo, self.queue.review_repo, self.highlight_repo)
-        win.queue_changed.connect(self.sync_queue_views)
-        win.show()
-        self._workspace_windows.append(win)

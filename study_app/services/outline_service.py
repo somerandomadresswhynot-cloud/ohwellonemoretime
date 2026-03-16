@@ -46,7 +46,46 @@ def parse_outline_text(text: str) -> tuple[list[dict], list[ParseError]]:
             "is_unit": bool(sp),
             "queue_enabled": True,
         })
-    return _mark_leaf_units(entries), errors
+    return _finalize_entries(entries), errors
+
+
+def _finalize_entries(entries: list[dict]) -> list[dict]:
+    return _mark_leaf_units(_inject_sectionless_parent_units(entries))
+
+
+def _inject_sectionless_parent_units(entries: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for i, entry in enumerate(entries):
+        out.append(dict(entry))
+        start_page = entry.get("start_page")
+        if not start_page:
+            continue
+
+        depth = int(entry.get("depth") or 1)
+        j = i + 1
+        first_descendant_start = None
+        while j < len(entries):
+            next_depth = int(entries[j].get("depth") or 1)
+            if next_depth <= depth:
+                break
+            descendant_start = entries[j].get("start_page")
+            if descendant_start:
+                first_descendant_start = int(descendant_start)
+                break
+            j += 1
+
+        if first_descendant_start is None or first_descendant_start <= int(start_page):
+            continue
+
+        out.append({
+            "depth": depth + 1,
+            "title": f"{entry['title']} (Sectionless Part)",
+            "start_page": int(start_page),
+            "end_page": first_descendant_start,
+            "is_unit": True,
+            "queue_enabled": entry.get("queue_enabled", True),
+        })
+    return out
 
 
 def _mark_leaf_units(entries: list[dict]) -> list[dict]:
@@ -121,7 +160,7 @@ def entries_from_bookmarks(bookmarks: list[tuple[int, str, int]], page_count: in
             "is_unit": True,
             "queue_enabled": True,
         })
-    return _mark_leaf_units(out)
+    return _finalize_entries(out)
 
 
 def entries_from_headings(headings: list[tuple[int, str, int]], page_count: int, root_title: str) -> list[dict]:
@@ -147,4 +186,4 @@ def entries_from_headings(headings: list[tuple[int, str, int]], page_count: int,
             "is_unit": True,
             "queue_enabled": True,
         })
-    return _mark_leaf_units(out)
+    return _finalize_entries(out)
