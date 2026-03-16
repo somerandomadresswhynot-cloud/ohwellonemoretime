@@ -731,6 +731,8 @@ class StudyQueuePage(QWidget):
 
 
 class SettingsPage(QWidget):
+    settings_changed = Signal()
+
     def __init__(self, settings_repo: SettingsRepo, review_repo: ReviewRepo):
         super().__init__()
         self.settings_repo = settings_repo
@@ -759,6 +761,7 @@ class SettingsPage(QWidget):
         self.settings_repo.set("fallback_review_seconds_per_unit", str(self.fallback_unit_seconds.value()))
         self.settings_repo.set("fallback_review_seconds_per_page", str(self.fallback_page_seconds.value()))
         self.refresh_summary()
+        self.settings_changed.emit()
 
     def refresh_summary(self):
         due = len(self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds")))
@@ -792,6 +795,7 @@ class MainWindow(QMainWindow):
 
         self.sources.open_workspace.connect(self.open_workspace)
         self.sources.library_changed.connect(self.sync_queue_views)
+        self.settings.settings_changed.connect(self.sync_queue_views)
         self._workspace_windows = []
 
     def sync_queue_views(self):
