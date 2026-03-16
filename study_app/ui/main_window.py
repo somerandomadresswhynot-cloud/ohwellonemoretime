@@ -480,6 +480,7 @@ class StudyQueuePage(QWidget):
 
         self.list = QListWidget()
         self.list.setSpacing(6)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
         self.queue_banner = QLabel("")
