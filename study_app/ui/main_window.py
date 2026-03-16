@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QFormLayout,
@@ -40,6 +41,13 @@ from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, Sourc
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 
 
+def _enable_smooth_scroll(view: QAbstractItemView) -> None:
+    view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+    view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+    view.verticalScrollBar().setSingleStep(18)
+    view.horizontalScrollBar().setSingleStep(18)
+
+
 class SourcesPage(QWidget):
     open_workspace = Signal(int)
     library_changed = Signal()
@@ -56,6 +64,7 @@ class SourcesPage(QWidget):
         search.textChanged.connect(self.refresh)
         self.search = search
         self.list = QListWidget()
+        _enable_smooth_scroll(self.list)
         self.list.currentRowChanged.connect(self._on_select)
         self.list.itemDoubleClicked.connect(self._open_current_workspace)
 
@@ -186,6 +195,7 @@ class SourceWorkspace(QMainWindow):
 
         self.search = QLineEdit(); self.search.setPlaceholderText("Filter outline")
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Outline", "Queue"])
+        _enable_smooth_scroll(self.tree)
         self.tree.itemSelectionChanged.connect(self.on_item_select)
         self.tree.itemChanged.connect(self.on_item_changed)
         self.tree.itemDoubleClicked.connect(lambda *_: self.jump_to_selected())
@@ -212,7 +222,9 @@ class SourceWorkspace(QMainWindow):
         self.insights = QLabel()
         self.insights.setWordWrap(True)
         self.unit_hl_list = QListWidget()
+        _enable_smooth_scroll(self.unit_hl_list)
         self.source_hl_tree = QTreeWidget(); self.source_hl_tree.setHeaderLabels(["Page", "Context", "Quote"])
+        _enable_smooth_scroll(self.source_hl_tree)
         self.source_hl_tree.itemDoubleClicked.connect(self.on_source_highlight_double_clicked)
         tabs = QTabWidget()
         tab_ins = QWidget(); l1 = QVBoxLayout(tab_ins); l1.addWidget(self.insights); l1.addStretch()
@@ -479,6 +491,7 @@ class StudyQueuePage(QWidget):
         self.source_path_cache: dict[int, str] = {}
 
         self.list = QListWidget()
+        _enable_smooth_scroll(self.list)
         self.list.setSpacing(6)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.viewport().installEventFilter(self)
@@ -542,6 +555,8 @@ class StudyQueuePage(QWidget):
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
+        controls_scroll.verticalScrollBar().setSingleStep(18)
+        controls_scroll.horizontalScrollBar().setSingleStep(18)
         controls_scroll.setWidget(content)
 
         split = QSplitter(); lw = QWidget(); lw.setLayout(left)
