@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication,
@@ -612,8 +612,12 @@ class StudyQueuePage(QWidget):
             + (f" · {plan.overflow_count} deferred" if plan.overflow_count else "")
         )
         for u in self.units:
-            item = QListWidgetItem(f"{u.source_title} · {u.title} [{u.start_page}-{u.end_page}] ({u.review_count}x)")
+            est_seconds = self._estimate_review_seconds(u)
+            retention = self._estimate_retention(u)
+            item = QListWidgetItem()
+            item.setSizeHint(self._queue_tile_size_hint())
             self.list.addItem(item)
+            self.list.setItemWidget(item, self._build_queue_tile(u, est_seconds, retention))
             if u.source_id not in self.source_path_cache:
                 s = self.source_repo.get(u.source_id)
                 if s:
@@ -642,6 +646,59 @@ class StudyQueuePage(QWidget):
         fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
         fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         return max(1.0, pages * fallback_per_page, fallback_per_unit)
+
+    def _estimate_retention(self, unit) -> float:
+        row = self.review_repo.unit_by_id(unit.unit_id)
+        if not row:
+            return 0.15
+        return retention_estimate(row, datetime.utcnow())
+
+    def _queue_tile_size_hint(self):
+        return QSize(260, 96)
+
+    def _build_queue_tile(self, unit, est_seconds: float, retention: float) -> QWidget:
+        root = QFrame()
+        root.setObjectName("queueTile")
+        root.setStyleSheet(
+            "#queueTile { border: 1px solid #2e3a46; border-radius: 10px; padding: 8px; }"
+            "QLabel#tileTitle { font-size: 15px; font-weight: 600; color: #f2f5f7; }"
+            "QLabel#tileMeta { color: #9aa7b2; font-size: 11px; }"
+            "QLabel#badge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d8e1e8; background: #2b3440; }"
+        )
+
+        lay = QVBoxLayout(root)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        title = QLabel(unit.title)
+        title.setObjectName("tileTitle")
+        title.setWordWrap(True)
+
+        meta = QLabel(f"{unit.source_title} · reviews: {unit.review_count}")
+        meta.setObjectName("tileMeta")
+
+        badge_row = QHBoxLayout()
+        badge_row.setSpacing(6)
+        pages = QLabel(f"pages {unit.start_page}-{unit.end_page}"); pages.setObjectName("badge")
+        mins = QLabel(f"~{max(1, round(est_seconds / 60))} min"); mins.setObjectName("badge")
+        ret_pct = max(1, min(99, int(round(retention * 100))))
+        retention_lbl = QLabel(f"retention {ret_pct}%")
+        retention_lbl.setObjectName("badge")
+        if ret_pct < 35:
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffd7d7; background: #5a2222;")
+        elif ret_pct < 60:
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffeecf; background: #5a4a22;")
+        else:
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d2f2dc; background: #1f4d32;")
+
+        for w in [pages, mins, retention_lbl]:
+            badge_row.addWidget(w)
+        badge_row.addStretch()
+
+        lay.addWidget(title)
+        lay.addWidget(meta)
+        lay.addLayout(badge_row)
+        return root
 
     def pick_unit(self, idx):
         self._save_current_draft()
