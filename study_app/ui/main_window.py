@@ -373,7 +373,12 @@ class SourceWorkspace(QWidget):
         if self.source:
             self.context_changed.emit(self.source.title, "")
 
-    def refresh_tree(self):
+    def refresh_tree(self, preserve_view_state: bool = True):
+        expanded_ids: set[int] = set()
+        selected_id: int | None = None
+        if preserve_view_state:
+            expanded_ids, selected_id = self._capture_tree_view_state()
+
         filt = self.search.text().strip().lower()
         rows = self.outline_repo.nodes_for_source(self.source_id)
         self._active_filter = filt
@@ -427,6 +432,9 @@ class SourceWorkspace(QWidget):
                 self._add_item_from_row(rid, None, include_children=False)
         self.tree.blockSignals(False)
         self._tree_syncing = False
+
+        if preserve_view_state and not filt:
+            self._restore_tree_view_state(expanded_ids, selected_id)
 
     def _add_item_from_row(self, node_id: int, parent_item: QTreeWidgetItem | None, include_children: bool) -> QTreeWidgetItem:
         r = self._rows_by_id.get(node_id)
@@ -497,6 +505,38 @@ class SourceWorkspace(QWidget):
         else:
             self.split.setSizes([300, max(520, w - 660), 320])
 
+    def _capture_tree_view_state(self) -> tuple[set[int], int | None]:
+        expanded_ids: set[int] = set()
+
+        def walk(item: QTreeWidgetItem) -> None:
+            node_id = item.data(0, 256)
+            if node_id is not None and item.isExpanded():
+                expanded_ids.add(int(node_id))
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
+
+        selected_items = self.tree.selectedItems()
+        selected_id = int(selected_items[0].data(0, 256)) if selected_items else None
+        return expanded_ids, selected_id
+
+    def _restore_tree_view_state(self, expanded_ids: set[int], selected_id: int | None) -> None:
+        if not expanded_ids and selected_id is None:
+            return
+
+        sorted_ids = sorted(expanded_ids, key=lambda nid: int(self._rows_by_id.get(nid, {}).get("depth", 0)))
+        for node_id in sorted_ids:
+            item = self._id_to_item.get(node_id)
+            if item is not None:
+                self.tree.expandItem(item)
+
+        if selected_id is not None:
+            item = self._id_to_item.get(selected_id)
+            if item is not None:
+                self.tree.setCurrentItem(item)
+
     def on_item_select(self):
         items = self.tree.selectedItems()
         if not items:
@@ -515,8 +555,6 @@ class SourceWorkspace(QWidget):
 
     def on_item_changed(self, item, col):
         if col != 1 or self._tree_syncing:
-            return
-        if item.checkState(1) == Qt.PartiallyChecked:
             return
         enabled = item.checkState(1) == Qt.Checked
         self.outline_repo.set_queue_enabled(item.data(0, 256), enabled)
