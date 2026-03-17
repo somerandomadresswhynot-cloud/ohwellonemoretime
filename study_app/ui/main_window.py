@@ -349,6 +349,7 @@ class SourceWorkspace(QWidget):
         self._tree_rows: list = []
         self._rows_by_id: dict[int, dict] = {}
         self._child_ids: dict[int, list[int]] = {}
+        self._parent_id: dict[int, int | None] = {}
         self._state_cache: dict[int, Qt.CheckState] = {}
         self._id_to_item: dict[int, QTreeWidgetItem] = {}
         self._active_filter = ""
@@ -385,16 +386,18 @@ class SourceWorkspace(QWidget):
         self._tree_rows = rows
         self._rows_by_id = {int(r["id"]): r for r in rows}
         self._child_ids = {}
+        self._parent_id = {}
         queue_by_id: dict[int, bool] = {}
         roots: list[int] = []
         for r in rows:
             rid = int(r["id"])
             queue_by_id[rid] = bool(r["queue_enabled"])
-            pid = r["parent_id"]
+            pid = int(r["parent_id"]) if r["parent_id"] is not None else None
+            self._parent_id[rid] = pid
             if pid is None:
                 roots.append(rid)
             else:
-                self._child_ids.setdefault(int(pid), []).append(rid)
+                self._child_ids.setdefault(pid, []).append(rid)
 
         self._state_cache = {}
 
@@ -479,6 +482,9 @@ class SourceWorkspace(QWidget):
     def on_item_expanded(self, item):
         if self._active_filter:
             return
+        self._materialize_item_children(item)
+
+    def _materialize_item_children(self, item: QTreeWidgetItem) -> None:
         if item.data(0, 259):
             return
         node_id = int(item.data(0, 256))
@@ -494,6 +500,36 @@ class SourceWorkspace(QWidget):
         item.setData(0, 259, True)
         self.tree.blockSignals(False)
         self._tree_syncing = False
+
+    def _ensure_item_loaded(self, node_id: int) -> QTreeWidgetItem | None:
+        if node_id in self._id_to_item:
+            return self._id_to_item[node_id]
+
+        lineage: list[int] = []
+        cursor = node_id
+        while cursor not in self._id_to_item:
+            lineage.append(cursor)
+            parent = self._parent_id.get(cursor)
+            if parent is None:
+                break
+            cursor = parent
+
+        if cursor not in self._id_to_item:
+            return None
+
+        for nid in reversed(lineage):
+            parent_id = self._parent_id.get(nid)
+            if parent_id is None:
+                continue
+            parent_item = self._id_to_item.get(parent_id)
+            if parent_item is None:
+                return None
+            self.tree.expandItem(parent_item)
+            self._materialize_item_children(parent_item)
+            if nid not in self._id_to_item:
+                return None
+
+        return self._id_to_item.get(node_id)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -528,12 +564,13 @@ class SourceWorkspace(QWidget):
 
         sorted_ids = sorted(expanded_ids, key=lambda nid: int(self._rows_by_id.get(nid, {}).get("depth", 0)))
         for node_id in sorted_ids:
-            item = self._id_to_item.get(node_id)
+            item = self._ensure_item_loaded(node_id)
             if item is not None:
                 self.tree.expandItem(item)
+                self._materialize_item_children(item)
 
         if selected_id is not None:
-            item = self._id_to_item.get(selected_id)
+            item = self._ensure_item_loaded(selected_id)
             if item is not None:
                 self.tree.setCurrentItem(item)
 
