@@ -56,9 +56,12 @@ class DocumentProgressBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._segments: list[dict] = []
+        self._segment_regions: list[tuple[tuple[int, int, int, int], dict]] = []
         self._total_pages = 1
         self._current_page = 1
-        self.setMinimumHeight(22)
+        self._hover_key = ""
+        self.setMinimumHeight(26)
+        self.setMouseTracking(True)
 
     def set_data(self, segments: list[dict], total_pages: int, current_page: int) -> None:
         self._segments = segments
@@ -66,16 +69,39 @@ class DocumentProgressBar(QWidget):
         self._current_page = max(1, int(current_page or 1))
         self.update()
 
+    def _segment_tooltip(self, seg: dict) -> str:
+        title = seg.get("title", "Unit")
+        sp = int(seg.get("start_page", 1))
+        ep = int(seg.get("end_page", sp))
+        state = str(seg.get("state", "unstarted"))
+        retention = seg.get("retention")
+        retention_text = "n/a" if retention is None else f"{int(round(max(0.01, min(0.99, float(retention))) * 100))}%"
+        return f"{title}\nPages: {sp}-{ep}\nState: {state}\nRetention: {retention_text}"
+
+    def mouseMoveEvent(self, event):
+        x, y = int(event.position().x()), int(event.position().y())
+        for (lx, ty, rx, by), seg in self._segment_regions:
+            if lx <= x <= rx and ty <= y <= by:
+                tip = self._segment_tooltip(seg)
+                if tip != self._hover_key:
+                    self._hover_key = tip
+                    self.setToolTip(tip)
+                return
+        if self._hover_key:
+            self._hover_key = ""
+            self.setToolTip("")
+
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
 
-        r = self.rect().adjusted(1, 1, -1, -1)
+        r = self.rect().adjusted(1, 1, -1, -6)
         p.setPen(QPen(QColor("#24314a"), 1))
         p.setBrush(QColor("#0f1624"))
         p.drawRoundedRect(r, 6, 6)
 
         inner = r.adjusted(2, 3, -2, -3)
+        self._segment_regions = []
         for seg in self._segments:
             sp = max(1, int(seg.get("start_page", 1)))
             ep = max(sp, int(seg.get("end_page", sp)))
@@ -87,11 +113,11 @@ class DocumentProgressBar(QWidget):
             state = seg.get("state", "unstarted")
             glow = QColor(0, 0, 0, 0)
             if state == "mastered":
-                c1, c2, glow = QColor("#7ce8ff"), QColor("#7a7cff"), QColor(124, 232, 255, 90)
+                c1, c2, glow = QColor("#6bb8d8"), QColor("#6f76c6"), QColor(110, 168, 214, 55)
             elif state == "learning":
-                c1, c2, glow = QColor("#f97316"), QColor("#34d399"), QColor(52, 211, 153, 55)
+                c1, c2, glow = QColor("#6a7f9e"), QColor("#5f9d8d"), QColor(95, 157, 141, 40)
             else:
-                c1, c2 = QColor("#3e4451"), QColor("#636c7c")
+                c1, c2 = QColor("#434b59"), QColor("#5b6575")
 
             grad = QLinearGradient(seg_rect.topLeft(), seg_rect.topRight())
             grad.setColorAt(0.0, c1)
@@ -104,9 +130,17 @@ class DocumentProgressBar(QWidget):
                 p.setBrush(glow)
                 p.drawRoundedRect(seg_rect.adjusted(-1, -1, 1, 1), 3, 3)
 
+            depth = max(1, int(seg.get("depth", 3)))
+            tick_h = max(2, 11 - min(8, depth * 2))
+            p.setBrush(QColor("#6f8bb3") if depth <= 2 else QColor("#4a607f"))
+            p.drawRect(max(seg_rect.left(), inner.left()), inner.bottom() + 1, 1, tick_h)
+
+            self._segment_regions.append(((seg_rect.left(), seg_rect.top(), seg_rect.right(), seg_rect.bottom()), seg))
+
         marker_x = int(inner.left() + ((self._current_page - 1) / self._total_pages) * inner.width())
         p.setPen(QPen(QColor("#f8fafc"), 2))
-        p.drawLine(marker_x, inner.top() - 1, marker_x, inner.bottom() + 1)
+        p.drawLine(marker_x, inner.top() - 1, marker_x, inner.bottom() + 2)
+
 
 class SourcesPage(QWidget):
     queue_changed = Signal()
@@ -758,8 +792,10 @@ class SourceWorkspace(QWidget):
         total_pages = int(self.source.page_count or 1) if getattr(self, "source", None) else 1
         now = now_utc()
         segments: list[dict] = []
+        depth_by_node = {int(r["id"]): int(r["depth"]) for r in self._rows_by_id.values()}
         for u in units:
             state = "unstarted"
+            ret = None
             if u["review_count"] > 0:
                 state = "learning"
                 ret = retention_estimate(u, now)
@@ -772,9 +808,12 @@ class SourceWorkspace(QWidget):
                     except Exception:
                         pass
             segments.append({
+                "title": u["title"],
                 "start_page": int(u["start_page"]),
                 "end_page": int(u["end_page"]),
                 "state": state,
+                "retention": ret,
+                "depth": depth_by_node.get(int(u["node_id"]), 3),
             })
         self.doc_progress.set_data(segments, total_pages=total_pages, current_page=current_page)
 
@@ -1081,6 +1120,7 @@ class StudyQueuePage(QWidget):
         self.unit_drafts: dict[int, dict] = {}
         self.source_path_cache: dict[int, str] = {}
         self.display_units = []
+        self._queue_last_pdf_page = 1
 
         self.list = QListWidget()
         _enable_smooth_scroll(self.list)
@@ -1140,7 +1180,9 @@ class StudyQueuePage(QWidget):
         self.pdf.setMinimumHeight(h)
         self.pdf.setMaximumHeight(h)
 
+        self.queue_doc_progress = DocumentProgressBar()
         right.addWidget(self.pdf)
+        right.addWidget(self.queue_doc_progress)
 
         corner_row = QHBoxLayout()
         corner_row.addStretch()
@@ -1230,6 +1272,7 @@ class StudyQueuePage(QWidget):
         self.list.clear()
         self.source_path_cache = {}
         self.display_units = []
+        self._queue_last_pdf_page = 1
         suggestion_extra = f" · {len(plan.suggested_units)} progression suggestion(s)" if plan.suggested_units else ""
         self.queue_banner.setText(
             f"Showing {len(self.units)}/{len(due_units)} due units · "
@@ -1271,9 +1314,11 @@ class StudyQueuePage(QWidget):
         self._relayout_queue_tiles()
         if self.list.count() > 0:
             self.list.setCurrentRow(0)
+            self._refresh_queue_doc_progress()
         else:
             self.active_unit = None
             self.title.setText("No unit selected")
+            self.queue_doc_progress.set_data([], total_pages=1, current_page=1)
 
     def eventFilter(self, obj, event):
         if obj is self.list.viewport() and event.type() == QEvent.Resize:
@@ -1408,6 +1453,51 @@ class StudyQueuePage(QWidget):
         mins = seconds / 60.0
         return f"~{mins:.1f} min"
 
+    def _refresh_queue_doc_progress(self, current_page: int | None = None) -> None:
+        if not self.active_unit:
+            self.queue_doc_progress.set_data([], total_pages=1, current_page=1)
+            return
+        source = self.source_repo.get(self.active_unit.source_id)
+        if not source:
+            self.queue_doc_progress.set_data([], total_pages=1, current_page=1)
+            return
+
+        rows = self.review_repo.db.conn.execute(
+            """SELECT u.*, n.depth AS depth
+            FROM units u
+            LEFT JOIN outline_nodes n ON n.id=u.node_id
+            WHERE u.source_id=?
+            ORDER BY u.start_page, u.title""",
+            (self.active_unit.source_id,),
+        ).fetchall()
+        now = now_utc()
+        segs: list[dict] = []
+        for u in rows:
+            state = "unstarted"
+            ret = None
+            if u["review_count"] > 0:
+                state = "learning"
+                ret = retention_estimate(u, now)
+                nr = u["next_review_at"]
+                if nr:
+                    try:
+                        next_dt = parse_iso_to_utc(nr)
+                        if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
+                            state = "mastered"
+                    except Exception:
+                        pass
+            segs.append({
+                "title": u["title"],
+                "start_page": int(u["start_page"]),
+                "end_page": int(u["end_page"]),
+                "state": state,
+                "retention": ret,
+                "depth": int(u["depth"] or 3),
+            })
+
+        cp = current_page if current_page is not None else int(self.pdf.view_state().get("page", self.active_unit.start_page))
+        self.queue_doc_progress.set_data(segs, total_pages=int(source.page_count or 1), current_page=int(cp))
+
     def pick_unit(self, idx):
         self._save_current_draft()
         if idx < 0 or idx >= len(self.display_units):
@@ -1432,6 +1522,8 @@ class StudyQueuePage(QWidget):
         self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
         self.pdf.set_page(self.active_unit.start_page)
         self._load_draft_for_active()
+        self._queue_last_pdf_page = int(self.pdf.view_state().get("page", self.active_unit.start_page))
+        self._refresh_queue_doc_progress(self._queue_last_pdf_page)
 
     def jump_to_active_unit(self):
         if self.active_unit:
@@ -1441,6 +1533,11 @@ class StudyQueuePage(QWidget):
         if self.timer_running:
             self.timer_seconds += 1
             self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
+        if self.active_unit:
+            page = int(self.pdf.view_state().get("page", self._queue_last_pdf_page or 1))
+            if page != self._queue_last_pdf_page:
+                self._queue_last_pdf_page = page
+                self._refresh_queue_doc_progress(page)
 
     def toggle_timer(self):
         self.timer_running = not self.timer_running
