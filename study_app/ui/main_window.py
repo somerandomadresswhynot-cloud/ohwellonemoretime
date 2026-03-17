@@ -593,10 +593,70 @@ class SourceWorkspace(QWidget):
     def on_item_changed(self, item, col):
         if col != 1 or self._tree_syncing:
             return
-        enabled = item.checkState(1) == Qt.Checked
-        self.outline_repo.set_queue_enabled(item.data(0, 256), enabled)
-        self.refresh_tree()
+        state = item.checkState(1)
+        if state == Qt.PartiallyChecked:
+            return
+        node_id = int(item.data(0, 256))
+        enabled = state == Qt.Checked
+        self.outline_repo.set_queue_enabled(node_id, enabled)
+        self._sync_state_cache_after_toggle(node_id, enabled)
+        self._apply_loaded_visual_states(item, enabled)
         self.queue_changed.emit()
+
+    def _state_text(self, state: Qt.CheckState) -> str:
+        if state == Qt.Checked:
+            return "on"
+        if state == Qt.Unchecked:
+            return "off"
+        return "mixed"
+
+    def _sync_state_cache_after_toggle(self, node_id: int, enabled: bool) -> None:
+        target_state = Qt.Checked if enabled else Qt.Unchecked
+        stack = [node_id]
+        while stack:
+            nid = stack.pop()
+            self._state_cache[nid] = target_state
+            stack.extend(self._child_ids.get(nid, []))
+
+        cursor = self._parent_id.get(node_id)
+        while cursor is not None:
+            child_states = [self._state_cache.get(cid, Qt.Unchecked) for cid in self._child_ids.get(cursor, [])]
+            if child_states and all(s == Qt.Checked for s in child_states):
+                self._state_cache[cursor] = Qt.Checked
+            elif child_states and all(s == Qt.Unchecked for s in child_states):
+                self._state_cache[cursor] = Qt.Unchecked
+            else:
+                self._state_cache[cursor] = Qt.PartiallyChecked
+            cursor = self._parent_id.get(cursor)
+
+    def _apply_loaded_visual_states(self, item: QTreeWidgetItem, enabled: bool) -> None:
+        target_state = Qt.Checked if enabled else Qt.Unchecked
+
+        def apply_subtree(node_item: QTreeWidgetItem) -> None:
+            node_item.setCheckState(1, target_state)
+            node_item.setText(1, self._state_text(target_state))
+            for idx in range(node_item.childCount()):
+                apply_subtree(node_item.child(idx))
+
+        self._tree_syncing = True
+        self.tree.blockSignals(True)
+        apply_subtree(item)
+
+        parent = item.parent()
+        while parent is not None:
+            child_states = [parent.child(i).checkState(1) for i in range(parent.childCount())]
+            if child_states and all(s == Qt.Checked for s in child_states):
+                pstate = Qt.Checked
+            elif child_states and all(s == Qt.Unchecked for s in child_states):
+                pstate = Qt.Unchecked
+            else:
+                pstate = Qt.PartiallyChecked
+            parent.setCheckState(1, pstate)
+            parent.setText(1, self._state_text(pstate))
+            parent = parent.parent()
+
+        self.tree.blockSignals(False)
+        self._tree_syncing = False
 
     def open_tree_context_menu(self, pos):
         item = self.tree.itemAt(pos)
