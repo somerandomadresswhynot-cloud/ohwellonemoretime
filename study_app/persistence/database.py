@@ -101,6 +101,23 @@ CREATE TABLE IF NOT EXISTS ui_state (
 );
 """
 
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_outline_nodes_source_order
+ON outline_nodes(source_id, order_index);
+
+CREATE INDEX IF NOT EXISTS idx_units_due_queue
+ON units(next_review_at, queue_enabled, source_id);
+
+CREATE INDEX IF NOT EXISTS idx_units_source_queue
+ON units(source_id, queue_enabled);
+
+CREATE INDEX IF NOT EXISTS idx_review_events_unit_deleted_ended
+ON review_events(unit_id, deleted_at, ended_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_review_events_unit_deleted
+ON review_events(unit_id, deleted_at);
+"""
+
 
 class Database:
     def __init__(self, path: str = "study_app.db") -> None:
@@ -108,6 +125,7 @@ class Database:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self.conn.executescript(INDEXES)
         self._migrate_schema()
         self.conn.commit()
 
@@ -115,6 +133,10 @@ class Database:
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(highlights)").fetchall()}
         if "color" not in cols:
             self.conn.execute("ALTER TABLE highlights ADD COLUMN color TEXT NOT NULL DEFAULT '#2d9cdb'")
+        self._ensure_indexes()
+
+    def _ensure_indexes(self) -> None:
+        self.conn.executescript(INDEXES)
 
     def close(self) -> None:
         self.conn.close()
