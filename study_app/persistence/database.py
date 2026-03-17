@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS sources (
     file_size INTEGER NOT NULL DEFAULT 0,
     page_count INTEGER NOT NULL DEFAULT 0,
     is_active INTEGER NOT NULL DEFAULT 1,
+    learning_mode TEXT NOT NULL DEFAULT 'any',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -130,8 +131,12 @@ class Database:
         self.conn.commit()
 
     def _migrate_schema(self) -> None:
-        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(highlights)").fetchall()}
-        if "color" not in cols:
+        source_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
+        if "learning_mode" not in source_cols:
+            self.conn.execute("ALTER TABLE sources ADD COLUMN learning_mode TEXT NOT NULL DEFAULT 'any'")
+
+        highlight_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(highlights)").fetchall()}
+        if "color" not in highlight_cols:
             self.conn.execute("ALTER TABLE highlights ADD COLUMN color TEXT NOT NULL DEFAULT '#2d9cdb'")
         self._ensure_indexes()
 

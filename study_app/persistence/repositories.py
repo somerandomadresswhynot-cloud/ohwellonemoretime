@@ -27,7 +27,7 @@ class SourceRepo:
             out.append(Source(
                 id=r["id"], title=r["title"], file_path=r["file_path"], file_exists=fp.exists(),
                 file_size=r["file_size"], page_count=r["page_count"], is_active=bool(r["is_active"]),
-                created_at=r["created_at"], updated_at=r["updated_at"]
+                learning_mode=r["learning_mode"] or "any", created_at=r["created_at"], updated_at=r["updated_at"]
             ))
         return out
 
@@ -39,22 +39,22 @@ class SourceRepo:
         return Source(
             id=row["id"], title=row["title"], file_path=row["file_path"], file_exists=fp.exists(),
             file_size=row["file_size"], page_count=row["page_count"], is_active=bool(row["is_active"]),
-            created_at=row["created_at"], updated_at=row["updated_at"]
+            learning_mode=row["learning_mode"] or "any", created_at=row["created_at"], updated_at=row["updated_at"]
         )
 
-    def create(self, title: str, file_path: str, file_size: int, page_count: int) -> int:
+    def create(self, title: str, file_path: str, file_size: int, page_count: int, learning_mode: str = "any") -> int:
         now = utcnow_iso()
         cur = self.db.conn.execute(
-            "INSERT INTO sources(title,file_path,file_size,page_count,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            (title, file_path, file_size, page_count, now, now),
+            "INSERT INTO sources(title,file_path,file_size,page_count,learning_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (title, file_path, file_size, page_count, learning_mode, now, now),
         )
         self.db.conn.commit()
         return int(cur.lastrowid)
 
-    def update_metadata(self, source_id: int, title: str, is_active: bool) -> None:
+    def update_metadata(self, source_id: int, title: str, is_active: bool, learning_mode: str = "any") -> None:
         self.db.conn.execute(
-            "UPDATE sources SET title=?, is_active=?, updated_at=? WHERE id=?",
-            (title, int(is_active), utcnow_iso(), source_id),
+            "UPDATE sources SET title=?, is_active=?, learning_mode=?, updated_at=? WHERE id=?",
+            (title, int(is_active), learning_mode, utcnow_iso(), source_id),
         )
         self.db.conn.commit()
 

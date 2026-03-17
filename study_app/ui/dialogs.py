@@ -20,14 +20,16 @@ from study_app.services.outline_service import parse_outline_text
 
 
 class SourceMetadataDialog(QDialog):
-    def __init__(self, title: str, is_active: bool, parent=None):
+    def __init__(self, title: str, is_active: bool, learning_mode: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Edit Source")
         self.title_edit = QLineEdit(title)
         self.active_edit = QLineEdit("yes" if is_active else "no")
+        self.learning_mode_edit = QLineEdit("strict" if learning_mode == "strict" else "any")
         form = QFormLayout()
         form.addRow("Title", self.title_edit)
         form.addRow("Active (yes/no)", self.active_edit)
+        form.addRow("Learning order (any/strict)", self.learning_mode_edit)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)

@@ -178,7 +178,7 @@ class SourcesPage(QWidget):
         s = self.sources[idx]
         self.current_source_id = s.id
         self.detail.setText(
-            f"Title: {s.title}\nActive: {s.is_active}\nFile: {s.file_path}\nExists: {s.file_exists}\nPages: {s.page_count}"
+            f"Title: {s.title}\nActive: {s.is_active}\nOrder: {s.learning_mode}\nFile: {s.file_path}\nExists: {s.file_exists}\nPages: {s.page_count}"
         )
 
     def import_pdf(self):
@@ -199,10 +199,11 @@ class SourcesPage(QWidget):
         if not self.current_source_id:
             return
         s = self.source_repo.get(self.current_source_id)
-        dlg = SourceMetadataDialog(s.title, s.is_active, self)
+        dlg = SourceMetadataDialog(s.title, s.is_active, s.learning_mode, self)
         if dlg.exec():
             active = dlg.active_edit.text().strip().lower() in {"y", "yes", "true", "1"}
-            self.source_repo.update_metadata(s.id, dlg.title_edit.text().strip() or s.title, active)
+            learning_mode = "strict" if dlg.learning_mode_edit.text().strip().lower() in {"strict", "ordered", "linear"} else "any"
+            self.source_repo.update_metadata(s.id, dlg.title_edit.text().strip() or s.title, active, learning_mode)
             self.refresh()
             self.library_changed.emit()
 
@@ -221,7 +222,7 @@ class SourcesPage(QWidget):
         if not self.current_source_id:
             return
         s = self.source_repo.get(self.current_source_id)
-        self.source_repo.update_metadata(s.id, s.title, not s.is_active)
+        self.source_repo.update_metadata(s.id, s.title, not s.is_active, s.learning_mode)
         self.refresh()
         self.library_changed.emit()
 
@@ -902,7 +903,14 @@ class StudyQueuePage(QWidget):
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
         self.queue_banner = QLabel("")
         self.queue_banner.setWordWrap(True)
+        self.suggestion_banner = QLabel("")
+        self.suggestion_banner.setWordWrap(True)
+        self.suggestion_list = QListWidget()
+        _enable_smooth_scroll(self.suggestion_list)
+        self.suggestion_list.setMaximumHeight(160)
+        self.suggestion_list.itemDoubleClicked.connect(self._jump_from_suggestion)
         left = QVBoxLayout(); left.addWidget(QLabel("Due Units")); left.addWidget(self.queue_banner); left.addWidget(self.list)
+        left.addWidget(QLabel("Out of budget but needed")); left.addWidget(self.suggestion_banner); left.addWidget(self.suggestion_list)
 
         self.title = QLabel("No unit selected")
         self.timer_lbl = QLabel("00:00")
@@ -1022,10 +1030,19 @@ class StudyQueuePage(QWidget):
 
     def refresh(self):
         due_units = self.review_repo.due_units(iso_utc(now_utc()))
+        source_modes = {s.id: s.learning_mode for s in self.source_repo.list_sources()}
+        strict_sources = {sid for sid, mode in source_modes.items() if mode == "strict"}
         available_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        plan = plan_session_queue(due_units, available_minutes, self._estimate_review_seconds)
+        plan = plan_session_queue(
+            due_units,
+            available_minutes,
+            self._estimate_review_seconds,
+            strict_progression_sources=strict_sources,
+            source_id_of=lambda u: int(u.source_id),
+        )
         self.units = plan.selected_units
         self.list.clear()
+        self.suggestion_list.clear()
         self.source_path_cache = {}
         self.queue_banner.setText(
             f"Showing {len(self.units)}/{len(due_units)} due units · "
@@ -1044,6 +1061,16 @@ class StudyQueuePage(QWidget):
                 if s:
                     self.source_path_cache[u.source_id] = s.file_path
                     self.pdf.prime_path(s.file_path)
+        self.suggestion_banner.setText(
+            "No extra progression suggestions." if not plan.suggested_units else
+            f"{len(plan.suggested_units)} suggested unit(s) outside today budget"
+        )
+        for sug in plan.suggested_units:
+            reason = "needed for strict progression" if sug.reason == "strict_order_progression_gate" else "out of budget but important"
+            txt = f"{sug.unit.source_title} · {sug.unit.title} · ~{sug.estimated_minutes:.1f} min ({reason})"
+            item = QListWidgetItem(txt)
+            item.setData(256, int(sug.unit.unit_id))
+            self.suggestion_list.addItem(item)
         self._relayout_queue_tiles()
         if self.list.count() > 0:
             self.list.setCurrentRow(0)
@@ -1203,6 +1230,14 @@ class StudyQueuePage(QWidget):
         self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
         self.pdf.set_page(self.active_unit.start_page)
         self._load_draft_for_active()
+
+    def _jump_from_suggestion(self, item):
+        unit_id = int(item.data(256))
+        for idx, unit in enumerate(self.units):
+            if int(unit.unit_id) == unit_id:
+                self.list.setCurrentRow(idx)
+                self.jump_to_active_unit()
+                return
 
     def jump_to_active_unit(self):
         if self.active_unit:

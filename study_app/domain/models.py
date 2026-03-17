@@ -17,6 +17,7 @@ class Source:
     file_size: int
     page_count: int
     is_active: bool
+    learning_mode: str
     created_at: str
     updated_at: str
 
