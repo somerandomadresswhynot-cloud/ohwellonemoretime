@@ -35,6 +35,20 @@ class OutlineLeafUnitTests(unittest.TestCase):
         self.assertTrue(by_title["Topic B"]["is_unit"])
         self.assertTrue(by_title["Chapter 2"]["is_unit"])
 
+    def test_parent_sectionless_gap_creates_leaf_unit(self):
+        text = """
+# Book
+## Chapter 1 [p55-80]
+### Topic A [p59-65]
+""".strip()
+        entries, errs = parse_outline_text(text)
+        self.assertEqual(errs, [])
+        by_title = {e["title"]: e for e in entries}
+        self.assertIn("Chapter 1 (Sectionless Part)", by_title)
+        self.assertTrue(by_title["Chapter 1 (Sectionless Part)"]["is_unit"])
+        self.assertEqual(by_title["Chapter 1 (Sectionless Part)"]["start_page"], 55)
+        self.assertEqual(by_title["Chapter 1 (Sectionless Part)"]["end_page"], 59)
+
 
 if __name__ == "__main__":
     unittest.main()

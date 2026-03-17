@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
 )
+from PySide6.QtGui import QTextOption
 
 from study_app.services.outline_service import parse_outline_text
 
@@ -40,7 +41,11 @@ class OutlineEditorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Plain-text Outline Editor")
         self.resize(700, 500)
-        self.editor = QTextEdit(outline_text)
+        self.editor = QTextEdit()
+        self.editor.setPlainText(outline_text)
+        self.editor.setAcceptRichText(False)
+        self.editor.setLineWrapMode(QTextEdit.NoWrap)
+        self.editor.setWordWrapMode(QTextOption.NoWrap)
         self.errors = QLabel("")
         self.errors.setStyleSheet("color:#ff8ca1")
         btn_apply = QPushButton("Validate + Apply")

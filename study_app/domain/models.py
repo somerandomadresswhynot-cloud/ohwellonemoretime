@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
+
+
+NodeType = Literal["container", "unit"]
 
 
 @dataclass
@@ -30,6 +33,10 @@ class OutlineNode:
     end_page: Optional[int]
     is_unit: bool
     queue_enabled: bool
+
+    @property
+    def node_type(self) -> NodeType:
+        return "unit" if self.is_unit else "container"
 
 
 @dataclass

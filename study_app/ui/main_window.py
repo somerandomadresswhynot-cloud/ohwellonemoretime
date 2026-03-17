@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QBrush
+from PySide6.QtGui import QColor, QBrush, QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -49,13 +50,15 @@ def _enable_smooth_scroll(view: QAbstractItemView) -> None:
 
 
 class SourcesPage(QWidget):
-    open_workspace = Signal(int)
+    queue_changed = Signal()
     library_changed = Signal()
 
-    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, pdf_service: PdfService):
+    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo, pdf_service: PdfService):
         super().__init__()
         self.source_repo = source_repo
         self.outline_repo = outline_repo
+        self._review_repo = review_repo
+        self._highlight_repo = highlight_repo
         self.pdf_service = pdf_service
         self.current_source_id = None
 
@@ -79,33 +82,83 @@ class SourcesPage(QWidget):
         self.detail = QLabel("Select a source")
         self.detail.setWordWrap(True)
         btn_open = QPushButton("Open Workspace")
-        btn_edit = QPushButton("Edit Metadata")
-        btn_relink = QPushButton("Relink File")
-        btn_archive = QPushButton("Toggle Active")
-        btn_delete = QPushButton("Delete Source")
+        btn_open.setObjectName("accent")
         btn_open.clicked.connect(self._open_current_workspace)
-        btn_edit.clicked.connect(self.edit_source)
-        btn_relink.clicked.connect(self.relink_source)
-        btn_archive.clicked.connect(self.toggle_active)
+        btn_source_actions = QPushButton("Source Actions ▾")
+        btn_source_actions.clicked.connect(self.open_source_actions_menu)
+        btn_delete = QPushButton("Delete Source")
         btn_delete.clicked.connect(self.delete_source)
+        btn_delete.setStyleSheet("background:#3a1f24; border:1px solid #5a2a33;")
         right = QVBoxLayout()
         right.addWidget(self.detail)
-        for b in [btn_open, btn_edit, btn_relink, btn_archive, btn_delete]:
+        for b in [btn_open, btn_source_actions]:
             right.addWidget(b)
         right.addStretch()
+        right.addWidget(btn_delete)
 
         split = QSplitter()
         lw = QWidget(); lw.setLayout(left)
         rw = QWidget(); rw.setLayout(right)
         split.addWidget(lw); split.addWidget(rw)
         split.setSizes([700, 300])
+        self.list_view = QWidget()
+        list_view_layout = QVBoxLayout(self.list_view)
+        list_view_layout.setContentsMargins(0, 0, 0, 0)
+        list_view_layout.addWidget(split)
+
+        self.back_btn = QPushButton("← Back to Sources")
+        self.back_btn.clicked.connect(self.show_list)
+        self.ctx_source = QLabel("Source: -")
+        self.ctx_source.setStyleSheet("font-weight:600;")
+        self.ctx_path = QLabel("Sources")
+        self.ctx_path.setStyleSheet("color:#9aa7b2;")
+        self.workspace_host = QWidget()
+        self.workspace_host_layout = QVBoxLayout(self.workspace_host)
+        self.workspace_host_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.workspace_view = QWidget()
+        workspace_layout = QVBoxLayout(self.workspace_view)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(self.back_btn)
+        top_bar.addWidget(self.ctx_source)
+        top_bar.addWidget(self.ctx_path)
+        top_bar.addStretch()
+        workspace_layout.addLayout(top_bar)
+        workspace_layout.addWidget(self.workspace_host, 1)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.list_view)
+        self.stack.addWidget(self.workspace_view)
+
         lay = QVBoxLayout(self)
-        lay.addWidget(split)
+        lay.addWidget(self.stack)
+        self.current_workspace = None
         self.refresh()
 
     def _open_current_workspace(self, *_):
         if self.current_source_id:
-            self.open_workspace.emit(self.current_source_id)
+            self.show_workspace(self.current_source_id)
+
+    def show_workspace(self, source_id: int):
+        if self.current_workspace is None:
+            self.current_workspace = SourceWorkspace(source_id, self.source_repo, self.outline_repo, self._review_repo, self._highlight_repo)
+            self.current_workspace.queue_changed.connect(self.queue_changed.emit)
+            self.current_workspace.context_changed.connect(self.on_workspace_context_changed)
+            self.workspace_host_layout.addWidget(self.current_workspace)
+        else:
+            self.current_workspace.set_source(source_id)
+        self.stack.setCurrentWidget(self.workspace_view)
+
+    def on_workspace_context_changed(self, source_title: str, section_path: str):
+        self.ctx_source.setText(f"Source: {source_title}")
+        if section_path:
+            self.ctx_path.setText(f"Sources / {source_title} / {section_path}")
+        else:
+            self.ctx_path.setText(f"Sources / {source_title}")
+
+    def show_list(self):
+        self.stack.setCurrentWidget(self.list_view)
 
     def refresh(self):
         q = self.search.text().strip()
@@ -173,15 +226,44 @@ class SourcesPage(QWidget):
         self.library_changed.emit()
 
     def delete_source(self):
-        if self.current_source_id:
-            self.source_repo.delete(self.current_source_id)
-            self.current_source_id = None
-            self.refresh()
-            self.library_changed.emit()
+        if not self.current_source_id:
+            return
+        s = self.source_repo.get(self.current_source_id)
+        if not s:
+            return
+        ans = QMessageBox.question(
+            self,
+            "Delete source",
+            f"Delete source '{s.title}'? This removes outline, units, highlights, and review history.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+        self.source_repo.delete(self.current_source_id)
+        self.current_source_id = None
+        self.refresh()
+        self.library_changed.emit()
+
+    def open_source_actions_menu(self):
+        if not self.current_source_id:
+            return
+        menu = QMenu(self)
+        edit = menu.addAction("Edit Metadata")
+        relink = menu.addAction("Relink File")
+        active = menu.addAction("Toggle Active")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == edit:
+            self.edit_source()
+        elif chosen == relink:
+            self.relink_source()
+        elif chosen == active:
+            self.toggle_active()
 
 
-class SourceWorkspace(QMainWindow):
+class SourceWorkspace(QWidget):
     queue_changed = Signal()
+    context_changed = Signal(str, str)
     def __init__(self, source_id: int, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo):
         super().__init__()
         self.source_id = source_id
@@ -189,35 +271,53 @@ class SourceWorkspace(QMainWindow):
         self.outline_repo = outline_repo
         self.review_repo = review_repo
         self.highlight_repo = highlight_repo
-        self.setWindowTitle("Source Workspace")
-        root = QWidget(); self.setCentralWidget(root)
+        root = self
         split = QSplitter()
 
         self.search = QLineEdit(); self.search.setPlaceholderText("Filter outline")
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Outline", "Queue"])
+        self.tree.setIndentation(14)
+        self.tree.setColumnWidth(0, 250)
         _enable_smooth_scroll(self.tree)
         self.tree.itemSelectionChanged.connect(self.on_item_select)
         self.tree.itemChanged.connect(self.on_item_changed)
         self.tree.itemDoubleClicked.connect(lambda *_: self.jump_to_selected())
-        btn_all = QPushButton("Enable All")
-        btn_none = QPushButton("Disable All")
-        btn_edit = QPushButton("Edit Outline Text")
-        btn_all.clicked.connect(lambda: self._bulk(True))
-        btn_none.clicked.connect(lambda: self._bulk(False))
+        self.tree.itemExpanded.connect(self.on_item_expanded)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.open_tree_context_menu)
+        btn_tree_actions = QPushButton("Tree Actions ▾")
+        btn_tree_actions.clicked.connect(self.open_tree_actions_menu)
+        btn_expand = QPushButton("Expand")
+        btn_expand.clicked.connect(self.tree.expandAll)
+        btn_collapse = QPushButton("Collapse")
+        btn_collapse.clicked.connect(self.tree.collapseAll)
+        btn_edit = QPushButton("Edit Outline")
+        for btn in (btn_tree_actions, btn_expand, btn_collapse, btn_edit):
+            btn.setFixedHeight(26)
         btn_edit.clicked.connect(self.edit_outline)
-        left_l = QVBoxLayout(); left_l.addWidget(self.search); left_l.addWidget(self.tree); left_l.addWidget(btn_all); left_l.addWidget(btn_none); left_l.addWidget(btn_edit)
-        self.search.textChanged.connect(self.refresh_tree)
+        tree_toolbar = QHBoxLayout()
+        tree_toolbar.addWidget(btn_tree_actions)
+        tree_toolbar.addWidget(btn_expand)
+        tree_toolbar.addWidget(btn_collapse)
+        tree_toolbar.addWidget(btn_edit)
+        left_l = QVBoxLayout(); left_l.addWidget(self.search); left_l.addLayout(tree_toolbar); left_l.addWidget(self.tree)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self.refresh_tree)
+        self.search.textChanged.connect(lambda *_: self._filter_timer.start(220))
 
         self.pdf = PersistentPdfViewer()
         self.pdf.set_selection_menu_handler(self.open_selection_menu)
         self.zoom = QSpinBox(); self.zoom.setRange(50, 250); self.zoom.setValue(100)
         self.zoom.valueChanged.connect(lambda v: self.pdf.set_zoom(v / 100))
         btn_jump = QPushButton("Jump To Selected Unit")
+        btn_jump.setObjectName("accent")
         btn_jump.clicked.connect(self.jump_to_selected)
-        btn_hl = QPushButton("Add Highlight from Clipboard")
-        btn_hl.clicked.connect(self.add_highlight_from_clipboard)
+        btn_unit_actions = QPushButton("Unit Actions ▾")
+        btn_unit_actions.clicked.connect(self.open_unit_actions_menu)
         self.page_label = QLabel("Page: -")
-        c_l = QVBoxLayout(); c_l.addWidget(self.zoom); c_l.addWidget(btn_jump); c_l.addWidget(btn_hl); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
+        c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
+        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
 
         self.insights = QLabel()
         self.insights.setWordWrap(True)
@@ -241,9 +341,26 @@ class SourceWorkspace(QMainWindow):
         rw = QWidget(); rw.setLayout(right_l)
         split.addWidget(lw); split.addWidget(cw); split.addWidget(rw)
         split.setSizes([300, 700, 320])
+        self.split = split
         lay = QHBoxLayout(root); lay.addWidget(split)
 
         self._selected_node = None
+        self._tree_syncing = False
+        self._tree_rows: list = []
+        self._rows_by_id: dict[int, dict] = {}
+        self._child_ids: dict[int, list[int]] = {}
+        self._state_cache: dict[int, Qt.CheckState] = {}
+        self._id_to_item: dict[int, QTreeWidgetItem] = {}
+        self._active_filter = ""
+        self.load_source()
+
+    def set_source(self, source_id: int) -> None:
+        if int(source_id) == int(self.source_id):
+            return
+        self.source_id = source_id
+        self._selected_node = None
+        self.page_label.setText("Page: -")
+        self.search.clear()
         self.load_source()
 
     def load_source(self):
@@ -253,32 +370,132 @@ class SourceWorkspace(QMainWindow):
         self.refresh_tree()
         self.refresh_insights()
         self.refresh_highlights()
+        if self.source:
+            self.context_changed.emit(self.source.title, "")
 
     def refresh_tree(self):
         filt = self.search.text().strip().lower()
         rows = self.outline_repo.nodes_for_source(self.source_id)
+        self._active_filter = filt
+        self._tree_rows = rows
+        self._rows_by_id = {int(r["id"]): r for r in rows}
+        self._child_ids = {}
+        queue_by_id: dict[int, bool] = {}
+        roots: list[int] = []
+        for r in rows:
+            rid = int(r["id"])
+            queue_by_id[rid] = bool(r["queue_enabled"])
+            pid = r["parent_id"]
+            if pid is None:
+                roots.append(rid)
+            else:
+                self._child_ids.setdefault(int(pid), []).append(rid)
+
+        self._state_cache = {}
+
+        def _state(node_id: int):
+            if node_id in self._state_cache:
+                return self._state_cache[node_id]
+            kids = self._child_ids.get(node_id, [])
+            if not kids:
+                self._state_cache[node_id] = Qt.Checked if queue_by_id.get(node_id, False) else Qt.Unchecked
+                return self._state_cache[node_id]
+            child_states = [_state(k) for k in kids]
+            if all(s == Qt.Checked for s in child_states):
+                self._state_cache[node_id] = Qt.Checked
+            elif all(s == Qt.Unchecked for s in child_states):
+                self._state_cache[node_id] = Qt.Unchecked
+            else:
+                self._state_cache[node_id] = Qt.PartiallyChecked
+            return self._state_cache[node_id]
+
+        for rid in self._rows_by_id:
+            _state(rid)
+
+        self._tree_syncing = True
         self.tree.blockSignals(True)
         self.tree.clear()
-        id_to_item = {}
-        for r in rows:
-            if filt and filt not in r["title"].lower():
-                continue
-            txt = r["title"]
-            if r["start_page"]:
-                txt += f" [{r['start_page']}-{r['end_page']}]"
-            item = QTreeWidgetItem([txt, "on" if r["queue_enabled"] else "off"])
-            item.setData(0, 256, r["id"])
-            item.setData(0, 257, r["start_page"])
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
-            item.setCheckState(1, Qt.Checked if r["queue_enabled"] else Qt.Unchecked)
-            pid = r["parent_id"]
-            if pid and pid in id_to_item:
-                id_to_item[pid].addChild(item)
-            else:
-                self.tree.addTopLevelItem(item)
-            id_to_item[r["id"]] = item
-        self.tree.expandAll()
+        self._id_to_item = {}
+        if filt:
+            for r in rows:
+                if filt not in r["title"].lower():
+                    continue
+                self._add_item_from_row(int(r["id"]), None, include_children=True)
+            self.tree.expandAll()
+        else:
+            for rid in roots:
+                self._add_item_from_row(rid, None, include_children=False)
         self.tree.blockSignals(False)
+        self._tree_syncing = False
+
+    def _add_item_from_row(self, node_id: int, parent_item: QTreeWidgetItem | None, include_children: bool) -> QTreeWidgetItem:
+        r = self._rows_by_id.get(node_id)
+        if not r:
+            return QTreeWidgetItem()
+        is_unit = bool(r["is_unit"])
+        txt = r["title"]
+        if r["start_page"]:
+            txt += f" [{r['start_page']}-{r['end_page']}]"
+        if is_unit:
+            txt += " · unit"
+        item = QTreeWidgetItem([txt, "off"])
+        item.setData(0, 256, r["id"])
+        item.setData(0, 257, r["start_page"])
+        item.setData(0, 258, "unit" if is_unit else "container")
+        item.setData(0, 259, False)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+        item.setCheckState(1, self._state_cache.get(node_id, Qt.Unchecked))
+        if is_unit:
+            font = item.font(0)
+            font.setBold(True)
+            item.setFont(0, font)
+        else:
+            item.setForeground(0, QBrush(QColor("#9aa7b2")))
+        cstate = item.checkState(1)
+        item.setText(1, "on" if cstate == Qt.Checked else "off" if cstate == Qt.Unchecked else "mixed")
+        if parent_item is None:
+            self.tree.addTopLevelItem(item)
+        else:
+            parent_item.addChild(item)
+        self._id_to_item[node_id] = item
+
+        kids = self._child_ids.get(node_id, [])
+        if not include_children and kids:
+            item.addChild(QTreeWidgetItem(["", ""]))
+        elif include_children:
+            for kid_id in kids:
+                self._add_item_from_row(kid_id, item, include_children=True)
+            item.setData(0, 259, True)
+        return item
+
+    def on_item_expanded(self, item):
+        if self._active_filter:
+            return
+        if item.data(0, 259):
+            return
+        node_id = int(item.data(0, 256))
+        kids = self._child_ids.get(node_id, [])
+        if not kids:
+            item.setData(0, 259, True)
+            return
+        self._tree_syncing = True
+        self.tree.blockSignals(True)
+        item.takeChildren()
+        for kid_id in kids:
+            self._add_item_from_row(kid_id, item, include_children=False)
+        item.setData(0, 259, True)
+        self.tree.blockSignals(False)
+        self._tree_syncing = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "split"):
+            return
+        w = self.width()
+        if w < 1250:
+            self.split.setSizes([280, max(420, w - 560), 220])
+        else:
+            self.split.setSizes([300, max(520, w - 660), 320])
 
     def on_item_select(self):
         items = self.tree.selectedItems()
@@ -287,16 +504,47 @@ class SourceWorkspace(QMainWindow):
         it = items[0]
         self._selected_node = it.data(0, 256)
         page = it.data(0, 257)
+        selected_label = it.text(0).split(" [", 1)[0]
+        selected_label = selected_label.replace(" · unit", "")
         if page:
             self.page_label.setText(f"Page: {page}")
+        if self.source:
+            self.context_changed.emit(self.source.title, selected_label)
         self.refresh_insights()
         self.refresh_highlights()
 
     def on_item_changed(self, item, col):
-        if col != 1:
+        if col != 1 or self._tree_syncing:
+            return
+        if item.checkState(1) == Qt.PartiallyChecked:
             return
         enabled = item.checkState(1) == Qt.Checked
         self.outline_repo.set_queue_enabled(item.data(0, 256), enabled)
+        self.refresh_tree()
+        self.queue_changed.emit()
+
+    def open_tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu(self)
+        node_type = item.data(0, 258)
+        node_id = item.data(0, 256)
+        if node_type == "container":
+            act_on = menu.addAction("Enable Chapter")
+            act_off = menu.addAction("Disable Chapter")
+            act_on.triggered.connect(lambda: self._set_node_enabled(node_id, True))
+            act_off.triggered.connect(lambda: self._set_node_enabled(node_id, False))
+        else:
+            act_on = menu.addAction("Enable Unit")
+            act_off = menu.addAction("Disable Unit")
+            act_on.triggered.connect(lambda: self._set_node_enabled(node_id, True))
+            act_off.triggered.connect(lambda: self._set_node_enabled(node_id, False))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _set_node_enabled(self, node_id: int, enabled: bool):
+        self.outline_repo.set_queue_enabled(int(node_id), enabled)
+        self.refresh_tree()
         self.queue_changed.emit()
 
     def jump_to_selected(self):
@@ -323,6 +571,26 @@ class SourceWorkspace(QMainWindow):
         self.outline_repo.bulk_set_source(self.source_id, enabled)
         self.refresh_tree()
         self.queue_changed.emit()
+
+    def open_tree_actions_menu(self):
+        menu = QMenu(self)
+        en = menu.addAction("Enable All")
+        dis = menu.addAction("Disable All")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == en:
+            self._bulk(True)
+        elif chosen == dis:
+            self._bulk(False)
+
+    def open_unit_actions_menu(self):
+        menu = QMenu(self)
+        jump = menu.addAction("Jump To Selected Unit")
+        hl = menu.addAction("Add Highlight from Clipboard")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == jump:
+            self.jump_to_selected()
+        elif chosen == hl:
+            self.add_highlight_from_clipboard()
 
     def refresh_insights(self):
         units = self.review_repo.source_units(self.source_id)
@@ -966,25 +1234,49 @@ class MainWindow(QMainWindow):
         lay.addWidget(bar)
 
         tabs = QTabWidget()
+        self.tabs = tabs
         self.queue = StudyQueuePage(source_repo, review_repo, settings_repo)
-        self.sources = SourcesPage(source_repo, outline_repo, pdf_service)
+        self.sources = SourcesPage(source_repo, outline_repo, review_repo, highlight_repo, pdf_service)
         self.settings = SettingsPage(settings_repo, review_repo)
         tabs.addTab(self.queue, "Study Queue")
         tabs.addTab(self.sources, "Sources")
         tabs.addTab(self.settings, "Settings")
         lay.addWidget(tabs)
 
-        self.sources.open_workspace.connect(self.open_workspace)
+        self._sync_delay_ms = 5000
+        self._queue_dirty = True
+        self._queue_sync_timer = QTimer(self)
+        self._queue_sync_timer.setSingleShot(True)
+        self._queue_sync_timer.timeout.connect(self._flush_debounced_updates)
+
         self.sources.library_changed.connect(self.sync_queue_views)
+        self.sources.queue_changed.connect(self.request_sync_queue_views)
         self.settings.settings_changed.connect(self.sync_queue_views)
-        self._workspace_windows = []
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def sync_queue_views(self):
-        self.queue.refresh()
+        if self._queue_sync_timer.isActive():
+            self._queue_sync_timer.stop()
+        self._queue_dirty = True
+        self._flush_now(force_queue=True)
+
+    def request_sync_queue_views(self):
+        self._queue_dirty = True
+        self._queue_sync_timer.start(self._sync_delay_ms)
+
+    def _flush_now(self, force_queue: bool = False):
+        if force_queue or self.tabs.currentIndex() == 0:
+            self.queue.refresh()
+            self._queue_dirty = False
         self.settings.refresh_summary()
 
-    def open_workspace(self, source_id: int):
-        win = SourceWorkspace(source_id, self.sources.source_repo, self.sources.outline_repo, self.queue.review_repo, self.highlight_repo)
-        win.queue_changed.connect(self.sync_queue_views)
-        win.show()
-        self._workspace_windows.append(win)
+    def _flush_debounced_updates(self):
+        self._flush_now(force_queue=False)
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index != 0:
+            return
+        if self._queue_sync_timer.isActive():
+            self._queue_sync_timer.stop()
+        if self._queue_dirty:
+            self._flush_now(force_queue=True)
