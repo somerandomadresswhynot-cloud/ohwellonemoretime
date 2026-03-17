@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 
@@ -78,5 +78,24 @@ RATING_TO_SCORE = {
 }
 
 
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat(timespec="seconds")
+
+
+def parse_iso_to_utc(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def utcnow_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
+    return iso_utc(now_utc())

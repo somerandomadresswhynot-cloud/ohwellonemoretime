@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
@@ -38,6 +37,7 @@ from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
 from study_app.services.scheduler import allocate_new_units, compute_next, recommend_new_units_with_guardrail, retention_estimate
+from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 
@@ -729,7 +729,7 @@ class SourceWorkspace(QWidget):
 
     def refresh_insights(self):
         units = self.review_repo.source_units(self.source_id)
-        now = datetime.utcnow()
+        now = now_utc()
         untouched = sum(1 for u in units if not u["last_review_at"])
         low = sum(1 for u in units if retention_estimate(u, now) < 0.45)
         avg = sum(retention_estimate(u, now) for u in units) / max(1, len(units))
@@ -1012,7 +1012,7 @@ class StudyQueuePage(QWidget):
         started = draft.get("started_at", "")
         if started:
             try:
-                self.started_at = datetime.fromisoformat(started)
+                self.started_at = parse_iso_to_utc(started)
             except Exception:
                 self.started_at = None
         self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
@@ -1021,7 +1021,7 @@ class StudyQueuePage(QWidget):
         self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
 
     def refresh(self):
-        due_units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        due_units = self.review_repo.due_units(iso_utc(now_utc()))
         available_minutes = int(self.settings_repo.get("daily_minutes", "90"))
         plan = plan_session_queue(due_units, available_minutes, self._estimate_review_seconds)
         self.units = plan.selected_units
@@ -1093,7 +1093,7 @@ class StudyQueuePage(QWidget):
         row = self.review_repo.unit_by_id(unit.unit_id)
         if not row:
             return None
-        return retention_estimate(row, datetime.utcnow())
+        return retention_estimate(row, now_utc())
 
     def _queue_tile_size_hint(self, tile: QWidget, width: int) -> QSize:
         min_h = 110
@@ -1216,7 +1216,7 @@ class StudyQueuePage(QWidget):
     def toggle_timer(self):
         self.timer_running = not self.timer_running
         if self.timer_running and not self.started_at:
-            self.started_at = datetime.utcnow()
+            self.started_at = now_utc()
 
     def reset_timer(self):
         self.timer_seconds = 0
@@ -1231,12 +1231,12 @@ class StudyQueuePage(QWidget):
     def rate(self, rating: str):
         if not self.active_unit:
             return
-        now = datetime.utcnow()
+        now = now_utc()
         unit_row = self.review_repo.unit_by_id(self.active_unit.unit_id)
         res = compute_next(unit_row, rating, now)
         payload = {
-            "started_at": (self.started_at or now).isoformat(timespec="seconds"),
-            "ended_at": now.isoformat(timespec="seconds"),
+            "started_at": iso_utc(self.started_at or now),
+            "ended_at": iso_utc(now),
             "elapsed_seconds": self.timer_seconds,
             "rating": rating,
             "pre_note": self.pre.toPlainText(),
@@ -1247,7 +1247,7 @@ class StudyQueuePage(QWidget):
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
         unit_stats = {
-            "last_review_at": now.isoformat(timespec="seconds"),
+            "last_review_at": iso_utc(now),
             "next_review_at": res.next_review_at,
             "review_count": count,
             "ease_factor": res.ease_factor,
@@ -1300,7 +1300,7 @@ class SettingsPage(QWidget):
         self.settings_changed.emit()
 
     def refresh_summary(self):
-        due_units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        due_units = self.review_repo.due_units(iso_utc(now_utc()))
         due_review_minutes = sum(self._estimate_review_seconds(u) for u in due_units) / 60.0
         avg_new_unit_seconds = self.review_repo.avg_elapsed_seconds_global() or float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         allocation = allocate_new_units(
