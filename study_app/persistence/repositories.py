@@ -219,6 +219,41 @@ class ReviewRepo:
         self.db.conn.commit()
         return int(cur.lastrowid)
 
+    def record_review(self, unit_id: int, payload: dict, unit_stats: dict) -> int:
+        with self.db.conn:
+            cur = self.db.conn.execute(
+                """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,pre_note,post_note,interval_days,next_review_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    unit_id,
+                    payload["started_at"],
+                    payload["ended_at"],
+                    payload["elapsed_seconds"],
+                    payload["rating"],
+                    payload["pre_note"],
+                    payload["post_note"],
+                    payload["interval_days"],
+                    payload["next_review_at"],
+                ),
+            )
+            update_cur = self.db.conn.execute(
+                """UPDATE units
+                SET last_review_at=?,next_review_at=?,review_count=?,ease_factor=?,interval_days=?,avg_rating=?
+                WHERE id=?""",
+                (
+                    unit_stats["last_review_at"],
+                    unit_stats["next_review_at"],
+                    unit_stats["review_count"],
+                    unit_stats["ease_factor"],
+                    unit_stats["interval_days"],
+                    unit_stats["avg_rating"],
+                    unit_id,
+                ),
+            )
+            if update_cur.rowcount != 1:
+                raise RuntimeError(f"Expected to update exactly one unit row for unit_id={unit_id}")
+            return int(cur.lastrowid)
+
     def update_unit_stats(self, unit_id: int, data: dict) -> None:
         self.db.conn.execute(
             """UPDATE units SET last_review_at=?,next_review_at=?,review_count=?,ease_factor=?,interval_days=?,avg_rating=? WHERE id=?""",

@@ -1109,17 +1109,17 @@ class StudyQueuePage(QWidget):
             "interval_days": res.interval_days,
             "next_review_at": res.next_review_at,
         }
-        self.review_repo.add_event(self.active_unit.unit_id, payload)
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
-        self.review_repo.update_unit_stats(self.active_unit.unit_id, {
+        unit_stats = {
             "last_review_at": now.isoformat(timespec="seconds"),
             "next_review_at": res.next_review_at,
             "review_count": count,
             "ease_factor": res.ease_factor,
             "interval_days": res.interval_days,
             "avg_rating": avg,
-        })
+        }
+        self.review_repo.record_review(self.active_unit.unit_id, payload, unit_stats)
         self.unit_drafts.pop(self.active_unit.unit_id, None)
         self.reset_timer(); self.pre.clear(); self.post.clear(); self.refresh()
 
