@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import timedelta
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QBrush, QCursor
+from PySide6.QtGui import QColor, QBrush, QCursor, QPainter, QPen, QLinearGradient
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -48,6 +49,64 @@ def _enable_smooth_scroll(view: QAbstractItemView) -> None:
     view.verticalScrollBar().setSingleStep(18)
     view.horizontalScrollBar().setSingleStep(18)
 
+
+
+
+class DocumentProgressBar(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._segments: list[dict] = []
+        self._total_pages = 1
+        self._current_page = 1
+        self.setMinimumHeight(22)
+
+    def set_data(self, segments: list[dict], total_pages: int, current_page: int) -> None:
+        self._segments = segments
+        self._total_pages = max(1, int(total_pages or 1))
+        self._current_page = max(1, int(current_page or 1))
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        r = self.rect().adjusted(1, 1, -1, -1)
+        p.setPen(QPen(QColor("#24314a"), 1))
+        p.setBrush(QColor("#0f1624"))
+        p.drawRoundedRect(r, 6, 6)
+
+        inner = r.adjusted(2, 3, -2, -3)
+        for seg in self._segments:
+            sp = max(1, int(seg.get("start_page", 1)))
+            ep = max(sp, int(seg.get("end_page", sp)))
+            left = int(inner.left() + ((sp - 1) / self._total_pages) * inner.width())
+            right = int(inner.left() + (ep / self._total_pages) * inner.width())
+            width = max(2, right - left)
+            seg_rect = inner.adjusted(left - inner.left(), 0, -(inner.width() - (left - inner.left()) - width), 0)
+
+            state = seg.get("state", "unstarted")
+            glow = QColor(0, 0, 0, 0)
+            if state == "mastered":
+                c1, c2, glow = QColor("#7ce8ff"), QColor("#7a7cff"), QColor(124, 232, 255, 90)
+            elif state == "learning":
+                c1, c2, glow = QColor("#f97316"), QColor("#34d399"), QColor(52, 211, 153, 55)
+            else:
+                c1, c2 = QColor("#3e4451"), QColor("#636c7c")
+
+            grad = QLinearGradient(seg_rect.topLeft(), seg_rect.topRight())
+            grad.setColorAt(0.0, c1)
+            grad.setColorAt(1.0, c2)
+            p.setPen(Qt.NoPen)
+            p.setBrush(grad)
+            p.drawRoundedRect(seg_rect, 2, 2)
+
+            if glow.alpha() > 0:
+                p.setBrush(glow)
+                p.drawRoundedRect(seg_rect.adjusted(-1, -1, 1, 1), 3, 3)
+
+        marker_x = int(inner.left() + ((self._current_page - 1) / self._total_pages) * inner.width())
+        p.setPen(QPen(QColor("#f8fafc"), 2))
+        p.drawLine(marker_x, inner.top() - 1, marker_x, inner.bottom() + 1)
 
 class SourcesPage(QWidget):
     queue_changed = Signal()
@@ -317,8 +376,21 @@ class SourceWorkspace(QWidget):
         btn_unit_actions = QPushButton("Unit Actions ▾")
         btn_unit_actions.clicked.connect(self.open_unit_actions_menu)
         self.page_label = QLabel("Page: -")
+
+        self.pdf_outline_tree = QTreeWidget()
+        self.pdf_outline_tree.setHeaderLabels(["Reading Context"])
+        self.pdf_outline_tree.setMaximumWidth(280)
+        self.pdf_outline_tree.setMinimumWidth(220)
+        _enable_smooth_scroll(self.pdf_outline_tree)
+        self.pdf_outline_tree.itemClicked.connect(self.on_pdf_outline_click)
+        self._pdf_outline_items: dict[int, QTreeWidgetItem] = {}
+        self._active_pdf_outline_node_id: int | None = None
+
+        self.doc_progress = DocumentProgressBar()
+
         c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
-        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
+        pdf_row = QHBoxLayout(); pdf_row.addWidget(self.pdf_outline_tree); pdf_row.addWidget(self.pdf, 1)
+        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.page_label); c_l.addLayout(pdf_row, 1); c_l.addWidget(self.doc_progress)
 
         self.insights = QLabel()
         self.insights.setWordWrap(True)
@@ -354,6 +426,10 @@ class SourceWorkspace(QWidget):
         self._state_cache: dict[int, Qt.CheckState] = {}
         self._id_to_item: dict[int, QTreeWidgetItem] = {}
         self._active_filter = ""
+        self._last_pdf_page = 1
+        self._pdf_page_poll = QTimer(self)
+        self._pdf_page_poll.timeout.connect(self._on_pdf_page_polled)
+        self._pdf_page_poll.start(450)
         self.load_source()
 
     def set_source(self, source_id: int) -> None:
@@ -372,6 +448,8 @@ class SourceWorkspace(QWidget):
         self.refresh_tree()
         self.refresh_insights()
         self.refresh_highlights()
+        self._last_pdf_page = int(self.pdf.view_state().get("page", 1))
+        self._refresh_pdf_context_views()
         if self.source:
             self.context_changed.emit(self.source.title, "")
 
@@ -439,6 +517,8 @@ class SourceWorkspace(QWidget):
 
         if preserve_view_state and not filt:
             self._restore_tree_view_state(expanded_ids, selected_id)
+
+        self._refresh_pdf_context_views()
 
     def _add_item_from_row(self, node_id: int, parent_item: QTreeWidgetItem | None, include_children: bool) -> QTreeWidgetItem:
         r = self._rows_by_id.get(node_id)
@@ -586,10 +666,117 @@ class SourceWorkspace(QWidget):
         selected_label = selected_label.replace(" · unit", "")
         if page:
             self.page_label.setText(f"Page: {page}")
+            self._set_active_pdf_outline_by_page(int(page))
         if self.source:
             self.context_changed.emit(self.source.title, selected_label)
         self.refresh_insights()
         self.refresh_highlights()
+
+    def _on_pdf_page_polled(self) -> None:
+        page = int(self.pdf.view_state().get("page", 1))
+        if page == self._last_pdf_page:
+            return
+        self._last_pdf_page = page
+        self.page_label.setText(f"Page: {page}")
+        self._set_active_pdf_outline_by_page(page)
+        self._refresh_doc_progress(page)
+
+    def on_pdf_outline_click(self, item, _col):
+        page = item.data(0, 257)
+        if page:
+            self.pdf.set_page(int(page))
+            self._last_pdf_page = int(page)
+            self.page_label.setText(f"Page: {int(page)}")
+            self._set_active_pdf_outline_by_page(int(page))
+            self._refresh_doc_progress(int(page))
+
+    def _refresh_pdf_context_views(self) -> None:
+        self._build_pdf_outline_tree()
+        self._refresh_doc_progress(int(self.pdf.view_state().get("page", 1)))
+
+    def _build_pdf_outline_tree(self) -> None:
+        self.pdf_outline_tree.clear()
+        self._pdf_outline_items = {}
+        if not self._rows_by_id:
+            return
+
+        roots = [nid for nid, parent in self._parent_id.items() if parent is None]
+
+        def add_node(node_id: int, parent_item: QTreeWidgetItem | None):
+            row = self._rows_by_id.get(node_id)
+            if not row:
+                return
+            label = row["title"]
+            if row["start_page"]:
+                label += f" [p{row['start_page']}-{row['end_page'] or row['start_page']}]"
+            item = QTreeWidgetItem([label])
+            item.setData(0, 256, int(row["id"]))
+            item.setData(0, 257, int(row["start_page"] or 1))
+            if parent_item is None:
+                self.pdf_outline_tree.addTopLevelItem(item)
+            else:
+                parent_item.addChild(item)
+            self._pdf_outline_items[int(row["id"])] = item
+            for child_id in self._child_ids.get(int(row["id"]), []):
+                add_node(child_id, item)
+
+        for rid in roots:
+            add_node(rid, None)
+
+        self.pdf_outline_tree.expandToDepth(1)
+        self._set_active_pdf_outline_by_page(int(self.pdf.view_state().get("page", 1)))
+
+    def _set_active_pdf_outline_by_page(self, page: int) -> None:
+        matches = []
+        for row in self._rows_by_id.values():
+            sp = row["start_page"]
+            ep = row["end_page"] or sp
+            if not sp:
+                continue
+            if int(sp) <= int(page) <= int(ep):
+                matches.append(row)
+        if not matches:
+            return
+        current = max(matches, key=lambda r: int(r["depth"]))
+        current_id = int(current["id"])
+
+        if self._active_pdf_outline_node_id in self._pdf_outline_items:
+            old_item = self._pdf_outline_items[self._active_pdf_outline_node_id]
+            old_item.setBackground(0, QBrush())
+            f = old_item.font(0); f.setBold(False); old_item.setFont(0, f)
+
+        active_item = self._pdf_outline_items.get(current_id)
+        if not active_item:
+            return
+        active_item.setBackground(0, QBrush(QColor("#1a2d4a")))
+        f = active_item.font(0); f.setBold(True); active_item.setFont(0, f)
+        self._active_pdf_outline_node_id = current_id
+        self.pdf_outline_tree.setCurrentItem(active_item)
+
+    def _refresh_doc_progress(self, current_page: int) -> None:
+        units = self.review_repo.source_units(self.source_id)
+        total_pages = int(self.source.page_count or 1) if getattr(self, "source", None) else 1
+        now = now_utc()
+        segments: list[dict] = []
+        for u in units:
+            state = "unstarted"
+            if u["review_count"] > 0:
+                state = "learning"
+                ret = retention_estimate(u, now)
+                nr = u["next_review_at"]
+                if nr:
+                    try:
+                        next_dt = parse_iso_to_utc(nr)
+                        if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
+                            state = "mastered"
+                    except Exception:
+                        pass
+            segments.append({
+                "start_page": int(u["start_page"]),
+                "end_page": int(u["end_page"]),
+                "state": state,
+            })
+        self.doc_progress.set_data(segments, total_pages=total_pages, current_page=current_page)
 
     def on_item_changed(self, item, col):
         if col != 1 or self._tree_syncing:
