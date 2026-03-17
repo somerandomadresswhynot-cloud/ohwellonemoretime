@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QBrush
+from PySide6.QtGui import QColor, QBrush, QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -82,20 +82,19 @@ class SourcesPage(QWidget):
         self.detail = QLabel("Select a source")
         self.detail.setWordWrap(True)
         btn_open = QPushButton("Open Workspace")
-        btn_edit = QPushButton("Edit Metadata")
-        btn_relink = QPushButton("Relink File")
-        btn_archive = QPushButton("Toggle Active")
-        btn_delete = QPushButton("Delete Source")
+        btn_open.setObjectName("accent")
         btn_open.clicked.connect(self._open_current_workspace)
-        btn_edit.clicked.connect(self.edit_source)
-        btn_relink.clicked.connect(self.relink_source)
-        btn_archive.clicked.connect(self.toggle_active)
+        btn_source_actions = QPushButton("Source Actions ▾")
+        btn_source_actions.clicked.connect(self.open_source_actions_menu)
+        btn_delete = QPushButton("Delete Source")
         btn_delete.clicked.connect(self.delete_source)
+        btn_delete.setStyleSheet("background:#3a1f24; border:1px solid #5a2a33;")
         right = QVBoxLayout()
         right.addWidget(self.detail)
-        for b in [btn_open, btn_edit, btn_relink, btn_archive, btn_delete]:
+        for b in [btn_open, btn_source_actions]:
             right.addWidget(b)
         right.addStretch()
+        right.addWidget(btn_delete)
 
         split = QSplitter()
         lw = QWidget(); lw.setLayout(left)
@@ -210,11 +209,39 @@ class SourcesPage(QWidget):
         self.library_changed.emit()
 
     def delete_source(self):
-        if self.current_source_id:
-            self.source_repo.delete(self.current_source_id)
-            self.current_source_id = None
-            self.refresh()
-            self.library_changed.emit()
+        if not self.current_source_id:
+            return
+        s = self.source_repo.get(self.current_source_id)
+        if not s:
+            return
+        ans = QMessageBox.question(
+            self,
+            "Delete source",
+            f"Delete source '{s.title}'? This removes outline, units, highlights, and review history.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+        self.source_repo.delete(self.current_source_id)
+        self.current_source_id = None
+        self.refresh()
+        self.library_changed.emit()
+
+    def open_source_actions_menu(self):
+        if not self.current_source_id:
+            return
+        menu = QMenu(self)
+        edit = menu.addAction("Edit Metadata")
+        relink = menu.addAction("Relink File")
+        active = menu.addAction("Toggle Active")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == edit:
+            self.edit_source()
+        elif chosen == relink:
+            self.relink_source()
+        elif chosen == active:
+            self.toggle_active()
 
 
 class SourceWorkspace(QWidget):
@@ -239,15 +266,22 @@ class SourceWorkspace(QWidget):
         self.tree.itemDoubleClicked.connect(lambda *_: self.jump_to_selected())
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.open_tree_context_menu)
-        btn_all = QPushButton("Enable All")
-        btn_none = QPushButton("Disable All")
-        btn_edit = QPushButton("Edit Outline Text")
-        for btn in (btn_all, btn_none, btn_edit):
+        btn_tree_actions = QPushButton("Tree Actions ▾")
+        btn_tree_actions.clicked.connect(self.open_tree_actions_menu)
+        btn_expand = QPushButton("Expand")
+        btn_expand.clicked.connect(self.tree.expandAll)
+        btn_collapse = QPushButton("Collapse")
+        btn_collapse.clicked.connect(self.tree.collapseAll)
+        btn_edit = QPushButton("Edit Outline")
+        for btn in (btn_tree_actions, btn_expand, btn_collapse, btn_edit):
             btn.setFixedHeight(26)
-        btn_all.clicked.connect(lambda: self._bulk(True))
-        btn_none.clicked.connect(lambda: self._bulk(False))
         btn_edit.clicked.connect(self.edit_outline)
-        left_l = QVBoxLayout(); left_l.addWidget(self.search); left_l.addWidget(self.tree); left_l.addWidget(btn_all); left_l.addWidget(btn_none); left_l.addWidget(btn_edit)
+        tree_toolbar = QHBoxLayout()
+        tree_toolbar.addWidget(btn_tree_actions)
+        tree_toolbar.addWidget(btn_expand)
+        tree_toolbar.addWidget(btn_collapse)
+        tree_toolbar.addWidget(btn_edit)
+        left_l = QVBoxLayout(); left_l.addWidget(self.search); left_l.addLayout(tree_toolbar); left_l.addWidget(self.tree)
         self.search.textChanged.connect(self.refresh_tree)
 
         self.pdf = PersistentPdfViewer()
@@ -255,11 +289,13 @@ class SourceWorkspace(QWidget):
         self.zoom = QSpinBox(); self.zoom.setRange(50, 250); self.zoom.setValue(100)
         self.zoom.valueChanged.connect(lambda v: self.pdf.set_zoom(v / 100))
         btn_jump = QPushButton("Jump To Selected Unit")
+        btn_jump.setObjectName("accent")
         btn_jump.clicked.connect(self.jump_to_selected)
-        btn_hl = QPushButton("Add Highlight from Clipboard")
-        btn_hl.clicked.connect(self.add_highlight_from_clipboard)
+        btn_unit_actions = QPushButton("Unit Actions ▾")
+        btn_unit_actions.clicked.connect(self.open_unit_actions_menu)
         self.page_label = QLabel("Page: -")
-        c_l = QVBoxLayout(); c_l.addWidget(self.zoom); c_l.addWidget(btn_jump); c_l.addWidget(btn_hl); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
+        c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
+        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
 
         self.insights = QLabel()
         self.insights.setWordWrap(True)
@@ -447,6 +483,26 @@ class SourceWorkspace(QWidget):
         self.outline_repo.bulk_set_source(self.source_id, enabled)
         self.refresh_tree()
         self.queue_changed.emit()
+
+    def open_tree_actions_menu(self):
+        menu = QMenu(self)
+        en = menu.addAction("Enable All")
+        dis = menu.addAction("Disable All")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == en:
+            self._bulk(True)
+        elif chosen == dis:
+            self._bulk(False)
+
+    def open_unit_actions_menu(self):
+        menu = QMenu(self)
+        jump = menu.addAction("Jump To Selected Unit")
+        hl = menu.addAction("Add Highlight from Clipboard")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == jump:
+            self.jump_to_selected()
+        elif chosen == hl:
+            self.add_highlight_from_clipboard()
 
     def refresh_insights(self):
         units = self.review_repo.source_units(self.source_id)
