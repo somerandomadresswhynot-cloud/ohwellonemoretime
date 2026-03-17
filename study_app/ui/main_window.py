@@ -231,13 +231,24 @@ class SourceWorkspace(QWidget):
 
         self.search = QLineEdit(); self.search.setPlaceholderText("Filter outline")
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Outline", "Queue"])
+        self.tree.setIndentation(14)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setColumnWidth(0, 250)
+        self.tree.setStyleSheet(
+            "QTreeView::item { padding-top: 1px; padding-bottom: 1px; min-height: 18px; }"
+            "QTreeView::item:selected { border-radius: 4px; }"
+        )
         _enable_smooth_scroll(self.tree)
         self.tree.itemSelectionChanged.connect(self.on_item_select)
         self.tree.itemChanged.connect(self.on_item_changed)
         self.tree.itemDoubleClicked.connect(lambda *_: self.jump_to_selected())
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.open_tree_context_menu)
         btn_all = QPushButton("Enable All")
         btn_none = QPushButton("Disable All")
         btn_edit = QPushButton("Edit Outline Text")
+        for btn in (btn_all, btn_none, btn_edit):
+            btn.setFixedHeight(26)
         btn_all.clicked.connect(lambda: self._bulk(True))
         btn_none.clicked.connect(lambda: self._bulk(False))
         btn_edit.clicked.connect(self.edit_outline)
@@ -312,15 +323,26 @@ class SourceWorkspace(QWidget):
         for r in rows:
             if filt and filt not in r["title"].lower():
                 continue
-            txt = r["title"]
+            is_unit = bool(r["is_unit"])
+            icon = "📄" if is_unit else "📁"
+            txt = f"{icon} {r['title']}"
             if r["start_page"]:
                 txt += f" [{r['start_page']}-{r['end_page']}]"
-            item = QTreeWidgetItem([txt, "on" if r["queue_enabled"] else "off"])
+            badge = "Unit" if is_unit else "Section"
+            item = QTreeWidgetItem([txt, badge])
             item.setData(0, 256, r["id"])
             item.setData(0, 257, r["start_page"])
-            item.setData(0, 258, "unit" if r["is_unit"] else "container")
+            item.setData(0, 258, "unit" if is_unit else "container")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
             item.setCheckState(1, Qt.Checked if r["queue_enabled"] else Qt.Unchecked)
+            if is_unit:
+                font = item.font(0)
+                font.setBold(True)
+                item.setFont(0, font)
+                item.setForeground(1, QBrush(QColor("#8ea2da")))
+            else:
+                item.setForeground(0, QBrush(QColor("#9aa7b2")))
+                item.setForeground(1, QBrush(QColor("#768491")))
             queue_by_id[r["id"]] = bool(r["queue_enabled"])
             pid = r["parent_id"]
             if pid and pid in id_to_item:
@@ -374,6 +396,30 @@ class SourceWorkspace(QWidget):
             return
         enabled = item.checkState(1) == Qt.Checked
         self.outline_repo.set_queue_enabled(item.data(0, 256), enabled)
+        self.refresh_tree()
+        self.queue_changed.emit()
+
+    def open_tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu(self)
+        node_type = item.data(0, 258)
+        node_id = item.data(0, 256)
+        if node_type == "container":
+            act_on = menu.addAction("Enable Chapter")
+            act_off = menu.addAction("Disable Chapter")
+            act_on.triggered.connect(lambda: self._set_node_enabled(node_id, True))
+            act_off.triggered.connect(lambda: self._set_node_enabled(node_id, False))
+        else:
+            act_on = menu.addAction("Enable Unit")
+            act_off = menu.addAction("Disable Unit")
+            act_on.triggered.connect(lambda: self._set_node_enabled(node_id, True))
+            act_off.triggered.connect(lambda: self._set_node_enabled(node_id, False))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _set_node_enabled(self, node_id: int, enabled: bool):
+        self.outline_repo.set_queue_enabled(int(node_id), enabled)
         self.refresh_tree()
         self.queue_changed.emit()
 
