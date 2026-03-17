@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
+import warnings
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QCursor
@@ -38,6 +39,9 @@ class PersistentPdfViewer(QWidget):
         self._last_page = 1
         self._last_location = (0.0, 0.0)
         self._selection_menu_handler = None
+        self._context_menu_connected = False
+        self._page_nav = None
+        self._page_changed_connected = False
 
         self._doc_cache: OrderedDict[str, QPdfDocument] = OrderedDict()
         self._cache_limit = 8
@@ -84,11 +88,11 @@ class PersistentPdfViewer(QWidget):
         if not self._view:
             return
         self._view.setContextMenuPolicy(Qt.CustomContextMenu)
-        try:
-            self._view.customContextMenuRequested.disconnect()
-        except Exception:
-            pass
+        if self._context_menu_connected:
+            self._safe_disconnect(self._view.customContextMenuRequested, self._on_context_menu)
+            self._context_menu_connected = False
         self._view.customContextMenuRequested.connect(self._on_context_menu)
+        self._context_menu_connected = True
 
     def _on_context_menu(self, _pos) -> None:
         if self._selection_menu_handler:
@@ -140,14 +144,25 @@ class PersistentPdfViewer(QWidget):
             pass
 
     def _attach_page_changed(self, doc: QPdfDocument) -> None:
+        nav = self._view.pageNavigator()
+        if self._page_changed_connected and self._page_nav is not None:
+            self._safe_disconnect(self._page_nav.currentPageChanged, self._on_page_changed)
+            self._page_changed_connected = False
+            self._page_nav = None
         try:
-            self._view.pageNavigator().currentPageChanged.disconnect(self._on_page_changed)
+            nav.currentPageChanged.connect(self._on_page_changed)
+            self._page_nav = nav
+            self._page_changed_connected = True
         except Exception:
             pass
-        try:
-            self._view.pageNavigator().currentPageChanged.connect(self._on_page_changed)
-        except Exception:
-            pass
+
+    def _safe_disconnect(self, signal, slot) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
 
     def _cache_doc(self, path: str, doc: QPdfDocument) -> None:
         self._doc_cache[path] = doc
@@ -313,3 +328,13 @@ class PersistentPdfViewer(QWidget):
             except Exception:
                 pass
         return {"page": page, "location": loc}
+
+    def closeEvent(self, event):
+        if self._page_changed_connected and self._page_nav is not None:
+            self._safe_disconnect(self._page_nav.currentPageChanged, self._on_page_changed)
+            self._page_changed_connected = False
+            self._page_nav = None
+        if self._context_menu_connected and self._view is not None:
+            self._safe_disconnect(self._view.customContextMenuRequested, self._on_context_menu)
+            self._context_menu_connected = False
+        super().closeEvent(event)

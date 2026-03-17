@@ -133,12 +133,12 @@ class SourcesPage(QWidget):
             self.show_workspace(self.current_source_id)
 
     def show_workspace(self, source_id: int):
-        if self.current_workspace is not None:
-            self.current_workspace.setParent(None)
-            self.current_workspace.deleteLater()
-        self.current_workspace = SourceWorkspace(source_id, self.source_repo, self.outline_repo, self._review_repo, self._highlight_repo)
-        self.current_workspace.queue_changed.connect(self.queue_changed.emit)
-        self.workspace_host_layout.addWidget(self.current_workspace)
+        if self.current_workspace is None:
+            self.current_workspace = SourceWorkspace(source_id, self.source_repo, self.outline_repo, self._review_repo, self._highlight_repo)
+            self.current_workspace.queue_changed.connect(self.queue_changed.emit)
+            self.workspace_host_layout.addWidget(self.current_workspace)
+        else:
+            self.current_workspace.set_source(source_id)
         self.stack.setCurrentWidget(self.workspace_view)
 
     def show_list(self):
@@ -283,6 +283,15 @@ class SourceWorkspace(QWidget):
         self._tree_syncing = False
         self.load_source()
 
+    def set_source(self, source_id: int) -> None:
+        if int(source_id) == int(self.source_id):
+            return
+        self.source_id = source_id
+        self._selected_node = None
+        self.page_label.setText("Page: -")
+        self.search.clear()
+        self.load_source()
+
     def load_source(self):
         self.source = self.source_repo.get(self.source_id)
         self.pdf.load_if_needed(self.source.file_path)
@@ -324,19 +333,23 @@ class SourceWorkspace(QWidget):
         state_cache = {}
 
         def _state(node_id: int):
+            if node_id in state_cache:
+                return state_cache[node_id]
             kids = child_ids.get(node_id, [])
             if not kids:
-                return Qt.Checked if queue_by_id.get(node_id, False) else Qt.Unchecked
+                state_cache[node_id] = Qt.Checked if queue_by_id.get(node_id, False) else Qt.Unchecked
+                return state_cache[node_id]
             child_states = [_state(k) for k in kids]
             if all(s == Qt.Checked for s in child_states):
-                return Qt.Checked
-            if all(s == Qt.Unchecked for s in child_states):
-                return Qt.Unchecked
-            return Qt.PartiallyChecked
+                state_cache[node_id] = Qt.Checked
+            elif all(s == Qt.Unchecked for s in child_states):
+                state_cache[node_id] = Qt.Unchecked
+            else:
+                state_cache[node_id] = Qt.PartiallyChecked
+            return state_cache[node_id]
 
         for node_id, item in id_to_item.items():
-            state_cache[node_id] = _state(node_id)
-            item.setCheckState(1, state_cache[node_id])
+            item.setCheckState(1, _state(node_id))
 
         self.tree.expandAll()
         self.tree.blockSignals(False)
