@@ -1100,9 +1100,10 @@ class MainWindow(QMainWindow):
         lay.addWidget(tabs)
 
         self._sync_delay_ms = 5000
+        self._queue_dirty = True
         self._queue_sync_timer = QTimer(self)
         self._queue_sync_timer.setSingleShot(True)
-        self._queue_sync_timer.timeout.connect(self._flush_queue_views)
+        self._queue_sync_timer.timeout.connect(self._flush_debounced_updates)
 
         self.sources.library_changed.connect(self.sync_queue_views)
         self.sources.queue_changed.connect(self.request_sync_queue_views)
@@ -1112,18 +1113,26 @@ class MainWindow(QMainWindow):
     def sync_queue_views(self):
         if self._queue_sync_timer.isActive():
             self._queue_sync_timer.stop()
-        self._flush_queue_views()
+        self._queue_dirty = True
+        self._flush_now(force_queue=True)
 
     def request_sync_queue_views(self):
+        self._queue_dirty = True
         self._queue_sync_timer.start(self._sync_delay_ms)
 
-    def _flush_queue_views(self):
-        self.queue.refresh()
+    def _flush_now(self, force_queue: bool = False):
+        if force_queue or self.tabs.currentIndex() == 0:
+            self.queue.refresh()
+            self._queue_dirty = False
         self.settings.refresh_summary()
+
+    def _flush_debounced_updates(self):
+        self._flush_now(force_queue=False)
 
     def _on_tab_changed(self, index: int) -> None:
         if index != 0:
             return
         if self._queue_sync_timer.isActive():
             self._queue_sync_timer.stop()
-            self._flush_queue_views()
+        if self._queue_dirty:
+            self._flush_now(force_queue=True)
