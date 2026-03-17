@@ -282,6 +282,7 @@ class SourceWorkspace(QWidget):
         self.tree.itemSelectionChanged.connect(self.on_item_select)
         self.tree.itemChanged.connect(self.on_item_changed)
         self.tree.itemDoubleClicked.connect(lambda *_: self.jump_to_selected())
+        self.tree.itemExpanded.connect(self.on_item_expanded)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.open_tree_context_menu)
         btn_tree_actions = QPushButton("Tree Actions ▾")
@@ -300,7 +301,10 @@ class SourceWorkspace(QWidget):
         tree_toolbar.addWidget(btn_collapse)
         tree_toolbar.addWidget(btn_edit)
         left_l = QVBoxLayout(); left_l.addWidget(self.search); left_l.addLayout(tree_toolbar); left_l.addWidget(self.tree)
-        self.search.textChanged.connect(self.refresh_tree)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self.refresh_tree)
+        self.search.textChanged.connect(lambda *_: self._filter_timer.start(220))
 
         self.pdf = PersistentPdfViewer()
         self.pdf.set_selection_menu_handler(self.open_selection_menu)
@@ -337,10 +341,17 @@ class SourceWorkspace(QWidget):
         rw = QWidget(); rw.setLayout(right_l)
         split.addWidget(lw); split.addWidget(cw); split.addWidget(rw)
         split.setSizes([300, 700, 320])
+        self.split = split
         lay = QHBoxLayout(root); lay.addWidget(split)
 
         self._selected_node = None
         self._tree_syncing = False
+        self._tree_rows: list = []
+        self._rows_by_id: dict[int, dict] = {}
+        self._child_ids: dict[int, list[int]] = {}
+        self._state_cache: dict[int, Qt.CheckState] = {}
+        self._id_to_item: dict[int, QTreeWidgetItem] = {}
+        self._active_filter = ""
         self.load_source()
 
     def set_source(self, source_id: int) -> None:
@@ -365,73 +376,126 @@ class SourceWorkspace(QWidget):
     def refresh_tree(self):
         filt = self.search.text().strip().lower()
         rows = self.outline_repo.nodes_for_source(self.source_id)
+        self._active_filter = filt
+        self._tree_rows = rows
+        self._rows_by_id = {int(r["id"]): r for r in rows}
+        self._child_ids = {}
+        queue_by_id: dict[int, bool] = {}
+        roots: list[int] = []
+        for r in rows:
+            rid = int(r["id"])
+            queue_by_id[rid] = bool(r["queue_enabled"])
+            pid = r["parent_id"]
+            if pid is None:
+                roots.append(rid)
+            else:
+                self._child_ids.setdefault(int(pid), []).append(rid)
+
+        self._state_cache = {}
+
+        def _state(node_id: int):
+            if node_id in self._state_cache:
+                return self._state_cache[node_id]
+            kids = self._child_ids.get(node_id, [])
+            if not kids:
+                self._state_cache[node_id] = Qt.Checked if queue_by_id.get(node_id, False) else Qt.Unchecked
+                return self._state_cache[node_id]
+            child_states = [_state(k) for k in kids]
+            if all(s == Qt.Checked for s in child_states):
+                self._state_cache[node_id] = Qt.Checked
+            elif all(s == Qt.Unchecked for s in child_states):
+                self._state_cache[node_id] = Qt.Unchecked
+            else:
+                self._state_cache[node_id] = Qt.PartiallyChecked
+            return self._state_cache[node_id]
+
+        for rid in self._rows_by_id:
+            _state(rid)
+
         self._tree_syncing = True
         self.tree.blockSignals(True)
         self.tree.clear()
-        id_to_item = {}
-        child_ids: dict[int, list[int]] = {}
-        queue_by_id: dict[int, bool] = {}
-        for r in rows:
-            if filt and filt not in r["title"].lower():
-                continue
-            is_unit = bool(r["is_unit"])
-            txt = r["title"]
-            if r["start_page"]:
-                txt += f" [{r['start_page']}-{r['end_page']}]"
-            if is_unit:
-                txt += " · unit"
-            item = QTreeWidgetItem([txt, "on" if r["queue_enabled"] else "off"])
-            item.setData(0, 256, r["id"])
-            item.setData(0, 257, r["start_page"])
-            item.setData(0, 258, "unit" if is_unit else "container")
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
-            item.setCheckState(1, Qt.Checked if r["queue_enabled"] else Qt.Unchecked)
-            if is_unit:
-                font = item.font(0)
-                font.setBold(True)
-                item.setFont(0, font)
-            else:
-                item.setForeground(0, QBrush(QColor("#9aa7b2")))
-            queue_by_id[r["id"]] = bool(r["queue_enabled"])
-            pid = r["parent_id"]
-            if pid and pid in id_to_item:
-                id_to_item[pid].addChild(item)
-                child_ids.setdefault(pid, []).append(r["id"])
-            else:
-                self.tree.addTopLevelItem(item)
-            id_to_item[r["id"]] = item
-
-        state_cache = {}
-
-        def _state(node_id: int):
-            if node_id in state_cache:
-                return state_cache[node_id]
-            kids = child_ids.get(node_id, [])
-            if not kids:
-                state_cache[node_id] = Qt.Checked if queue_by_id.get(node_id, False) else Qt.Unchecked
-                return state_cache[node_id]
-            child_states = [_state(k) for k in kids]
-            if all(s == Qt.Checked for s in child_states):
-                state_cache[node_id] = Qt.Checked
-            elif all(s == Qt.Unchecked for s in child_states):
-                state_cache[node_id] = Qt.Unchecked
-            else:
-                state_cache[node_id] = Qt.PartiallyChecked
-            return state_cache[node_id]
-
-        for node_id, item in id_to_item.items():
-            item.setCheckState(1, _state(node_id))
-            cstate = item.checkState(1)
-            if cstate == Qt.Checked:
-                item.setText(1, "on")
-            elif cstate == Qt.Unchecked:
-                item.setText(1, "off")
-            else:
-                item.setText(1, "mixed")
-
-        self.tree.expandAll()
+        self._id_to_item = {}
+        if filt:
+            for r in rows:
+                if filt not in r["title"].lower():
+                    continue
+                self._add_item_from_row(int(r["id"]), None, include_children=True)
+            self.tree.expandAll()
+        else:
+            for rid in roots:
+                self._add_item_from_row(rid, None, include_children=False)
         self.tree.blockSignals(False)
         self._tree_syncing = False
+
+    def _add_item_from_row(self, node_id: int, parent_item: QTreeWidgetItem | None, include_children: bool) -> QTreeWidgetItem:
+        r = self._rows_by_id.get(node_id)
+        if not r:
+            return QTreeWidgetItem()
+        is_unit = bool(r["is_unit"])
+        txt = r["title"]
+        if r["start_page"]:
+            txt += f" [{r['start_page']}-{r['end_page']}]"
+        if is_unit:
+            txt += " · unit"
+        item = QTreeWidgetItem([txt, "off"])
+        item.setData(0, 256, r["id"])
+        item.setData(0, 257, r["start_page"])
+        item.setData(0, 258, "unit" if is_unit else "container")
+        item.setData(0, 259, False)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+        item.setCheckState(1, self._state_cache.get(node_id, Qt.Unchecked))
+        if is_unit:
+            font = item.font(0)
+            font.setBold(True)
+            item.setFont(0, font)
+        else:
+            item.setForeground(0, QBrush(QColor("#9aa7b2")))
+        cstate = item.checkState(1)
+        item.setText(1, "on" if cstate == Qt.Checked else "off" if cstate == Qt.Unchecked else "mixed")
+        if parent_item is None:
+            self.tree.addTopLevelItem(item)
+        else:
+            parent_item.addChild(item)
+        self._id_to_item[node_id] = item
+
+        kids = self._child_ids.get(node_id, [])
+        if not include_children and kids:
+            item.addChild(QTreeWidgetItem(["", ""]))
+        elif include_children:
+            for kid_id in kids:
+                self._add_item_from_row(kid_id, item, include_children=True)
+            item.setData(0, 259, True)
+        return item
+
+    def on_item_expanded(self, item):
+        if self._active_filter:
+            return
+        if item.data(0, 259):
+            return
+        node_id = int(item.data(0, 256))
+        kids = self._child_ids.get(node_id, [])
+        if not kids:
+            item.setData(0, 259, True)
+            return
+        self._tree_syncing = True
+        self.tree.blockSignals(True)
+        item.takeChildren()
+        for kid_id in kids:
+            self._add_item_from_row(kid_id, item, include_children=False)
+        item.setData(0, 259, True)
+        self.tree.blockSignals(False)
+        self._tree_syncing = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "split"):
+            return
+        w = self.width()
+        if w < 1250:
+            self.split.setSizes([280, max(420, w - 560), 220])
+        else:
+            self.split.setSizes([300, max(520, w - 660), 320])
 
     def on_item_select(self):
         items = self.tree.selectedItems()
