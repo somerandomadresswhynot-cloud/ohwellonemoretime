@@ -125,7 +125,7 @@ class SourcesPage(QWidget):
         top_bar.addWidget(self.ctx_path)
         top_bar.addStretch()
         workspace_layout.addLayout(top_bar)
-        workspace_layout.addWidget(self.workspace_host)
+        workspace_layout.addWidget(self.workspace_host, 1)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.list_view)
