@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTabWidget,
     QTextEdit,
-    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -894,7 +893,7 @@ class StudyQueuePage(QWidget):
         self.started_at = None
         self.unit_drafts: dict[int, dict] = {}
         self.source_path_cache: dict[int, str] = {}
-        self.suggested_units = []
+        self.display_units = []
 
         self.list = QListWidget()
         _enable_smooth_scroll(self.list)
@@ -904,37 +903,13 @@ class StudyQueuePage(QWidget):
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
 
-        self.new_list = QListWidget()
-        _enable_smooth_scroll(self.new_list)
-        self.new_list.setSpacing(6)
-        self.new_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.new_list.viewport().installEventFilter(self)
-        self.new_list.itemDoubleClicked.connect(self._jump_from_suggestion)
-
         self.queue_banner = QLabel("")
         self.queue_banner.setWordWrap(True)
-        self.new_banner = QLabel("")
-        self.new_banner.setWordWrap(True)
-
-        self.review_toggle = QToolButton()
-        self.review_toggle.setText("Review ▾")
-        self.review_toggle.setCheckable(True)
-        self.review_toggle.setChecked(True)
-        self.review_toggle.clicked.connect(lambda checked: self._set_section_collapsed("review", not checked))
-
-        self.new_toggle = QToolButton()
-        self.new_toggle.setText("New ▾")
-        self.new_toggle.setCheckable(True)
-        self.new_toggle.setChecked(True)
-        self.new_toggle.clicked.connect(lambda checked: self._set_section_collapsed("new", not checked))
 
         left = QVBoxLayout()
-        left.addWidget(self.review_toggle)
+        left.addWidget(QLabel("Queue"))
         left.addWidget(self.queue_banner)
         left.addWidget(self.list)
-        left.addWidget(self.new_toggle)
-        left.addWidget(self.new_banner)
-        left.addWidget(self.new_list)
 
         self.title = QLabel("No unit selected")
         self.timer_lbl = QLabel("00:00")
@@ -1010,16 +985,6 @@ class StudyQueuePage(QWidget):
         self.pdf.setMaximumHeight(new_h)
         self.settings_repo.set_ui_state("queue_pdf_height", str(new_h))
 
-    def _set_section_collapsed(self, section: str, collapsed: bool) -> None:
-        if section == "review":
-            self.queue_banner.setVisible(not collapsed)
-            self.list.setVisible(not collapsed)
-            self.review_toggle.setText("Review ▸" if collapsed else "Review ▾")
-        else:
-            self.new_banner.setVisible(not collapsed)
-            self.new_list.setVisible(not collapsed)
-            self.new_toggle.setText("New ▸" if collapsed else "New ▾")
-
     def _save_current_draft(self):
         if not self.active_unit:
             return
@@ -1076,14 +1041,16 @@ class StudyQueuePage(QWidget):
         )
         self.units = plan.selected_units
         self.list.clear()
-        self.new_list.clear()
         self.source_path_cache = {}
-        self.suggested_units = plan.suggested_units
+        self.display_units = []
+        suggestion_extra = f" · {len(plan.suggested_units)} progression suggestion(s)" if plan.suggested_units else ""
         self.queue_banner.setText(
             f"Showing {len(self.units)}/{len(due_units)} due units · "
             f"Projected {plan.projected_minutes:.1f} min"
             + (f" · {plan.overflow_count} deferred" if plan.overflow_count else "")
+            + suggestion_extra
         )
+        existing_ids = set()
         for u in self.units:
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
@@ -1091,16 +1058,17 @@ class StudyQueuePage(QWidget):
             item = QListWidgetItem()
             self.list.addItem(item)
             self.list.setItemWidget(item, tile)
+            self.display_units.append((u, None))
+            existing_ids.add(int(u.unit_id))
             if u.source_id not in self.source_path_cache:
                 s = self.source_repo.get(u.source_id)
                 if s:
                     self.source_path_cache[u.source_id] = s.file_path
                     self.pdf.prime_path(s.file_path)
-        self.new_banner.setText(
-            "No new-item suggestions right now." if not plan.suggested_units else
-            f"{len(plan.suggested_units)} suggested new unit(s) outside today budget"
-        )
+
         for sug in plan.suggested_units:
+            if int(sug.unit.unit_id) in existing_ids:
+                continue
             est_seconds = max(1.0, sug.estimated_minutes * 60.0)
             tile = self._build_queue_tile(
                 sug.unit,
@@ -1109,10 +1077,10 @@ class StudyQueuePage(QWidget):
                 progression_reason=sug.reason,
             )
             item = QListWidgetItem()
-            item.setData(256, int(sug.unit.unit_id))
-            item.setData(257, sug.reason)
-            self.new_list.addItem(item)
-            self.new_list.setItemWidget(item, tile)
+            self.list.addItem(item)
+            self.list.setItemWidget(item, tile)
+            self.display_units.append((sug.unit, sug.reason))
+
         self._relayout_queue_tiles()
         if self.list.count() > 0:
             self.list.setCurrentRow(0)
@@ -1121,21 +1089,20 @@ class StudyQueuePage(QWidget):
             self.title.setText("No unit selected")
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Resize and obj in {self.list.viewport(), self.new_list.viewport()}:
+        if obj is self.list.viewport() and event.type() == QEvent.Resize:
             self._relayout_queue_tiles()
         return super().eventFilter(obj, event)
 
     def _relayout_queue_tiles(self):
-        for widget_list in (self.list, self.new_list):
-            tile_w = max(220, widget_list.viewport().width() - 14)
-            for i in range(widget_list.count()):
-                item = widget_list.item(i)
-                tile = widget_list.itemWidget(item)
-                if not tile:
-                    continue
-                tile.setFixedWidth(tile_w)
-                tile.adjustSize()
-                item.setSizeHint(self._queue_tile_size_hint(tile, tile_w))
+        tile_w = max(220, self.list.viewport().width() - 14)
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            tile = self.list.itemWidget(item)
+            if not tile:
+                continue
+            tile.setFixedWidth(tile_w)
+            tile.adjustSize()
+            item.setSizeHint(self._queue_tile_size_hint(tile, tile_w))
 
     def _estimate_review_seconds(self, unit) -> float:
         pages = max(1, (unit.end_page - unit.start_page) + 1)
@@ -1256,10 +1223,10 @@ class StudyQueuePage(QWidget):
 
     def pick_unit(self, idx):
         self._save_current_draft()
-        if idx < 0 or idx >= len(self.units):
+        if idx < 0 or idx >= len(self.display_units):
             self.active_unit = None
             return
-        self.active_unit = self.units[idx]
+        self.active_unit = self.display_units[idx][0]
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
         path = self.source_path_cache.get(self.active_unit.source_id)
         if not path:
@@ -1278,29 +1245,6 @@ class StudyQueuePage(QWidget):
         self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
         self.pdf.set_page(self.active_unit.start_page)
         self._load_draft_for_active()
-
-    def _jump_from_suggestion(self, item):
-        unit_id = int(item.data(256))
-        for idx, unit in enumerate(self.units):
-            if int(unit.unit_id) == unit_id:
-                self.list.setCurrentRow(idx)
-                self.jump_to_active_unit()
-                return
-        for sug in self.suggested_units:
-            if int(sug.unit.unit_id) != unit_id:
-                continue
-            self.active_unit = sug.unit
-            self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
-            path = self.source_path_cache.get(self.active_unit.source_id)
-            if not path:
-                s = self.source_repo.get(self.active_unit.source_id)
-                path = s.file_path if s else ""
-                if path:
-                    self.source_path_cache[self.active_unit.source_id] = path
-            self.pdf.load_if_needed(path)
-            self.pdf.set_multi_page_mode()
-            self.pdf.set_page(self.active_unit.start_page)
-            return
 
     def jump_to_active_unit(self):
         if self.active_unit:
