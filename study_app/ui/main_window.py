@@ -232,12 +232,7 @@ class SourceWorkspace(QWidget):
         self.search = QLineEdit(); self.search.setPlaceholderText("Filter outline")
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Outline", "Queue"])
         self.tree.setIndentation(14)
-        self.tree.setUniformRowHeights(True)
         self.tree.setColumnWidth(0, 250)
-        self.tree.setStyleSheet(
-            "QTreeView::item { padding-top: 1px; padding-bottom: 1px; min-height: 18px; }"
-            "QTreeView::item:selected { border-radius: 4px; }"
-        )
         _enable_smooth_scroll(self.tree)
         self.tree.itemSelectionChanged.connect(self.on_item_select)
         self.tree.itemChanged.connect(self.on_item_changed)
@@ -324,12 +319,12 @@ class SourceWorkspace(QWidget):
             if filt and filt not in r["title"].lower():
                 continue
             is_unit = bool(r["is_unit"])
-            icon = "📄" if is_unit else "📁"
-            txt = f"{icon} {r['title']}"
+            txt = r["title"]
             if r["start_page"]:
                 txt += f" [{r['start_page']}-{r['end_page']}]"
-            badge = "Unit" if is_unit else "Section"
-            item = QTreeWidgetItem([txt, badge])
+            if is_unit:
+                txt += " · unit"
+            item = QTreeWidgetItem([txt, "on" if r["queue_enabled"] else "off"])
             item.setData(0, 256, r["id"])
             item.setData(0, 257, r["start_page"])
             item.setData(0, 258, "unit" if is_unit else "container")
@@ -339,10 +334,8 @@ class SourceWorkspace(QWidget):
                 font = item.font(0)
                 font.setBold(True)
                 item.setFont(0, font)
-                item.setForeground(1, QBrush(QColor("#8ea2da")))
             else:
                 item.setForeground(0, QBrush(QColor("#9aa7b2")))
-                item.setForeground(1, QBrush(QColor("#768491")))
             queue_by_id[r["id"]] = bool(r["queue_enabled"])
             pid = r["parent_id"]
             if pid and pid in id_to_item:
@@ -372,6 +365,13 @@ class SourceWorkspace(QWidget):
 
         for node_id, item in id_to_item.items():
             item.setCheckState(1, _state(node_id))
+            cstate = item.checkState(1)
+            if cstate == Qt.Checked:
+                item.setText(1, "on")
+            elif cstate == Qt.Unchecked:
+                item.setText(1, "off")
+            else:
+                item.setText(1, "mixed")
 
         self.tree.expandAll()
         self.tree.blockSignals(False)
