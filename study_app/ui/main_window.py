@@ -1090,6 +1090,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(bar)
 
         tabs = QTabWidget()
+        self.tabs = tabs
         self.queue = StudyQueuePage(source_repo, review_repo, settings_repo)
         self.sources = SourcesPage(source_repo, outline_repo, review_repo, highlight_repo, pdf_service)
         self.settings = SettingsPage(settings_repo, review_repo)
@@ -1098,10 +1099,31 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.settings, "Settings")
         lay.addWidget(tabs)
 
+        self._sync_delay_ms = 5000
+        self._queue_sync_timer = QTimer(self)
+        self._queue_sync_timer.setSingleShot(True)
+        self._queue_sync_timer.timeout.connect(self._flush_queue_views)
+
         self.sources.library_changed.connect(self.sync_queue_views)
-        self.sources.queue_changed.connect(self.sync_queue_views)
+        self.sources.queue_changed.connect(self.request_sync_queue_views)
         self.settings.settings_changed.connect(self.sync_queue_views)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def sync_queue_views(self):
+        if self._queue_sync_timer.isActive():
+            self._queue_sync_timer.stop()
+        self._flush_queue_views()
+
+    def request_sync_queue_views(self):
+        self._queue_sync_timer.start(self._sync_delay_ms)
+
+    def _flush_queue_views(self):
         self.queue.refresh()
         self.settings.refresh_summary()
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index != 0:
+            return
+        if self._queue_sync_timer.isActive():
+            self._queue_sync_timer.stop()
+            self._flush_queue_views()
