@@ -108,6 +108,10 @@ class SourcesPage(QWidget):
 
         self.back_btn = QPushButton("← Back to Sources")
         self.back_btn.clicked.connect(self.show_list)
+        self.ctx_source = QLabel("Source: -")
+        self.ctx_source.setStyleSheet("font-weight:600;")
+        self.ctx_path = QLabel("Sources")
+        self.ctx_path.setStyleSheet("color:#9aa7b2;")
         self.workspace_host = QWidget()
         self.workspace_host_layout = QVBoxLayout(self.workspace_host)
         self.workspace_host_layout.setContentsMargins(0, 0, 0, 0)
@@ -115,7 +119,12 @@ class SourcesPage(QWidget):
         self.workspace_view = QWidget()
         workspace_layout = QVBoxLayout(self.workspace_view)
         workspace_layout.setContentsMargins(0, 0, 0, 0)
-        workspace_layout.addWidget(self.back_btn)
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(self.back_btn)
+        top_bar.addWidget(self.ctx_source)
+        top_bar.addWidget(self.ctx_path)
+        top_bar.addStretch()
+        workspace_layout.addLayout(top_bar)
         workspace_layout.addWidget(self.workspace_host)
 
         self.stack = QStackedWidget()
@@ -135,10 +144,18 @@ class SourcesPage(QWidget):
         if self.current_workspace is None:
             self.current_workspace = SourceWorkspace(source_id, self.source_repo, self.outline_repo, self._review_repo, self._highlight_repo)
             self.current_workspace.queue_changed.connect(self.queue_changed.emit)
+            self.current_workspace.context_changed.connect(self.on_workspace_context_changed)
             self.workspace_host_layout.addWidget(self.current_workspace)
         else:
             self.current_workspace.set_source(source_id)
         self.stack.setCurrentWidget(self.workspace_view)
+
+    def on_workspace_context_changed(self, source_title: str, section_path: str):
+        self.ctx_source.setText(f"Source: {source_title}")
+        if section_path:
+            self.ctx_path.setText(f"Sources / {source_title} / {section_path}")
+        else:
+            self.ctx_path.setText(f"Sources / {source_title}")
 
     def show_list(self):
         self.stack.setCurrentWidget(self.list_view)
@@ -246,6 +263,7 @@ class SourcesPage(QWidget):
 
 class SourceWorkspace(QWidget):
     queue_changed = Signal()
+    context_changed = Signal(str, str)
     def __init__(self, source_id: int, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo):
         super().__init__()
         self.source_id = source_id
@@ -341,6 +359,8 @@ class SourceWorkspace(QWidget):
         self.refresh_tree()
         self.refresh_insights()
         self.refresh_highlights()
+        if self.source:
+            self.context_changed.emit(self.source.title, "")
 
     def refresh_tree(self):
         filt = self.search.text().strip().lower()
@@ -420,8 +440,12 @@ class SourceWorkspace(QWidget):
         it = items[0]
         self._selected_node = it.data(0, 256)
         page = it.data(0, 257)
+        selected_label = it.text(0).split(" [", 1)[0]
+        selected_label = selected_label.replace(" · unit", "")
         if page:
             self.page_label.setText(f"Page: {page}")
+        if self.source:
+            self.context_changed.emit(self.source.title, selected_label)
         self.refresh_insights()
         self.refresh_highlights()
 
