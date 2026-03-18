@@ -70,7 +70,6 @@ Annotation toolbar state is persisted in `ui_state`:
 
 ### Known limitations / fallback behavior
 
-- Viewer backend now prefers Qt WebEngine when available for better text selection behavior; it falls back to QtPdf if WebEngine is unavailable.
 - `QPdfView` does not reliably expose text glyph quad geometry across Qt versions, so text highlight rendering uses a **fallback cue overlay** on the current page rather than exact text-shape painting.
 - Area highlight rectangles are currently normalized to the visible viewport and intended as a foundation for richer page-geometry anchoring in future updates.
 - UI interactions (drag, erase, context menu) are interactive behaviors; automated UI smoke coverage is best-effort and skipped when GUI dependencies are unavailable.
