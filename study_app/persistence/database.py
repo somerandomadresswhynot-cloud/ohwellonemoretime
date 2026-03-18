@@ -89,10 +89,19 @@ CREATE TABLE IF NOT EXISTS highlights (
     source_id INTEGER NOT NULL,
     unit_id INTEGER,
     page INTEGER NOT NULL,
+    page_index INTEGER NOT NULL DEFAULT 0,
     quote_text TEXT NOT NULL,
+    anchor_type TEXT NOT NULL DEFAULT 'text',
+    text_prefix TEXT NOT NULL DEFAULT '',
+    text_exact TEXT NOT NULL DEFAULT '',
+    text_suffix TEXT NOT NULL DEFAULT '',
+    rects_json TEXT NOT NULL DEFAULT '[]',
+    opacity REAL NOT NULL DEFAULT 0.35,
+    label TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT '',
     color TEXT NOT NULL DEFAULT '#2d9cdb',
     created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
     FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE SET NULL
 );
@@ -144,8 +153,48 @@ class Database:
         highlight_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(highlights)").fetchall()}
         if "color" not in highlight_cols:
             self.conn.execute("ALTER TABLE highlights ADD COLUMN color TEXT NOT NULL DEFAULT '#2d9cdb'")
+        if "page_index" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN page_index INTEGER NOT NULL DEFAULT 0")
+        if "anchor_type" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN anchor_type TEXT NOT NULL DEFAULT 'text'")
+        if "text_prefix" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN text_prefix TEXT NOT NULL DEFAULT ''")
+        if "text_exact" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN text_exact TEXT NOT NULL DEFAULT ''")
+        if "text_suffix" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN text_suffix TEXT NOT NULL DEFAULT ''")
+        if "rects_json" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN rects_json TEXT NOT NULL DEFAULT '[]'")
+        if "opacity" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN opacity REAL NOT NULL DEFAULT 0.35")
+        if "label" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+        if "updated_at" not in highlight_cols:
+            self.conn.execute("ALTER TABLE highlights ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+        self._backfill_highlight_annotation_fields()
+        self.conn.commit()
         self._ensure_scheduling_constraints()
         self._ensure_indexes()
+
+    def _backfill_highlight_annotation_fields(self) -> None:
+        self.conn.execute(
+            "UPDATE highlights SET page_index = CASE WHEN page >= 1 THEN page - 1 ELSE 0 END WHERE page_index < 0 OR page_index IS NULL"
+        )
+        self.conn.execute(
+            "UPDATE highlights SET page_index = page - 1 WHERE page_index = 0 AND page > 1"
+        )
+        self.conn.execute(
+            "UPDATE highlights SET text_exact = quote_text WHERE trim(text_exact) = ''"
+        )
+        self.conn.execute(
+            "UPDATE highlights SET anchor_type = 'text' WHERE trim(anchor_type) = ''"
+        )
+        self.conn.execute(
+            "UPDATE highlights SET rects_json = '[]' WHERE trim(rects_json) = ''"
+        )
+        self.conn.execute(
+            "UPDATE highlights SET updated_at = created_at WHERE trim(updated_at) = ''"
+        )
 
     def _ensure_indexes(self) -> None:
         self.conn.executescript(INDEXES)

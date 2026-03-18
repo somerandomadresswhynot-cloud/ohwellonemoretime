@@ -315,6 +315,26 @@ class HighlightRepo:
         self.db = db
 
     def add_highlight(self, source_id: int, page: int, quote_text: str, note: str = "", color: str = "#2d9cdb") -> int:
+        return self.add_text_highlight(
+            source_id=source_id,
+            page=page,
+            quote_text=quote_text,
+            note=note,
+            color=color,
+        )
+
+    def add_text_highlight(
+        self,
+        source_id: int,
+        page: int,
+        quote_text: str,
+        note: str = "",
+        color: str = "#2d9cdb",
+        text_prefix: str = "",
+        text_suffix: str = "",
+        opacity: float = 0.35,
+        label: str = "",
+    ) -> int:
         unit_row = self.db.conn.execute(
             """SELECT u.id AS unit_id, n.depth AS depth, (u.end_page-u.start_page) AS span
             FROM units u JOIN outline_nodes n ON n.id=u.node_id
@@ -325,8 +345,74 @@ class HighlightRepo:
         ).fetchone()
         unit_id = unit_row["unit_id"] if unit_row else None
         cur = self.db.conn.execute(
-            "INSERT INTO highlights(source_id,unit_id,page,quote_text,note,color,created_at) VALUES(?,?,?,?,?,?,?)",
-            (source_id, unit_id, page, quote_text, note, color, utcnow_iso()),
+            """INSERT INTO highlights(
+                source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                source_id,
+                unit_id,
+                page,
+                max(0, page - 1),
+                quote_text,
+                "text",
+                text_prefix,
+                quote_text,
+                text_suffix,
+                "[]",
+                float(opacity),
+                label,
+                note,
+                color,
+                utcnow_iso(),
+                utcnow_iso(),
+            ),
+        )
+        self.db.conn.commit()
+        return int(cur.lastrowid)
+
+    def add_area_highlight(
+        self,
+        source_id: int,
+        page: int,
+        rects: list[dict],
+        note: str = "",
+        color: str = "#2d9cdb",
+        quote_text: str = "",
+        opacity: float = 0.35,
+        label: str = "",
+    ) -> int:
+        unit_row = self.db.conn.execute(
+            """SELECT u.id AS unit_id, n.depth AS depth, (u.end_page-u.start_page) AS span
+            FROM units u JOIN outline_nodes n ON n.id=u.node_id
+            WHERE u.source_id=? AND u.start_page<=? AND u.end_page>=?
+            ORDER BY n.depth DESC, span ASC
+            LIMIT 1""",
+            (source_id, page, page),
+        ).fetchone()
+        unit_id = unit_row["unit_id"] if unit_row else None
+        rects_json = json.dumps(rects, separators=(",", ":"))
+        cur = self.db.conn.execute(
+            """INSERT INTO highlights(
+                source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                source_id,
+                unit_id,
+                page,
+                max(0, page - 1),
+                quote_text,
+                "rect",
+                "",
+                quote_text,
+                "",
+                rects_json,
+                float(opacity),
+                label,
+                note,
+                color,
+                utcnow_iso(),
+                utcnow_iso(),
+            ),
         )
         self.db.conn.commit()
         return int(cur.lastrowid)
@@ -344,11 +430,11 @@ class HighlightRepo:
         self.db.conn.commit()
 
     def update_highlight_note(self, highlight_id: int, note: str) -> None:
-        self.db.conn.execute("UPDATE highlights SET note=? WHERE id=?", (note, highlight_id))
+        self.db.conn.execute("UPDATE highlights SET note=?, updated_at=? WHERE id=?", (note, utcnow_iso(), highlight_id))
         self.db.conn.commit()
 
     def update_highlight_color(self, highlight_id: int, color: str) -> None:
-        self.db.conn.execute("UPDATE highlights SET color=? WHERE id=?", (color, highlight_id))
+        self.db.conn.execute("UPDATE highlights SET color=?, updated_at=? WHERE id=?", (color, utcnow_iso(), highlight_id))
         self.db.conn.commit()
 
     def list_unit_highlights(self, unit_id: int):

@@ -71,6 +71,27 @@ class ReviewEvent:
     next_review_at: str
 
 
+@dataclass
+class HighlightRecord:
+    id: int
+    source_id: int
+    unit_id: Optional[int]
+    page: int
+    page_index: int
+    quote_text: str
+    anchor_type: str
+    text_prefix: str
+    text_exact: str
+    text_suffix: str
+    rects_json: str
+    opacity: float
+    label: str
+    note: str
+    color: str
+    created_at: str
+    updated_at: str
+
+
 RATING_TO_SCORE = {
     "easy": 5,
     "with_effort": 3,
