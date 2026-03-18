@@ -302,6 +302,7 @@ class SourcesPage(QWidget):
                 self._review_repo,
                 self._highlight_repo,
                 self._settings_repo,
+                self.pdf_service,
             )
             self.current_workspace.queue_changed.connect(self.queue_changed.emit)
             self.current_workspace.context_changed.connect(self.on_workspace_context_changed)
@@ -433,6 +434,7 @@ class SourceWorkspace(QWidget):
         review_repo: ReviewRepo,
         highlight_repo: HighlightRepo,
         settings_repo: SettingsRepo,
+        pdf_service: PdfService,
     ):
         super().__init__()
         self.source_id = source_id
@@ -441,6 +443,7 @@ class SourceWorkspace(QWidget):
         self.review_repo = review_repo
         self.highlight_repo = highlight_repo
         self.settings_repo = settings_repo
+        self.pdf_service = pdf_service
         self._annotation_palette = [
             ("Blue", "#2d9cdb"),
             ("Purple", "#8b5cf6"),
@@ -534,6 +537,9 @@ class SourceWorkspace(QWidget):
         self.opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
         self.opacity_spin.valueChanged.connect(self._on_opacity_changed)
         color_row.addWidget(self.opacity_spin)
+        self.text_layer_hint = QLabel("Text layer: probing…")
+        self.text_layer_hint.setStyleSheet("color:#9aa7b2;")
+        color_row.addWidget(self.text_layer_hint)
         color_row.addStretch()
 
         c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
@@ -739,6 +745,7 @@ class SourceWorkspace(QWidget):
         self.source = self.source_repo.get(self.source_id)
         self.pdf.load_if_needed(self.source.file_path)
         self.pdf.set_fit_mode()
+        self._refresh_text_layer_hint()
         self.refresh_tree()
         self.refresh_insights()
         self.refresh_highlights()
@@ -747,6 +754,21 @@ class SourceWorkspace(QWidget):
         self._sync_pdf_overlay_highlights()
         if self.source:
             self.context_changed.emit(self.source.title, "")
+
+    def _refresh_text_layer_hint(self) -> None:
+        if not getattr(self, "source", None) or not self.source or not self.source.file_path:
+            self.text_layer_hint.setText("Text layer: unknown")
+            return
+        probe = self.pdf_service.probe_text_layer(self.source.file_path)
+        if probe.get("error"):
+            self.text_layer_hint.setText("Text layer: probe failed")
+            return
+        sampled = int(probe.get("sampled_pages", 0))
+        text_pages = int(probe.get("text_pages", 0))
+        if probe.get("has_text_layer"):
+            self.text_layer_hint.setText(f"Text layer: likely yes ({text_pages}/{sampled})")
+        else:
+            self.text_layer_hint.setText(f"Text layer: likely image-only (0/{sampled})")
 
     def refresh_tree(self, preserve_view_state: bool = True):
         expanded_ids: set[int] = set()
@@ -1436,12 +1458,20 @@ class CornerResizeHandle(QFrame):
 
 
 class StudyQueuePage(QWidget):
-    def __init__(self, source_repo: SourceRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo, highlight_repo: HighlightRepo):
+    def __init__(
+        self,
+        source_repo: SourceRepo,
+        review_repo: ReviewRepo,
+        settings_repo: SettingsRepo,
+        highlight_repo: HighlightRepo,
+        pdf_service: PdfService,
+    ):
         super().__init__()
         self.source_repo = source_repo
         self.review_repo = review_repo
         self.settings_repo = settings_repo
         self.highlight_repo = highlight_repo
+        self.pdf_service = pdf_service
         self.timer_seconds = 0
         self.timer_running = False
         self.active_unit = None
@@ -1566,6 +1596,9 @@ class StudyQueuePage(QWidget):
         self.queue_opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
         self.queue_opacity_spin.valueChanged.connect(self._on_queue_opacity_changed)
         queue_annotation_controls.addWidget(self.queue_opacity_spin)
+        self.queue_text_layer_hint = QLabel("Text layer: probing…")
+        self.queue_text_layer_hint.setStyleSheet("color:#9aa7b2;")
+        queue_annotation_controls.addWidget(self.queue_text_layer_hint)
         queue_annotation_controls.addStretch()
         queue_pdf_row = QHBoxLayout()
         queue_pdf_row.addWidget(self.queue_outline_tree)
@@ -1673,6 +1706,21 @@ class StudyQueuePage(QWidget):
         if not self.active_unit:
             return None
         return int(self.active_unit.source_id)
+
+    def _refresh_queue_text_layer_hint(self, file_path: str) -> None:
+        if not file_path:
+            self.queue_text_layer_hint.setText("Text layer: unknown")
+            return
+        probe = self.pdf_service.probe_text_layer(file_path)
+        if probe.get("error"):
+            self.queue_text_layer_hint.setText("Text layer: probe failed")
+            return
+        sampled = int(probe.get("sampled_pages", 0))
+        text_pages = int(probe.get("text_pages", 0))
+        if probe.get("has_text_layer"):
+            self.queue_text_layer_hint.setText(f"Text layer: likely yes ({text_pages}/{sampled})")
+        else:
+            self.queue_text_layer_hint.setText(f"Text layer: likely image-only (0/{sampled})")
 
     def open_queue_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         source_id = self._active_source_id()
@@ -2173,6 +2221,7 @@ class StudyQueuePage(QWidget):
             self._queue_outline_rows_by_id = {}
             self._queue_outline_child_ids = {}
             self._active_queue_outline_node_id = None
+            self.queue_text_layer_hint.setText("Text layer: unknown")
             return
         self.active_unit = self.display_units[idx][0]
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
@@ -2185,6 +2234,7 @@ class StudyQueuePage(QWidget):
         last_zoom = self.pdf.zoom_factor()
         self.pdf.load_if_needed(path)
         self.pdf.set_multi_page_mode()
+        self._refresh_queue_text_layer_hint(path or "")
         zoom_setting = self.settings_repo.get_ui_state("queue_pdf_zoom", "")
         try:
             target_zoom = float(zoom_setting) if zoom_setting else float(last_zoom)
@@ -2373,7 +2423,7 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         self.tabs = tabs
-        self.queue = StudyQueuePage(source_repo, review_repo, settings_repo, highlight_repo)
+        self.queue = StudyQueuePage(source_repo, review_repo, settings_repo, highlight_repo, pdf_service)
         self.sources = SourcesPage(source_repo, outline_repo, review_repo, highlight_repo, settings_repo, pdf_service)
         self.settings = SettingsPage(settings_repo, review_repo)
         tabs.addTab(self.queue, "Study Queue")

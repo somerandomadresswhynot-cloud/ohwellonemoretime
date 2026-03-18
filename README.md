@@ -66,6 +66,7 @@ Annotation toolbar state is persisted in `ui_state`:
 - `pdf_annotation_tool`
 - `pdf_annotation_color`
 - `pdf_annotation_opacity`
+- A lightweight **text-layer probe hint** (`Text layer: likely yes/no`) appears in annotation controls to help diagnose why text selection may not snap on some PDFs.
 
 ### Known limitations / fallback behavior
 
