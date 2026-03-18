@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS outline_nodes (
     end_page INTEGER,
     is_unit INTEGER NOT NULL DEFAULT 0,
     queue_enabled INTEGER NOT NULL DEFAULT 1,
+    CHECK (start_page IS NULL OR start_page >= 1),
+    CHECK (end_page IS NULL OR (start_page IS NOT NULL AND end_page >= start_page)),
     FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
     FOREIGN KEY(parent_id) REFERENCES outline_nodes(id) ON DELETE CASCADE
 );
@@ -48,6 +50,8 @@ CREATE TABLE IF NOT EXISTS units (
     ease_factor REAL NOT NULL DEFAULT 2.5,
     interval_days REAL NOT NULL DEFAULT 0,
     avg_rating REAL NOT NULL DEFAULT 0,
+    CHECK (start_page >= 1),
+    CHECK (end_page >= start_page),
     FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
     FOREIGN KEY(node_id) REFERENCES outline_nodes(id) ON DELETE CASCADE
 );
@@ -64,6 +68,8 @@ CREATE TABLE IF NOT EXISTS review_events (
     interval_days REAL NOT NULL,
     next_review_at TEXT NOT NULL,
     deleted_at TEXT,
+    CHECK (elapsed_seconds >= 0),
+    CHECK (rating IN ('easy','with_effort','hard','skip')),
     FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
 );
 
@@ -138,10 +144,163 @@ class Database:
         highlight_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(highlights)").fetchall()}
         if "color" not in highlight_cols:
             self.conn.execute("ALTER TABLE highlights ADD COLUMN color TEXT NOT NULL DEFAULT '#2d9cdb'")
+        self._ensure_scheduling_constraints()
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
         self.conn.executescript(INDEXES)
+
+    def _table_sql(self, table_name: str) -> str:
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return str(row["sql"] or "") if row else ""
+
+    def _table_has_constraint_markers(self, table_name: str, markers: list[str]) -> bool:
+        sql = self._table_sql(table_name).lower()
+        return all(marker in sql for marker in markers)
+
+    def _ensure_scheduling_constraints(self) -> None:
+        outline_ok = self._table_has_constraint_markers(
+            "outline_nodes",
+            ["check (start_page is null or start_page >= 1)", "check (end_page is null or (start_page is not null and end_page >= start_page))"],
+        )
+        units_ok = self._table_has_constraint_markers(
+            "units",
+            ["check (start_page >= 1)", "check (end_page >= start_page)"],
+        )
+        review_ok = self._table_has_constraint_markers(
+            "review_events",
+            ["check (elapsed_seconds >= 0)", "check (rating in ('easy','with_effort','hard','skip'))"],
+        )
+        if outline_ok and units_ok and review_ok:
+            return
+
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.execute("BEGIN")
+            if not outline_ok:
+                self._rebuild_outline_nodes_with_constraints()
+            if not units_ok:
+                self._rebuild_units_with_constraints()
+            if not review_ok:
+                self._rebuild_review_events_with_constraints()
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
+        violations = self.conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError("Foreign key violations detected after constraint migration")
+
+    def _rebuild_outline_nodes_with_constraints(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE outline_nodes_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL,
+                parent_id INTEGER,
+                title TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                order_index INTEGER NOT NULL,
+                start_page INTEGER,
+                end_page INTEGER,
+                is_unit INTEGER NOT NULL DEFAULT 0,
+                queue_enabled INTEGER NOT NULL DEFAULT 1,
+                CHECK (start_page IS NULL OR start_page >= 1),
+                CHECK (end_page IS NULL OR (start_page IS NOT NULL AND end_page >= start_page)),
+                FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
+                FOREIGN KEY(parent_id) REFERENCES outline_nodes_new(id) ON DELETE CASCADE
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO outline_nodes_new (
+                id, source_id, parent_id, title, depth, order_index, start_page, end_page, is_unit, queue_enabled
+            )
+            SELECT id, source_id, parent_id, title, depth, order_index, start_page, end_page, is_unit, queue_enabled
+            FROM outline_nodes
+            """
+        )
+        self.conn.execute("DROP TABLE outline_nodes")
+        self.conn.execute("ALTER TABLE outline_nodes_new RENAME TO outline_nodes")
+
+    def _rebuild_units_with_constraints(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE units_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL,
+                node_id INTEGER NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                start_page INTEGER NOT NULL,
+                end_page INTEGER NOT NULL,
+                queue_enabled INTEGER NOT NULL DEFAULT 1,
+                last_review_at TEXT,
+                next_review_at TEXT,
+                review_count INTEGER NOT NULL DEFAULT 0,
+                ease_factor REAL NOT NULL DEFAULT 2.5,
+                interval_days REAL NOT NULL DEFAULT 0,
+                avg_rating REAL NOT NULL DEFAULT 0,
+                CHECK (start_page >= 1),
+                CHECK (end_page >= start_page),
+                FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
+                FOREIGN KEY(node_id) REFERENCES outline_nodes(id) ON DELETE CASCADE
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO units_new (
+                id, source_id, node_id, title, start_page, end_page, queue_enabled,
+                last_review_at, next_review_at, review_count, ease_factor, interval_days, avg_rating
+            )
+            SELECT
+                id, source_id, node_id, title, start_page, end_page, queue_enabled,
+                last_review_at, next_review_at, review_count, ease_factor, interval_days, avg_rating
+            FROM units
+            """
+        )
+        self.conn.execute("DROP TABLE units")
+        self.conn.execute("ALTER TABLE units_new RENAME TO units")
+
+    def _rebuild_review_events_with_constraints(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE review_events_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                unit_id INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                elapsed_seconds INTEGER NOT NULL,
+                rating TEXT NOT NULL,
+                pre_note TEXT NOT NULL DEFAULT '',
+                post_note TEXT NOT NULL DEFAULT '',
+                interval_days REAL NOT NULL,
+                next_review_at TEXT NOT NULL,
+                deleted_at TEXT,
+                CHECK (elapsed_seconds >= 0),
+                CHECK (rating IN ('easy','with_effort','hard','skip')),
+                FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO review_events_new (
+                id, unit_id, started_at, ended_at, elapsed_seconds, rating, pre_note, post_note, interval_days, next_review_at, deleted_at
+            )
+            SELECT
+                id, unit_id, started_at, ended_at, elapsed_seconds, rating, pre_note, post_note, interval_days, next_review_at, deleted_at
+            FROM review_events
+            """
+        )
+        self.conn.execute("DROP TABLE review_events")
+        self.conn.execute("ALTER TABLE review_events_new RENAME TO review_events")
 
     def close(self) -> None:
         self.conn.close()
