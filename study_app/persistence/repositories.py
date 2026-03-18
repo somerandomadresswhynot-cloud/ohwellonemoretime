@@ -314,6 +314,23 @@ class HighlightRepo:
     def __init__(self, db: Database):
         self.db = db
 
+    def _resolve_unit_id(self, source_id: int, page: int) -> int | None:
+        unit_row = self.db.conn.execute(
+            """SELECT u.id AS unit_id, n.depth AS depth, (u.end_page-u.start_page) AS span
+            FROM units u JOIN outline_nodes n ON n.id=u.node_id
+            WHERE u.source_id=? AND u.start_page<=? AND u.end_page>=?
+            ORDER BY n.depth DESC, span ASC
+            LIMIT 1""",
+            (source_id, page, page),
+        ).fetchone()
+        return int(unit_row["unit_id"]) if unit_row else None
+
+    def _normalize_page(self, page: int) -> int:
+        return max(1, int(page))
+
+    def _normalize_opacity(self, opacity: float) -> float:
+        return max(0.0, min(1.0, float(opacity)))
+
     def add_highlight(self, source_id: int, page: int, quote_text: str, note: str = "", color: str = "#2d9cdb") -> int:
         return self.add_text_highlight(
             source_id=source_id,
@@ -331,19 +348,15 @@ class HighlightRepo:
         note: str = "",
         color: str = "#2d9cdb",
         text_prefix: str = "",
+        text_exact: str = "",
         text_suffix: str = "",
         opacity: float = 0.35,
         label: str = "",
     ) -> int:
-        unit_row = self.db.conn.execute(
-            """SELECT u.id AS unit_id, n.depth AS depth, (u.end_page-u.start_page) AS span
-            FROM units u JOIN outline_nodes n ON n.id=u.node_id
-            WHERE u.source_id=? AND u.start_page<=? AND u.end_page>=?
-            ORDER BY n.depth DESC, span ASC
-            LIMIT 1""",
-            (source_id, page, page),
-        ).fetchone()
-        unit_id = unit_row["unit_id"] if unit_row else None
+        normalized_page = self._normalize_page(page)
+        unit_id = self._resolve_unit_id(source_id, normalized_page)
+        normalized_exact = (text_exact or quote_text or "").strip()
+        now_iso = utcnow_iso()
         cur = self.db.conn.execute(
             """INSERT INTO highlights(
                 source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at
@@ -351,20 +364,20 @@ class HighlightRepo:
             (
                 source_id,
                 unit_id,
-                page,
-                max(0, page - 1),
+                normalized_page,
+                max(0, normalized_page - 1),
                 quote_text,
                 "text",
                 text_prefix,
-                quote_text,
+                normalized_exact,
                 text_suffix,
                 "[]",
-                float(opacity),
+                self._normalize_opacity(opacity),
                 label,
                 note,
                 color,
-                utcnow_iso(),
-                utcnow_iso(),
+                now_iso,
+                now_iso,
             ),
         )
         self.db.conn.commit()
@@ -381,16 +394,10 @@ class HighlightRepo:
         opacity: float = 0.35,
         label: str = "",
     ) -> int:
-        unit_row = self.db.conn.execute(
-            """SELECT u.id AS unit_id, n.depth AS depth, (u.end_page-u.start_page) AS span
-            FROM units u JOIN outline_nodes n ON n.id=u.node_id
-            WHERE u.source_id=? AND u.start_page<=? AND u.end_page>=?
-            ORDER BY n.depth DESC, span ASC
-            LIMIT 1""",
-            (source_id, page, page),
-        ).fetchone()
-        unit_id = unit_row["unit_id"] if unit_row else None
+        normalized_page = self._normalize_page(page)
+        unit_id = self._resolve_unit_id(source_id, normalized_page)
         rects_json = json.dumps(rects, separators=(",", ":"))
+        now_iso = utcnow_iso()
         cur = self.db.conn.execute(
             """INSERT INTO highlights(
                 source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at
@@ -398,20 +405,20 @@ class HighlightRepo:
             (
                 source_id,
                 unit_id,
-                page,
-                max(0, page - 1),
+                normalized_page,
+                max(0, normalized_page - 1),
                 quote_text,
                 "rect",
                 "",
                 quote_text,
                 "",
                 rects_json,
-                float(opacity),
+                self._normalize_opacity(opacity),
                 label,
                 note,
                 color,
-                utcnow_iso(),
-                utcnow_iso(),
+                now_iso,
+                now_iso,
             ),
         )
         self.db.conn.commit()
@@ -420,9 +427,9 @@ class HighlightRepo:
     def find_exact(self, source_id: int, page: int, quote_text: str):
         return self.db.conn.execute(
             """SELECT * FROM highlights
-            WHERE source_id=? AND page=? AND quote_text=?
+            WHERE source_id=? AND page=? AND anchor_type='text' AND (text_exact=? OR quote_text=?)
             ORDER BY created_at DESC LIMIT 1""",
-            (source_id, page, quote_text),
+            (source_id, self._normalize_page(page), quote_text, quote_text),
         ).fetchone()
 
     def delete_highlight(self, highlight_id: int) -> None:

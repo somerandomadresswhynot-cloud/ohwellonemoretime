@@ -102,6 +102,10 @@ CREATE TABLE IF NOT EXISTS highlights (
     color TEXT NOT NULL DEFAULT '#2d9cdb',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT '',
+    CHECK (page >= 1),
+    CHECK (page_index >= 0),
+    CHECK (anchor_type IN ('text','rect')),
+    CHECK (opacity >= 0.0 AND opacity <= 1.0),
     FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
     FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE SET NULL
 );
@@ -190,7 +194,13 @@ class Database:
             "UPDATE highlights SET anchor_type = 'text' WHERE trim(anchor_type) = ''"
         )
         self.conn.execute(
+            "UPDATE highlights SET anchor_type = 'text' WHERE anchor_type NOT IN ('text','rect')"
+        )
+        self.conn.execute(
             "UPDATE highlights SET rects_json = '[]' WHERE trim(rects_json) = ''"
+        )
+        self.conn.execute(
+            "UPDATE highlights SET opacity = CASE WHEN opacity < 0 THEN 0 WHEN opacity > 1 THEN 1 ELSE opacity END"
         )
         self.conn.execute(
             "UPDATE highlights SET updated_at = created_at WHERE trim(updated_at) = ''"

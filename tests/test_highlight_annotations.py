@@ -84,6 +84,34 @@ class HighlightAnnotationsTests(unittest.TestCase):
             self.assertEqual(row['label'], 'Important')
             self.assertAlmostEqual(float(row['opacity']), 0.5, places=6)
 
+    def test_repo_text_highlight_supports_text_exact_and_exact_lookup(self):
+        with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
+            db = Database(tmp.name)
+            self.addCleanup(db.close)
+            source_repo = SourceRepo(db)
+            source_id = source_repo.create('Book', '/tmp/book.pdf', 10, 100)
+            repo = HighlightRepo(db)
+
+            hid = repo.add_text_highlight(
+                source_id=source_id,
+                page=12,
+                quote_text='raw quote',
+                text_prefix='before',
+                text_exact='normalized quote',
+                text_suffix='after',
+                opacity=3.5,
+            )
+            row = db.conn.execute('SELECT * FROM highlights WHERE id=?', (hid,)).fetchone()
+            self.assertEqual(row['anchor_type'], 'text')
+            self.assertEqual(row['text_prefix'], 'before')
+            self.assertEqual(row['text_exact'], 'normalized quote')
+            self.assertEqual(row['text_suffix'], 'after')
+            self.assertAlmostEqual(float(row['opacity']), 1.0, places=6)
+
+            found = repo.find_exact(source_id=source_id, page=12, quote_text='normalized quote')
+            self.assertIsNotNone(found)
+            self.assertEqual(int(found['id']), hid)
+
 
 if __name__ == '__main__':
     unittest.main()
