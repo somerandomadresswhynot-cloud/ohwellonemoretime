@@ -642,7 +642,6 @@ class SourceWorkspace(QWidget):
             return
         self._annotation_tool = tool
         self._apply_annotation_ui_state()
-        self._refresh_text_layer_hint()
         if from_click:
             self._persist_annotation_state()
 
@@ -757,21 +756,19 @@ class SourceWorkspace(QWidget):
             self.context_changed.emit(self.source.title, "")
 
     def _refresh_text_layer_hint(self) -> None:
-        diag = self.pdf.selection_diagnostics()
-        suffix = " · select API on" if diag.get("enabled") else " · select API off"
         if not getattr(self, "source", None) or not self.source or not self.source.file_path:
-            self.text_layer_hint.setText(f"Text layer: unknown{suffix}")
+            self.text_layer_hint.setText("Text layer: unknown")
             return
         probe = self.pdf_service.probe_text_layer(self.source.file_path)
         if probe.get("error"):
-            self.text_layer_hint.setText(f"Text layer: probe failed{suffix}")
+            self.text_layer_hint.setText("Text layer: probe failed")
             return
         sampled = int(probe.get("sampled_pages", 0))
         text_pages = int(probe.get("text_pages", 0))
         if probe.get("has_text_layer"):
-            self.text_layer_hint.setText(f"Text layer: likely yes ({text_pages}/{sampled}){suffix}")
+            self.text_layer_hint.setText(f"Text layer: likely yes ({text_pages}/{sampled})")
         else:
-            self.text_layer_hint.setText(f"Text layer: likely image-only (0/{sampled}){suffix}")
+            self.text_layer_hint.setText(f"Text layer: likely image-only (0/{sampled})")
 
     def refresh_tree(self, preserve_view_state: bool = True):
         expanded_ids: set[int] = set()
@@ -1687,9 +1684,6 @@ class StudyQueuePage(QWidget):
             return
         self._annotation_tool = tool
         self._apply_queue_annotation_ui_state()
-        if self.active_unit:
-            path = self.source_path_cache.get(self.active_unit.source_id, "")
-            self._refresh_queue_text_layer_hint(path)
         self._persist_queue_annotation_state()
 
     def _set_queue_annotation_color(self, color: str) -> None:
@@ -1714,21 +1708,19 @@ class StudyQueuePage(QWidget):
         return int(self.active_unit.source_id)
 
     def _refresh_queue_text_layer_hint(self, file_path: str) -> None:
-        diag = self.pdf.selection_diagnostics()
-        suffix = " · select API on" if diag.get("enabled") else " · select API off"
         if not file_path:
-            self.queue_text_layer_hint.setText(f"Text layer: unknown{suffix}")
+            self.queue_text_layer_hint.setText("Text layer: unknown")
             return
         probe = self.pdf_service.probe_text_layer(file_path)
         if probe.get("error"):
-            self.queue_text_layer_hint.setText(f"Text layer: probe failed{suffix}")
+            self.queue_text_layer_hint.setText("Text layer: probe failed")
             return
         sampled = int(probe.get("sampled_pages", 0))
         text_pages = int(probe.get("text_pages", 0))
         if probe.get("has_text_layer"):
-            self.queue_text_layer_hint.setText(f"Text layer: likely yes ({text_pages}/{sampled}){suffix}")
+            self.queue_text_layer_hint.setText(f"Text layer: likely yes ({text_pages}/{sampled})")
         else:
-            self.queue_text_layer_hint.setText(f"Text layer: likely image-only (0/{sampled}){suffix}")
+            self.queue_text_layer_hint.setText(f"Text layer: likely image-only (0/{sampled})")
 
     def open_queue_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         source_id = self._active_source_id()

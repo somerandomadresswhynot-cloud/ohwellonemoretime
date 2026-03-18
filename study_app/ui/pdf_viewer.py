@@ -143,7 +143,6 @@ class PersistentPdfViewer(QWidget):
         self._highlight_hit_handler = None
         self._overlay = None
         self._overlay_highlights: list[dict] = []
-        self._selection_enabled = False
 
         root = QVBoxLayout(self)
         if QPdfDocument and QPdfView:
@@ -221,13 +220,6 @@ class PersistentPdfViewer(QWidget):
         if self._overlay:
             self._overlay.update()
 
-    def selection_diagnostics(self) -> dict:
-        return {
-            "enabled": bool(self._selection_enabled),
-            "interaction_mode": self._interaction_mode,
-            "tool": self._annotation_tool,
-        }
-
     def selected_text(self) -> str:
         if not self._view:
             return ""
@@ -258,35 +250,20 @@ class PersistentPdfViewer(QWidget):
     def _enable_text_selection_mode(self) -> None:
         if not self._view:
             return
-        enabled = False
         try:
             enum_cls = getattr(QPdfView, "SelectionMode", None)
             if enum_cls is not None:
-                for member in ("TextSelection", "TextSelector", "SelectText", "TextSelect"):
+                for member in ("TextSelection", "TextSelector", "SelectText"):
                     if hasattr(enum_cls, member):
                         self._view.setSelectionMode(getattr(enum_cls, member))
-                        enabled = True
-                        break
-                if not enabled:
-                    try:
-                        self._view.setSelectionMode(enum_cls(1))
-                        enabled = True
-                    except Exception:
-                        pass
+                        return
         except Exception:
             pass
         try:
             if hasattr(self._view, "setSelectionEnabled"):
                 self._view.setSelectionEnabled(True)
-                enabled = True
         except Exception:
             pass
-        try:
-            self._view.setFocusPolicy(Qt.StrongFocus)
-            self._view.setFocus()
-        except Exception:
-            pass
-        self._selection_enabled = enabled
 
     def _disable_text_selection_mode(self) -> None:
         if not self._view:
@@ -319,21 +296,18 @@ class PersistentPdfViewer(QWidget):
             return
         if self._interaction_mode == "text_select":
             self._enable_text_selection_mode()
-            self.set_single_page_mode()
             self._view.setCursor(Qt.IBeamCursor)
             if self._overlay:
                 self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             return
         if self._interaction_mode == "pan":
             self._disable_text_selection_mode()
-            self.set_multi_page_mode()
             self._view.setCursor(Qt.OpenHandCursor)
             if self._overlay:
                 self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             return
         # Area + erase modes are handled by workspace overlays; keep pointer neutral here.
         self._disable_text_selection_mode()
-        self.set_multi_page_mode()
         self._view.setCursor(Qt.ArrowCursor)
         if self._overlay:
             self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
