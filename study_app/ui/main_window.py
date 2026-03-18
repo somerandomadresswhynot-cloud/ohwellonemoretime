@@ -131,9 +131,10 @@ class DocumentProgressBar(QWidget):
                 p.drawRoundedRect(seg_rect.adjusted(-1, -1, 1, 1), 3, 3)
 
             depth = max(1, int(seg.get("depth", 3)))
-            tick_h = max(2, 11 - min(8, depth * 2))
-            p.setBrush(QColor("#6f8bb3") if depth <= 2 else QColor("#4a607f"))
-            p.drawRect(max(seg_rect.left(), inner.left()), inner.bottom() + 1, 1, tick_h)
+            if depth <= 2:
+                tick_h = 9 if depth == 1 else 6
+                p.setBrush(QColor("#6f8bb3"))
+                p.drawRect(max(seg_rect.left(), inner.left()), inner.bottom() + 1, 1, tick_h)
 
             self._segment_regions.append(((seg_rect.left(), seg_rect.top(), seg_rect.right(), seg_rect.bottom()), seg))
 
