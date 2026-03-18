@@ -1436,11 +1436,12 @@ class CornerResizeHandle(QFrame):
 
 
 class StudyQueuePage(QWidget):
-    def __init__(self, source_repo: SourceRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo):
+    def __init__(self, source_repo: SourceRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo, highlight_repo: HighlightRepo):
         super().__init__()
         self.source_repo = source_repo
         self.review_repo = review_repo
         self.settings_repo = settings_repo
+        self.highlight_repo = highlight_repo
         self.timer_seconds = 0
         self.timer_running = False
         self.active_unit = None
@@ -1449,6 +1450,20 @@ class StudyQueuePage(QWidget):
         self.source_path_cache: dict[int, str] = {}
         self.display_units = []
         self._queue_last_pdf_page = 1
+        self._annotation_palette = [
+            ("Blue", "#2d9cdb"),
+            ("Purple", "#8b5cf6"),
+            ("Green", "#27ae60"),
+            ("Yellow", "#f1c40f"),
+            ("Red", "#e74c3c"),
+        ]
+        self._annotation_tool = self.settings_repo.get_ui_state("pdf_annotation_tool", "select_text") or "select_text"
+        self._annotation_color = self.settings_repo.get_ui_state("pdf_annotation_color", "#2d9cdb") or "#2d9cdb"
+        try:
+            self._annotation_opacity = float(self.settings_repo.get_ui_state("pdf_annotation_opacity", "0.35"))
+        except Exception:
+            self._annotation_opacity = 0.35
+        self._annotation_opacity = max(0.0, min(1.0, self._annotation_opacity))
 
         self.list = QListWidget()
         _enable_smooth_scroll(self.list)
@@ -1478,6 +1493,9 @@ class StudyQueuePage(QWidget):
         timer_start.clicked.connect(self.toggle_timer)
         timer_reset.clicked.connect(self.reset_timer)
         self.pdf = PersistentPdfViewer()
+        self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
+        self.pdf.set_area_created_handler(self._on_queue_area_rect_created)
+        self.pdf.set_highlight_hit_handler(self._on_queue_overlay_highlight_hit)
         self.pdf.set_multi_page_mode()
         self.pdf.set_fit_mode()
         self.pdf.setMinimumHeight(760)
@@ -1520,9 +1538,39 @@ class StudyQueuePage(QWidget):
 
         self.queue_doc_progress = DocumentProgressBar()
         self.queue_doc_progress.page_requested.connect(self._on_queue_doc_progress_page_requested)
+        queue_annotation_controls = QHBoxLayout()
+        queue_annotation_controls.addWidget(QLabel("Annotate"))
+        self._queue_tool_buttons: dict[str, QPushButton] = {}
+        for label, key in [("Select Text", "select_text"), ("Area", "area"), ("Pan", "pan"), ("Erase", "erase")]:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedHeight(24)
+            btn.clicked.connect(lambda _=False, k=key: self._set_queue_annotation_tool(k))
+            self._queue_tool_buttons[key] = btn
+            queue_annotation_controls.addWidget(btn)
+        queue_annotation_controls.addSpacing(8)
+        queue_annotation_controls.addWidget(QLabel("Color"))
+        self._queue_color_buttons: dict[str, QPushButton] = {}
+        for _label, color in self._annotation_palette:
+            cbtn = QPushButton("")
+            cbtn.setCheckable(True)
+            cbtn.setFixedSize(QSize(16, 16))
+            cbtn.clicked.connect(lambda _=False, c=color: self._set_queue_annotation_color(c))
+            self._queue_color_buttons[color] = cbtn
+            queue_annotation_controls.addWidget(cbtn)
+        queue_annotation_controls.addSpacing(8)
+        queue_annotation_controls.addWidget(QLabel("Opacity"))
+        self.queue_opacity_spin = QSpinBox()
+        self.queue_opacity_spin.setRange(10, 100)
+        self.queue_opacity_spin.setSuffix("%")
+        self.queue_opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
+        self.queue_opacity_spin.valueChanged.connect(self._on_queue_opacity_changed)
+        queue_annotation_controls.addWidget(self.queue_opacity_spin)
+        queue_annotation_controls.addStretch()
         queue_pdf_row = QHBoxLayout()
         queue_pdf_row.addWidget(self.queue_outline_tree)
         queue_pdf_row.addWidget(self.pdf, 1)
+        right.addLayout(queue_annotation_controls)
         right.addLayout(queue_pdf_row, 1)
         right.addWidget(self.queue_doc_progress)
 
@@ -1547,6 +1595,7 @@ class StudyQueuePage(QWidget):
         self.qt_timer = QTimer(self)
         self.qt_timer.timeout.connect(self.tick)
         self.qt_timer.start(1000)
+        self._apply_queue_annotation_ui_state()
         self.refresh()
 
     def _resize_pdf_by_delta(self, delta: int):
@@ -1563,6 +1612,7 @@ class StudyQueuePage(QWidget):
         self._queue_last_pdf_page = int(page)
         self._set_active_queue_outline_by_page(int(page))
         self._refresh_queue_doc_progress(int(page))
+        self._sync_queue_pdf_overlays()
 
     def _on_queue_outline_click(self, item, _col) -> None:
         page = int(item.data(0, 257) or 0)
@@ -1572,6 +1622,139 @@ class StudyQueuePage(QWidget):
         self._queue_last_pdf_page = page
         self._set_active_queue_outline_by_page(page)
         self._refresh_queue_doc_progress(page)
+        self._sync_queue_pdf_overlays()
+
+    def _persist_queue_annotation_state(self) -> None:
+        self.settings_repo.set_ui_state("pdf_annotation_tool", self._annotation_tool)
+        self.settings_repo.set_ui_state("pdf_annotation_color", self._annotation_color)
+        self.settings_repo.set_ui_state("pdf_annotation_opacity", f"{self._annotation_opacity:.2f}")
+
+    def _apply_queue_annotation_ui_state(self) -> None:
+        for key, btn in self._queue_tool_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(key == self._annotation_tool)
+            btn.blockSignals(False)
+        for color, btn in self._queue_color_buttons.items():
+            selected = color.lower() == self._annotation_color.lower()
+            border = "2px solid #d7e1f3" if selected else "1px solid #20304f"
+            btn.setStyleSheet(f"background:{color}; border-radius:8px; border:{border};")
+            btn.blockSignals(True)
+            btn.setChecked(selected)
+            btn.blockSignals(False)
+        self.queue_opacity_spin.blockSignals(True)
+        self.queue_opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
+        self.queue_opacity_spin.blockSignals(False)
+        self.pdf.set_annotation_tool(self._annotation_tool)
+
+    def _set_queue_annotation_tool(self, tool: str) -> None:
+        if tool not in {"select_text", "area", "pan", "erase"}:
+            return
+        self._annotation_tool = tool
+        self._apply_queue_annotation_ui_state()
+        self._persist_queue_annotation_state()
+
+    def _set_queue_annotation_color(self, color: str) -> None:
+        self._annotation_color = color
+        self._apply_queue_annotation_ui_state()
+        self._persist_queue_annotation_state()
+
+    def _on_queue_opacity_changed(self, value: int) -> None:
+        self._annotation_opacity = max(0.1, min(1.0, float(value) / 100.0))
+        self._persist_queue_annotation_state()
+        self._sync_queue_pdf_overlays()
+
+    def _queue_text_anchor_payload(self, raw_text: str) -> dict:
+        exact = " ".join((raw_text or "").split()).strip()
+        if not exact:
+            return {"text_exact": "", "text_prefix": "", "text_suffix": ""}
+        return {"text_exact": exact, "text_prefix": exact[:24], "text_suffix": exact[-24:] if len(exact) > 24 else exact}
+
+    def _active_source_id(self) -> int | None:
+        if not self.active_unit:
+            return None
+        return int(self.active_unit.source_id)
+
+    def open_queue_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
+        source_id = self._active_source_id()
+        quote = (selected_text or "").strip()
+        if not source_id or not quote:
+            return
+        anchor = self._queue_text_anchor_payload(quote)
+        menu = QMenu(self)
+        quick = menu.addAction(f"Add highlight ({self._annotation_color})")
+        quick.triggered.connect(
+            lambda: self.highlight_repo.add_text_highlight(
+                source_id,
+                page,
+                quote,
+                "",
+                self._annotation_color,
+                text_prefix=anchor["text_prefix"],
+                text_exact=anchor["text_exact"],
+                text_suffix=anchor["text_suffix"],
+                opacity=self._annotation_opacity,
+            )
+        )
+        menu.addSeparator()
+        existing = self.highlight_repo.find_exact(source_id, page, quote)
+        if existing:
+            remove = menu.addAction("Remove matching highlight")
+            remove.triggered.connect(lambda: self.highlight_repo.delete_highlight(int(existing["id"])))
+        menu.exec(global_pos)
+        self._sync_queue_pdf_overlays()
+
+    def _on_queue_area_rect_created(self, norm_rect: dict, page: int) -> None:
+        source_id = self._active_source_id()
+        if not source_id or self._annotation_tool != "area":
+            return
+        self.highlight_repo.add_area_highlight(
+            source_id=source_id,
+            page=page,
+            rects=[norm_rect],
+            note="",
+            color=self._annotation_color,
+            opacity=self._annotation_opacity,
+        )
+        self._sync_queue_pdf_overlays()
+
+    def _on_queue_overlay_highlight_hit(self, highlight_id: int) -> None:
+        if self._annotation_tool == "erase" and highlight_id:
+            self.highlight_repo.delete_highlight(int(highlight_id))
+            self._sync_queue_pdf_overlays()
+
+    def _sync_queue_pdf_overlays(self) -> None:
+        source_id = self._active_source_id()
+        if not source_id:
+            self.pdf.set_overlay_highlights([])
+            return
+        page = int(self.pdf.view_state().get("page", 1))
+        overlays: list[dict] = []
+        text_marker_index = 0
+        for h in self.highlight_repo.list_source_highlights(source_id):
+            if int(h["page"]) != page:
+                continue
+            anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
+            if anchor_type == "rect":
+                try:
+                    rects = json.loads(h["rects_json"] or "[]")
+                except Exception:
+                    rects = []
+                overlays.append({
+                    "id": int(h["id"]),
+                    "color": h["color"] or "#2d9cdb",
+                    "opacity": float(h["opacity"] or 0.35),
+                    "rects": [r for r in rects if isinstance(r, dict)],
+                })
+                continue
+            marker_y = 0.03 + (text_marker_index * 0.035)
+            text_marker_index += 1
+            overlays.append({
+                "id": int(h["id"]),
+                "color": h["color"] or "#2d9cdb",
+                "opacity": min(0.9, max(0.2, float(h["opacity"] or 0.35))),
+                "rects": [{"x": 0.02, "y": min(0.95, marker_y), "w": 0.22, "h": 0.02}],
+            })
+        self.pdf.set_overlay_highlights(overlays)
 
     def _refresh_queue_outline_tree(self, source_id: int) -> None:
         rows = self.review_repo.db.conn.execute(
@@ -1756,6 +1939,7 @@ class StudyQueuePage(QWidget):
             self.active_unit = None
             self.title.setText("No unit selected")
             self.queue_doc_progress.set_data([], total_pages=1, current_page=1)
+            self.pdf.set_overlay_highlights([])
 
     def eventFilter(self, obj, event):
         if obj is self.list.viewport() and event.type() == QEvent.Resize:
@@ -2013,10 +2197,12 @@ class StudyQueuePage(QWidget):
         self._load_draft_for_active()
         self._queue_last_pdf_page = int(self.pdf.view_state().get("page", self.active_unit.start_page))
         self._refresh_queue_doc_progress(self._queue_last_pdf_page)
+        self._sync_queue_pdf_overlays()
 
     def jump_to_active_unit(self):
         if self.active_unit:
             self.pdf.set_page(self.active_unit.start_page)
+            self._sync_queue_pdf_overlays()
 
     def tick(self):
         if self.timer_running:
@@ -2028,6 +2214,7 @@ class StudyQueuePage(QWidget):
                 self._queue_last_pdf_page = page
                 self._set_active_queue_outline_by_page(page)
                 self._refresh_queue_doc_progress(page)
+                self._sync_queue_pdf_overlays()
 
     def toggle_timer(self):
         self.timer_running = not self.timer_running
@@ -2186,7 +2373,7 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         self.tabs = tabs
-        self.queue = StudyQueuePage(source_repo, review_repo, settings_repo)
+        self.queue = StudyQueuePage(source_repo, review_repo, settings_repo, highlight_repo)
         self.sources = SourcesPage(source_repo, outline_repo, review_repo, highlight_repo, settings_repo, pdf_service)
         self.settings = SettingsPage(settings_repo, review_repo)
         tabs.addTab(self.queue, "Study Queue")

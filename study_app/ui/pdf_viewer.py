@@ -35,7 +35,7 @@ class _AnnotationOverlay(QWidget):
         self._owner = owner
         self._drag_start = None
         self._drag_end = None
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setMouseTracking(True)
 
     def _norm_to_px_rect(self, norm_rect: dict) -> QRectF:
@@ -297,15 +297,20 @@ class PersistentPdfViewer(QWidget):
         if self._interaction_mode == "text_select":
             self._enable_text_selection_mode()
             self._view.setCursor(Qt.IBeamCursor)
+            if self._overlay:
+                self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             return
         if self._interaction_mode == "pan":
             self._disable_text_selection_mode()
             self._view.setCursor(Qt.OpenHandCursor)
+            if self._overlay:
+                self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             return
         # Area + erase modes are handled by workspace overlays; keep pointer neutral here.
         self._disable_text_selection_mode()
         self._view.setCursor(Qt.ArrowCursor)
         if self._overlay:
+            self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
             self._overlay.raise_()
             self._overlay.update()
 
