@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from study_app.domain.models import iso_utc, parse_iso_to_utc
+
 RATING_FACTORS = {
     "easy": 1.8,
     "with_effort": 1.25,
@@ -50,14 +52,14 @@ def compute_next(unit_row, rating: str, now: datetime) -> ScheduleResult:
     ef = min(3.0, max(1.3, ef + (RATING_SCORE[rating] - 3) * 0.08))
     next_review = now + timedelta(days=interval)
     retention = retention_estimate(unit_row, now)
-    return ScheduleResult(interval_days=interval, next_review_at=next_review.isoformat(timespec="seconds"), ease_factor=ef, retention=retention)
+    return ScheduleResult(interval_days=interval, next_review_at=iso_utc(next_review), ease_factor=ef, retention=retention)
 
 
 def retention_estimate(unit_row, now: datetime) -> float:
     last = unit_row["last_review_at"]
     if not last:
         return 0.15
-    last_dt = datetime.fromisoformat(last)
+    last_dt = parse_iso_to_utc(last)
     elapsed_days = max(0.0, (now - last_dt).total_seconds() / 86400)
     interval = float(unit_row["interval_days"] or 1)
     score = pow(2.71828, -elapsed_days / max(0.3, interval))

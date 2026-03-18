@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
+from datetime import timedelta
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QBrush, QCursor
+from PySide6.QtGui import QColor, QBrush, QCursor, QPainter, QPen, QLinearGradient
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -38,6 +38,7 @@ from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
 from study_app.services.scheduler import allocate_new_units, compute_next, recommend_new_units_with_guardrail, retention_estimate
+from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 
@@ -47,6 +48,147 @@ def _enable_smooth_scroll(view: QAbstractItemView) -> None:
     view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
     view.verticalScrollBar().setSingleStep(18)
     view.horizontalScrollBar().setSingleStep(18)
+
+
+
+
+class DocumentProgressBar(QWidget):
+    page_requested = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._segments: list[dict] = []
+        self._segment_regions: list[tuple[tuple[int, int, int, int], dict]] = []
+        self._division_markers: list[dict] = []
+        self._division_regions: list[tuple[tuple[int, int, int, int], dict]] = []
+        self._total_pages = 1
+        self._current_page = 1
+        self._hover_key = ""
+        self._inner_rect = None
+        self.setMinimumHeight(26)
+        self.setMouseTracking(True)
+
+    def set_data(self, segments: list[dict], total_pages: int, current_page: int, division_markers: list[dict] | None = None) -> None:
+        self._segments = segments
+        self._division_markers = division_markers or []
+        self._total_pages = max(1, int(total_pages or 1))
+        self._current_page = max(1, int(current_page or 1))
+        self.update()
+
+    def _segment_tooltip(self, seg: dict) -> str:
+        title = seg.get("title", "Unit")
+        hierarchy = seg.get("hierarchy_path") or title
+        sp = int(seg.get("start_page", 1))
+        ep = int(seg.get("end_page", sp))
+        state = str(seg.get("state", "unstarted"))
+        retention = seg.get("retention")
+        retention_text = "n/a" if retention is None else f"{int(round(max(0.01, min(0.99, float(retention))) * 100))}%"
+        return f"{title}\nHierarchy: {hierarchy}\nPages: {sp}-{ep}\nState: {state}\nRetention: {retention_text}"
+
+    def _division_tooltip(self, marker: dict) -> str:
+        title = marker.get("title", "Division")
+        hierarchy = marker.get("hierarchy_path") or title
+        page = int(marker.get("page", 1))
+        return f"Division: {title}\nHierarchy: {hierarchy}\nStarts at page {page}"
+
+    def _page_for_x(self, x: int) -> int:
+        inner = self._inner_rect
+        if not inner:
+            return self._current_page
+        clamped_x = max(inner.left(), min(inner.right(), x))
+        ratio = (clamped_x - inner.left()) / max(1, inner.width())
+        page = int(round(1 + ratio * (self._total_pages - 1)))
+        return max(1, min(self._total_pages, page))
+
+    def mouseMoveEvent(self, event):
+        x, y = int(event.position().x()), int(event.position().y())
+        for (lx, ty, rx, by), marker in self._division_regions:
+            if lx <= x <= rx and ty <= y <= by:
+                tip = self._division_tooltip(marker)
+                if tip != self._hover_key:
+                    self._hover_key = tip
+                    self.setToolTip(tip)
+                return
+        for (lx, ty, rx, by), seg in self._segment_regions:
+            if lx <= x <= rx and ty <= y <= by:
+                tip = self._segment_tooltip(seg)
+                if tip != self._hover_key:
+                    self._hover_key = tip
+                    self.setToolTip(tip)
+                return
+        if self._hover_key:
+            self._hover_key = ""
+            self.setToolTip("")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._inner_rect and self._inner_rect.contains(int(event.position().x()), int(event.position().y())):
+            self.page_requested.emit(self._page_for_x(int(event.position().x())))
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        r = self.rect().adjusted(1, 1, -1, -6)
+        p.setPen(QPen(QColor("#24314a"), 1))
+        p.setBrush(QColor("#0f1624"))
+        p.drawRoundedRect(r, 6, 6)
+
+        inner = r.adjusted(2, 3, -2, -3)
+        self._inner_rect = inner
+        self._segment_regions = []
+        self._division_regions = []
+        for seg in self._segments:
+            sp = max(1, int(seg.get("start_page", 1)))
+            ep = max(sp, int(seg.get("end_page", sp)))
+            left = int(inner.left() + ((sp - 1) / self._total_pages) * inner.width())
+            right = int(inner.left() + (ep / self._total_pages) * inner.width())
+            width = max(2, right - left)
+            seg_rect = inner.adjusted(left - inner.left(), 0, -(inner.width() - (left - inner.left()) - width), 0)
+
+            state = seg.get("state", "unstarted")
+            glow = QColor(0, 0, 0, 0)
+            if state == "mastered":
+                c1, c2, glow = QColor("#6bb8d8"), QColor("#6f76c6"), QColor(110, 168, 214, 55)
+            elif state == "learning":
+                c1, c2, glow = QColor("#6a7f9e"), QColor("#5f9d8d"), QColor(95, 157, 141, 40)
+            else:
+                c1, c2 = QColor("#434b59"), QColor("#5b6575")
+
+            grad = QLinearGradient(seg_rect.topLeft(), seg_rect.topRight())
+            grad.setColorAt(0.0, c1)
+            grad.setColorAt(1.0, c2)
+            p.setPen(Qt.NoPen)
+            p.setBrush(grad)
+            p.drawRoundedRect(seg_rect, 2, 2)
+
+            if glow.alpha() > 0:
+                p.setBrush(glow)
+                p.drawRoundedRect(seg_rect.adjusted(-1, -1, 1, 1), 3, 3)
+
+            depth = max(1, int(seg.get("depth", 3)))
+            if depth <= 2:
+                tick_h = 9 if depth == 1 else 6
+                p.setBrush(QColor("#6f8bb3"))
+                p.drawRect(max(seg_rect.left(), inner.left()), inner.bottom() + 1, 1, tick_h)
+
+            self._segment_regions.append(((seg_rect.left(), seg_rect.top(), seg_rect.right(), seg_rect.bottom()), seg))
+
+        for marker in self._division_markers:
+            page = max(1, min(self._total_pages, int(marker.get("page", 1))))
+            depth = max(1, int(marker.get("depth", 2)))
+            x = int(inner.left() + ((page - 1) / self._total_pages) * inner.width())
+            tick_h = 10 if depth <= 1 else 7 if depth == 2 else 4
+            color = QColor("#7e9cc7") if depth <= 2 else QColor("#5f7395")
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawRect(x, inner.bottom() + 1, 2, tick_h)
+            self._division_regions.append(((x - 2, inner.top(), x + 3, inner.bottom() + tick_h + 2), marker))
+
+        marker_x = int(inner.left() + ((self._current_page - 1) / self._total_pages) * inner.width())
+        p.setPen(QPen(QColor("#f8fafc"), 2))
+        p.drawLine(marker_x, inner.top() - 1, marker_x, inner.bottom() + 2)
 
 
 class SourcesPage(QWidget):
@@ -178,7 +320,7 @@ class SourcesPage(QWidget):
         s = self.sources[idx]
         self.current_source_id = s.id
         self.detail.setText(
-            f"Title: {s.title}\nActive: {s.is_active}\nFile: {s.file_path}\nExists: {s.file_exists}\nPages: {s.page_count}"
+            f"Title: {s.title}\nActive: {s.is_active}\nOrder: {s.learning_mode}\nFile: {s.file_path}\nExists: {s.file_exists}\nPages: {s.page_count}"
         )
 
     def import_pdf(self):
@@ -199,10 +341,11 @@ class SourcesPage(QWidget):
         if not self.current_source_id:
             return
         s = self.source_repo.get(self.current_source_id)
-        dlg = SourceMetadataDialog(s.title, s.is_active, self)
+        dlg = SourceMetadataDialog(s.title, s.is_active, s.learning_mode, self)
         if dlg.exec():
             active = dlg.active_edit.text().strip().lower() in {"y", "yes", "true", "1"}
-            self.source_repo.update_metadata(s.id, dlg.title_edit.text().strip() or s.title, active)
+            learning_mode = "strict" if dlg.learning_mode_edit.text().strip().lower() in {"strict", "ordered", "linear"} else "any"
+            self.source_repo.update_metadata(s.id, dlg.title_edit.text().strip() or s.title, active, learning_mode)
             self.refresh()
             self.library_changed.emit()
 
@@ -221,7 +364,7 @@ class SourcesPage(QWidget):
         if not self.current_source_id:
             return
         s = self.source_repo.get(self.current_source_id)
-        self.source_repo.update_metadata(s.id, s.title, not s.is_active)
+        self.source_repo.update_metadata(s.id, s.title, not s.is_active, s.learning_mode)
         self.refresh()
         self.library_changed.emit()
 
@@ -316,8 +459,13 @@ class SourceWorkspace(QWidget):
         btn_unit_actions = QPushButton("Unit Actions ▾")
         btn_unit_actions.clicked.connect(self.open_unit_actions_menu)
         self.page_label = QLabel("Page: -")
+
+        self.doc_progress = DocumentProgressBar()
+        self.doc_progress.page_requested.connect(self._on_doc_progress_page_requested)
+
         c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
-        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.page_label); c_l.addWidget(self.pdf)
+        pdf_row = QHBoxLayout(); pdf_row.addWidget(self.pdf, 1)
+        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.page_label); c_l.addLayout(pdf_row, 1); c_l.addWidget(self.doc_progress)
 
         self.insights = QLabel()
         self.insights.setWordWrap(True)
@@ -349,10 +497,19 @@ class SourceWorkspace(QWidget):
         self._tree_rows: list = []
         self._rows_by_id: dict[int, dict] = {}
         self._child_ids: dict[int, list[int]] = {}
+        self._parent_id: dict[int, int | None] = {}
         self._state_cache: dict[int, Qt.CheckState] = {}
         self._id_to_item: dict[int, QTreeWidgetItem] = {}
         self._active_filter = ""
+        self._last_pdf_page = 1
+        self._pdf_page_poll = QTimer(self)
+        self._pdf_page_poll.timeout.connect(self._on_pdf_page_polled)
+        self._pdf_page_poll.start(450)
         self.load_source()
+
+    def _on_doc_progress_page_requested(self, page: int) -> None:
+        self.pdf.set_page(int(page))
+        self._refresh_doc_progress(int(page))
 
     def set_source(self, source_id: int) -> None:
         if int(source_id) == int(self.source_id):
@@ -370,26 +527,35 @@ class SourceWorkspace(QWidget):
         self.refresh_tree()
         self.refresh_insights()
         self.refresh_highlights()
+        self._last_pdf_page = int(self.pdf.view_state().get("page", 1))
+        self._refresh_doc_progress(self._last_pdf_page)
         if self.source:
             self.context_changed.emit(self.source.title, "")
 
-    def refresh_tree(self):
+    def refresh_tree(self, preserve_view_state: bool = True):
+        expanded_ids: set[int] = set()
+        selected_id: int | None = None
+        if preserve_view_state:
+            expanded_ids, selected_id = self._capture_tree_view_state()
+
         filt = self.search.text().strip().lower()
         rows = self.outline_repo.nodes_for_source(self.source_id)
         self._active_filter = filt
         self._tree_rows = rows
         self._rows_by_id = {int(r["id"]): r for r in rows}
         self._child_ids = {}
+        self._parent_id = {}
         queue_by_id: dict[int, bool] = {}
         roots: list[int] = []
         for r in rows:
             rid = int(r["id"])
             queue_by_id[rid] = bool(r["queue_enabled"])
-            pid = r["parent_id"]
+            pid = int(r["parent_id"]) if r["parent_id"] is not None else None
+            self._parent_id[rid] = pid
             if pid is None:
                 roots.append(rid)
             else:
-                self._child_ids.setdefault(int(pid), []).append(rid)
+                self._child_ids.setdefault(pid, []).append(rid)
 
         self._state_cache = {}
 
@@ -427,6 +593,11 @@ class SourceWorkspace(QWidget):
                 self._add_item_from_row(rid, None, include_children=False)
         self.tree.blockSignals(False)
         self._tree_syncing = False
+
+        if preserve_view_state and not filt:
+            self._restore_tree_view_state(expanded_ids, selected_id)
+
+        self._refresh_doc_progress(int(self.pdf.view_state().get("page", 1)))
 
     def _add_item_from_row(self, node_id: int, parent_item: QTreeWidgetItem | None, include_children: bool) -> QTreeWidgetItem:
         r = self._rows_by_id.get(node_id)
@@ -471,6 +642,9 @@ class SourceWorkspace(QWidget):
     def on_item_expanded(self, item):
         if self._active_filter:
             return
+        self._materialize_item_children(item)
+
+    def _materialize_item_children(self, item: QTreeWidgetItem) -> None:
         if item.data(0, 259):
             return
         node_id = int(item.data(0, 256))
@@ -487,6 +661,36 @@ class SourceWorkspace(QWidget):
         self.tree.blockSignals(False)
         self._tree_syncing = False
 
+    def _ensure_item_loaded(self, node_id: int) -> QTreeWidgetItem | None:
+        if node_id in self._id_to_item:
+            return self._id_to_item[node_id]
+
+        lineage: list[int] = []
+        cursor = node_id
+        while cursor not in self._id_to_item:
+            lineage.append(cursor)
+            parent = self._parent_id.get(cursor)
+            if parent is None:
+                break
+            cursor = parent
+
+        if cursor not in self._id_to_item:
+            return None
+
+        for nid in reversed(lineage):
+            parent_id = self._parent_id.get(nid)
+            if parent_id is None:
+                continue
+            parent_item = self._id_to_item.get(parent_id)
+            if parent_item is None:
+                return None
+            self.tree.expandItem(parent_item)
+            self._materialize_item_children(parent_item)
+            if nid not in self._id_to_item:
+                return None
+
+        return self._id_to_item.get(node_id)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if not hasattr(self, "split"):
@@ -496,6 +700,39 @@ class SourceWorkspace(QWidget):
             self.split.setSizes([280, max(420, w - 560), 220])
         else:
             self.split.setSizes([300, max(520, w - 660), 320])
+
+    def _capture_tree_view_state(self) -> tuple[set[int], int | None]:
+        expanded_ids: set[int] = set()
+
+        def walk(item: QTreeWidgetItem) -> None:
+            node_id = item.data(0, 256)
+            if node_id is not None and item.isExpanded():
+                expanded_ids.add(int(node_id))
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
+
+        selected_items = self.tree.selectedItems()
+        selected_id = int(selected_items[0].data(0, 256)) if selected_items else None
+        return expanded_ids, selected_id
+
+    def _restore_tree_view_state(self, expanded_ids: set[int], selected_id: int | None) -> None:
+        if not expanded_ids and selected_id is None:
+            return
+
+        sorted_ids = sorted(expanded_ids, key=lambda nid: int(self._rows_by_id.get(nid, {}).get("depth", 0)))
+        for node_id in sorted_ids:
+            item = self._ensure_item_loaded(node_id)
+            if item is not None:
+                self.tree.expandItem(item)
+                self._materialize_item_children(item)
+
+        if selected_id is not None:
+            item = self._ensure_item_loaded(selected_id)
+            if item is not None:
+                self.tree.setCurrentItem(item)
 
     def on_item_select(self):
         items = self.tree.selectedItems()
@@ -513,15 +750,145 @@ class SourceWorkspace(QWidget):
         self.refresh_insights()
         self.refresh_highlights()
 
+    def _on_pdf_page_polled(self) -> None:
+        page = int(self.pdf.view_state().get("page", 1))
+        if page == self._last_pdf_page:
+            return
+        self._last_pdf_page = page
+        self.page_label.setText(f"Page: {page}")
+        self._refresh_doc_progress(page)
+
+    def _refresh_doc_progress(self, current_page: int) -> None:
+        units = self.review_repo.source_units(self.source_id)
+        total_pages = int(self.source.page_count or 1) if getattr(self, "source", None) else 1
+        now = now_utc()
+        segments: list[dict] = []
+        depth_by_node = {int(r["id"]): int(r["depth"]) for r in self._rows_by_id.values()}
+        division_markers: list[dict] = []
+        seen_division_pages: set[int] = set()
+        for row in self._rows_by_id.values():
+            depth = int(row["depth"] or 0)
+            start_page = int(row["start_page"] or 0)
+            if depth < 1 or depth > 2 or start_page < 1 or start_page in seen_division_pages:
+                continue
+            seen_division_pages.add(start_page)
+            division_markers.append({
+                "title": row["title"],
+                "hierarchy_path": self._hierarchy_path_for_node(int(row["id"])),
+                "page": start_page,
+                "depth": depth,
+            })
+        for u in units:
+            state = "unstarted"
+            ret = None
+            if u["review_count"] > 0:
+                state = "learning"
+                ret = retention_estimate(u, now)
+                nr = u["next_review_at"]
+                if nr:
+                    try:
+                        next_dt = parse_iso_to_utc(nr)
+                        if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
+                            state = "mastered"
+                    except Exception:
+                        pass
+            segments.append({
+                "title": u["title"],
+                "start_page": int(u["start_page"]),
+                "end_page": int(u["end_page"]),
+                "state": state,
+                "retention": ret,
+                "depth": depth_by_node.get(int(u["node_id"]), 3),
+                "hierarchy_path": self._hierarchy_path_for_node(int(u["node_id"])),
+            })
+        self.doc_progress.set_data(
+            segments,
+            total_pages=total_pages,
+            current_page=current_page,
+            division_markers=sorted(division_markers, key=lambda m: (int(m["page"]), int(m["depth"]))),
+        )
+
+    def _hierarchy_path_for_node(self, node_id: int) -> str:
+        parts: list[str] = []
+        cursor: int | None = int(node_id)
+        seen: set[int] = set()
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            row = self._rows_by_id.get(cursor)
+            if not row:
+                break
+            parts.append(str(row["title"]))
+            cursor = self._parent_id.get(cursor)
+        parts.reverse()
+        return " > ".join(parts)
+
     def on_item_changed(self, item, col):
         if col != 1 or self._tree_syncing:
             return
-        if item.checkState(1) == Qt.PartiallyChecked:
+        state = item.checkState(1)
+        if state == Qt.PartiallyChecked:
             return
-        enabled = item.checkState(1) == Qt.Checked
-        self.outline_repo.set_queue_enabled(item.data(0, 256), enabled)
-        self.refresh_tree()
+        node_id = int(item.data(0, 256))
+        enabled = state == Qt.Checked
+        self.outline_repo.set_queue_enabled(node_id, enabled)
+        self._sync_state_cache_after_toggle(node_id, enabled)
+        self._apply_loaded_visual_states(item, enabled)
         self.queue_changed.emit()
+
+    def _state_text(self, state: Qt.CheckState) -> str:
+        if state == Qt.Checked:
+            return "on"
+        if state == Qt.Unchecked:
+            return "off"
+        return "mixed"
+
+    def _sync_state_cache_after_toggle(self, node_id: int, enabled: bool) -> None:
+        target_state = Qt.Checked if enabled else Qt.Unchecked
+        stack = [node_id]
+        while stack:
+            nid = stack.pop()
+            self._state_cache[nid] = target_state
+            stack.extend(self._child_ids.get(nid, []))
+
+        cursor = self._parent_id.get(node_id)
+        while cursor is not None:
+            child_states = [self._state_cache.get(cid, Qt.Unchecked) for cid in self._child_ids.get(cursor, [])]
+            if child_states and all(s == Qt.Checked for s in child_states):
+                self._state_cache[cursor] = Qt.Checked
+            elif child_states and all(s == Qt.Unchecked for s in child_states):
+                self._state_cache[cursor] = Qt.Unchecked
+            else:
+                self._state_cache[cursor] = Qt.PartiallyChecked
+            cursor = self._parent_id.get(cursor)
+
+    def _apply_loaded_visual_states(self, item: QTreeWidgetItem, enabled: bool) -> None:
+        target_state = Qt.Checked if enabled else Qt.Unchecked
+
+        def apply_subtree(node_item: QTreeWidgetItem) -> None:
+            node_item.setCheckState(1, target_state)
+            node_item.setText(1, self._state_text(target_state))
+            for idx in range(node_item.childCount()):
+                apply_subtree(node_item.child(idx))
+
+        self._tree_syncing = True
+        self.tree.blockSignals(True)
+        apply_subtree(item)
+
+        parent = item.parent()
+        while parent is not None:
+            child_states = [parent.child(i).checkState(1) for i in range(parent.childCount())]
+            if child_states and all(s == Qt.Checked for s in child_states):
+                pstate = Qt.Checked
+            elif child_states and all(s == Qt.Unchecked for s in child_states):
+                pstate = Qt.Unchecked
+            else:
+                pstate = Qt.PartiallyChecked
+            parent.setCheckState(1, pstate)
+            parent.setText(1, self._state_text(pstate))
+            parent = parent.parent()
+
+        self.tree.blockSignals(False)
+        self._tree_syncing = False
 
     def open_tree_context_menu(self, pos):
         item = self.tree.itemAt(pos)
@@ -594,7 +961,7 @@ class SourceWorkspace(QWidget):
 
     def refresh_insights(self):
         units = self.review_repo.source_units(self.source_id)
-        now = datetime.utcnow()
+        now = now_utc()
         untouched = sum(1 for u in units if not u["last_review_at"])
         low = sum(1 for u in units if retention_estimate(u, now) < 0.45)
         avg = sum(retention_estimate(u, now) for u in units) / max(1, len(units))
@@ -757,6 +1124,8 @@ class StudyQueuePage(QWidget):
         self.started_at = None
         self.unit_drafts: dict[int, dict] = {}
         self.source_path_cache: dict[int, str] = {}
+        self.display_units = []
+        self._queue_last_pdf_page = 1
 
         self.list = QListWidget()
         _enable_smooth_scroll(self.list)
@@ -765,9 +1134,14 @@ class StudyQueuePage(QWidget):
         self.list.viewport().installEventFilter(self)
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
+
         self.queue_banner = QLabel("")
         self.queue_banner.setWordWrap(True)
-        left = QVBoxLayout(); left.addWidget(QLabel("Due Units")); left.addWidget(self.queue_banner); left.addWidget(self.list)
+
+        left = QVBoxLayout()
+        left.addWidget(QLabel("Queue"))
+        left.addWidget(self.queue_banner)
+        left.addWidget(self.list)
 
         self.title = QLabel("No unit selected")
         self.timer_lbl = QLabel("00:00")
@@ -784,6 +1158,16 @@ class StudyQueuePage(QWidget):
         self.pdf.set_multi_page_mode()
         self.pdf.set_fit_mode()
         self.pdf.setMinimumHeight(760)
+        self.queue_outline_tree = QTreeWidget()
+        self.queue_outline_tree.setHeaderLabels(["Reading Context"])
+        self.queue_outline_tree.setMaximumWidth(280)
+        self.queue_outline_tree.setMinimumWidth(220)
+        _enable_smooth_scroll(self.queue_outline_tree)
+        self.queue_outline_tree.itemClicked.connect(self._on_queue_outline_click)
+        self._queue_outline_items: dict[int, QTreeWidgetItem] = {}
+        self._queue_outline_rows_by_id: dict[int, dict] = {}
+        self._queue_outline_child_ids: dict[int, list[int]] = {}
+        self._active_queue_outline_node_id: int | None = None
         hist_btn = QPushButton("Review History")
         hist_btn.clicked.connect(self.open_history)
         jump_btn = QPushButton("Jump to Unit")
@@ -811,7 +1195,13 @@ class StudyQueuePage(QWidget):
         self.pdf.setMinimumHeight(h)
         self.pdf.setMaximumHeight(h)
 
-        right.addWidget(self.pdf)
+        self.queue_doc_progress = DocumentProgressBar()
+        self.queue_doc_progress.page_requested.connect(self._on_queue_doc_progress_page_requested)
+        queue_pdf_row = QHBoxLayout()
+        queue_pdf_row.addWidget(self.queue_outline_tree)
+        queue_pdf_row.addWidget(self.pdf, 1)
+        right.addLayout(queue_pdf_row, 1)
+        right.addWidget(self.queue_doc_progress)
 
         corner_row = QHBoxLayout()
         corner_row.addStretch()
@@ -842,6 +1232,101 @@ class StudyQueuePage(QWidget):
         self.pdf.setMinimumHeight(new_h)
         self.pdf.setMaximumHeight(new_h)
         self.settings_repo.set_ui_state("queue_pdf_height", str(new_h))
+
+    def _on_queue_doc_progress_page_requested(self, page: int) -> None:
+        if not self.active_unit:
+            return
+        self.pdf.set_page(int(page))
+        self._queue_last_pdf_page = int(page)
+        self._set_active_queue_outline_by_page(int(page))
+        self._refresh_queue_doc_progress(int(page))
+
+    def _on_queue_outline_click(self, item, _col) -> None:
+        page = int(item.data(0, 257) or 0)
+        if page < 1:
+            return
+        self.pdf.set_page(page)
+        self._queue_last_pdf_page = page
+        self._set_active_queue_outline_by_page(page)
+        self._refresh_queue_doc_progress(page)
+
+    def _refresh_queue_outline_tree(self, source_id: int) -> None:
+        rows = self.review_repo.db.conn.execute(
+            """SELECT id,parent_id,title,depth,order_index,start_page,end_page
+            FROM outline_nodes
+            WHERE source_id=?
+            ORDER BY order_index""",
+            (source_id,),
+        ).fetchall()
+        self.queue_outline_tree.clear()
+        self._queue_outline_items = {}
+        self._queue_outline_rows_by_id = {int(r["id"]): r for r in rows}
+        self._queue_outline_child_ids = {}
+        self._active_queue_outline_node_id = None
+        for row in rows:
+            rid = int(row["id"])
+            parent_id = int(row["parent_id"]) if row["parent_id"] is not None else None
+            if parent_id is not None:
+                self._queue_outline_child_ids.setdefault(parent_id, []).append(rid)
+
+        roots = [rid for rid, row in self._queue_outline_rows_by_id.items() if row["parent_id"] is None]
+
+        def add_node(node_id: int, parent_item: QTreeWidgetItem | None) -> None:
+            row = self._queue_outline_rows_by_id.get(node_id)
+            if not row:
+                return
+            label = str(row["title"])
+            sp = int(row["start_page"] or 0)
+            ep = int(row["end_page"] or sp)
+            if sp > 0:
+                label += f" [p{sp}-{ep}]"
+            item = QTreeWidgetItem([label])
+            item.setData(0, 256, int(row["id"]))
+            item.setData(0, 257, sp)
+            if parent_item is None:
+                self.queue_outline_tree.addTopLevelItem(item)
+            else:
+                parent_item.addChild(item)
+            self._queue_outline_items[int(row["id"])] = item
+            for child_id in self._queue_outline_child_ids.get(int(row["id"]), []):
+                add_node(child_id, item)
+
+        for root_id in roots:
+            add_node(root_id, None)
+        self.queue_outline_tree.expandToDepth(1)
+
+    def _set_active_queue_outline_by_page(self, page: int) -> None:
+        if not self._queue_outline_rows_by_id:
+            return
+        matches = []
+        for row in self._queue_outline_rows_by_id.values():
+            start_page = int(row["start_page"] or 0)
+            end_page = int(row["end_page"] or start_page)
+            if start_page < 1:
+                continue
+            if start_page <= page <= end_page:
+                matches.append(row)
+        if not matches:
+            return
+        current = max(matches, key=lambda r: int(r["depth"] or 0))
+        current_id = int(current["id"])
+
+        if self._active_queue_outline_node_id in self._queue_outline_items:
+            prev_item = self._queue_outline_items[self._active_queue_outline_node_id]
+            prev_item.setBackground(0, QBrush())
+            f = prev_item.font(0)
+            f.setBold(False)
+            prev_item.setFont(0, f)
+
+        active_item = self._queue_outline_items.get(current_id)
+        if not active_item:
+            return
+        active_item.setBackground(0, QBrush(QColor("#1a2d4a")))
+        f = active_item.font(0)
+        f.setBold(True)
+        active_item.setFont(0, f)
+        self._active_queue_outline_node_id = current_id
+        self.queue_outline_tree.setCurrentItem(active_item)
 
     def _save_current_draft(self):
         if not self.active_unit:
@@ -877,7 +1362,7 @@ class StudyQueuePage(QWidget):
         started = draft.get("started_at", "")
         if started:
             try:
-                self.started_at = datetime.fromisoformat(started)
+                self.started_at = parse_iso_to_utc(started)
             except Exception:
                 self.started_at = None
         self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
@@ -886,17 +1371,30 @@ class StudyQueuePage(QWidget):
         self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
 
     def refresh(self):
-        due_units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        due_units = self.review_repo.due_units(iso_utc(now_utc()))
+        source_modes = {s.id: s.learning_mode for s in self.source_repo.list_sources()}
+        strict_sources = {sid for sid, mode in source_modes.items() if mode == "strict"}
         available_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        plan = plan_session_queue(due_units, available_minutes, self._estimate_review_seconds)
+        plan = plan_session_queue(
+            due_units,
+            available_minutes,
+            self._estimate_review_seconds,
+            strict_progression_sources=strict_sources,
+            source_id_of=lambda u: int(u.source_id),
+        )
         self.units = plan.selected_units
         self.list.clear()
         self.source_path_cache = {}
+        self.display_units = []
+        self._queue_last_pdf_page = 1
+        suggestion_extra = f" · {len(plan.suggested_units)} progression suggestion(s)" if plan.suggested_units else ""
         self.queue_banner.setText(
             f"Showing {len(self.units)}/{len(due_units)} due units · "
             f"Projected {plan.projected_minutes:.1f} min"
             + (f" · {plan.overflow_count} deferred" if plan.overflow_count else "")
+            + suggestion_extra
         )
+        existing_ids = set()
         for u in self.units:
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
@@ -904,17 +1402,37 @@ class StudyQueuePage(QWidget):
             item = QListWidgetItem()
             self.list.addItem(item)
             self.list.setItemWidget(item, tile)
+            self.display_units.append((u, None))
+            existing_ids.add(int(u.unit_id))
             if u.source_id not in self.source_path_cache:
                 s = self.source_repo.get(u.source_id)
                 if s:
                     self.source_path_cache[u.source_id] = s.file_path
                     self.pdf.prime_path(s.file_path)
+
+        for sug in plan.suggested_units:
+            if int(sug.unit.unit_id) in existing_ids:
+                continue
+            est_seconds = max(1.0, sug.estimated_minutes * 60.0)
+            tile = self._build_queue_tile(
+                sug.unit,
+                est_seconds,
+                self._estimate_retention(sug.unit),
+                progression_reason=sug.reason,
+            )
+            item = QListWidgetItem()
+            self.list.addItem(item)
+            self.list.setItemWidget(item, tile)
+            self.display_units.append((sug.unit, sug.reason))
+
         self._relayout_queue_tiles()
         if self.list.count() > 0:
             self.list.setCurrentRow(0)
+            self._refresh_queue_doc_progress()
         else:
             self.active_unit = None
             self.title.setText("No unit selected")
+            self.queue_doc_progress.set_data([], total_pages=1, current_page=1)
 
     def eventFilter(self, obj, event):
         if obj is self.list.viewport() and event.type() == QEvent.Resize:
@@ -958,7 +1476,7 @@ class StudyQueuePage(QWidget):
         row = self.review_repo.unit_by_id(unit.unit_id)
         if not row:
             return None
-        return retention_estimate(row, datetime.utcnow())
+        return retention_estimate(row, now_utc())
 
     def _queue_tile_size_hint(self, tile: QWidget, width: int) -> QSize:
         min_h = 110
@@ -971,7 +1489,7 @@ class StudyQueuePage(QWidget):
         except Exception:
             return QSize(max(220, width), fallback_h)
 
-    def _build_queue_tile(self, unit, est_seconds: float, retention: float | None) -> QWidget:
+    def _build_queue_tile(self, unit, est_seconds: float, retention: float | None, progression_reason: str | None = None) -> QWidget:
         root = QFrame()
         root.setObjectName("queueTile")
         root.setStyleSheet(
@@ -979,6 +1497,7 @@ class StudyQueuePage(QWidget):
             "QLabel#tileTitle { font-size: 15px; font-weight: 600; color: #f2f5f7; }"
             "QLabel#tileMeta { color: #9aa7b2; font-size: 11px; }"
             "QLabel#badge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d8e1e8; background: #2b3440; }"
+            "QLabel#progressBadge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #332400; background: #d8b65a; }"
         )
 
         lay = QVBoxLayout(root)
@@ -1018,6 +1537,10 @@ class StudyQueuePage(QWidget):
 
         for w in [pages, mins, retention_lbl]:
             badge_row.addWidget(w)
+        if progression_reason:
+            progress_badge = QLabel("needed for progression")
+            progress_badge.setObjectName("progressBadge")
+            badge_row.addWidget(progress_badge)
         badge_row.addStretch()
 
         retention_text = "new" if retention is None else f"{int(round(max(0.01, min(0.99, retention)) * 100))}%"
@@ -1044,12 +1567,107 @@ class StudyQueuePage(QWidget):
         mins = seconds / 60.0
         return f"~{mins:.1f} min"
 
+    def _refresh_queue_doc_progress(self, current_page: int | None = None) -> None:
+        if not self.active_unit:
+            self.queue_doc_progress.set_data([], total_pages=1, current_page=1)
+            return
+        source = self.source_repo.get(self.active_unit.source_id)
+        if not source:
+            self.queue_doc_progress.set_data([], total_pages=1, current_page=1)
+            return
+
+        rows = self.review_repo.db.conn.execute(
+            """SELECT u.*, n.depth AS depth
+            FROM units u
+            LEFT JOIN outline_nodes n ON n.id=u.node_id
+            WHERE u.source_id=?
+            ORDER BY u.start_page, u.title""",
+            (self.active_unit.source_id,),
+        ).fetchall()
+        outline_rows = self.review_repo.db.conn.execute(
+            """SELECT id,parent_id,title,depth,start_page
+            FROM outline_nodes
+            WHERE source_id=?
+            ORDER BY order_index""",
+            (self.active_unit.source_id,),
+        ).fetchall()
+        row_by_id = {int(r["id"]): r for r in outline_rows}
+        parent_by_id = {int(r["id"]): (int(r["parent_id"]) if r["parent_id"] is not None else None) for r in outline_rows}
+
+        def hierarchy_path_for_node(node_id: int) -> str:
+            parts: list[str] = []
+            cursor: int | None = int(node_id)
+            seen: set[int] = set()
+            while cursor is not None and cursor not in seen:
+                seen.add(cursor)
+                row = row_by_id.get(cursor)
+                if not row:
+                    break
+                parts.append(str(row["title"]))
+                cursor = parent_by_id.get(cursor)
+            parts.reverse()
+            return " > ".join(parts)
+
+        division_markers: list[dict] = []
+        seen_division_pages: set[int] = set()
+        for row in outline_rows:
+            depth = int(row["depth"] or 0)
+            page = int(row["start_page"] or 0)
+            if depth < 1 or depth > 2 or page < 1 or page in seen_division_pages:
+                continue
+            seen_division_pages.add(page)
+            division_markers.append({
+                "title": row["title"],
+                "hierarchy_path": hierarchy_path_for_node(int(row["id"])),
+                "page": page,
+                "depth": depth,
+            })
+
+        now = now_utc()
+        segs: list[dict] = []
+        for u in rows:
+            state = "unstarted"
+            ret = None
+            if u["review_count"] > 0:
+                state = "learning"
+                ret = retention_estimate(u, now)
+                nr = u["next_review_at"]
+                if nr:
+                    try:
+                        next_dt = parse_iso_to_utc(nr)
+                        if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
+                            state = "mastered"
+                    except Exception:
+                        pass
+            segs.append({
+                "title": u["title"],
+                "start_page": int(u["start_page"]),
+                "end_page": int(u["end_page"]),
+                "state": state,
+                "retention": ret,
+                "depth": int(u["depth"] or 3),
+                "hierarchy_path": hierarchy_path_for_node(int(u["node_id"])),
+            })
+
+        cp = current_page if current_page is not None else int(self.pdf.view_state().get("page", self.active_unit.start_page))
+        self.queue_doc_progress.set_data(
+            segs,
+            total_pages=int(source.page_count or 1),
+            current_page=int(cp),
+            division_markers=sorted(division_markers, key=lambda m: (int(m["page"]), int(m["depth"]))),
+        )
+
     def pick_unit(self, idx):
         self._save_current_draft()
-        if idx < 0 or idx >= len(self.units):
+        if idx < 0 or idx >= len(self.display_units):
             self.active_unit = None
+            self.queue_outline_tree.clear()
+            self._queue_outline_items = {}
+            self._queue_outline_rows_by_id = {}
+            self._queue_outline_child_ids = {}
+            self._active_queue_outline_node_id = None
             return
-        self.active_unit = self.units[idx]
+        self.active_unit = self.display_units[idx][0]
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
         path = self.source_path_cache.get(self.active_unit.source_id)
         if not path:
@@ -1066,8 +1684,12 @@ class StudyQueuePage(QWidget):
         except Exception:
             target_zoom = float(last_zoom)
         self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
+        self._refresh_queue_outline_tree(self.active_unit.source_id)
         self.pdf.set_page(self.active_unit.start_page)
+        self._set_active_queue_outline_by_page(int(self.active_unit.start_page))
         self._load_draft_for_active()
+        self._queue_last_pdf_page = int(self.pdf.view_state().get("page", self.active_unit.start_page))
+        self._refresh_queue_doc_progress(self._queue_last_pdf_page)
 
     def jump_to_active_unit(self):
         if self.active_unit:
@@ -1077,11 +1699,17 @@ class StudyQueuePage(QWidget):
         if self.timer_running:
             self.timer_seconds += 1
             self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
+        if self.active_unit:
+            page = int(self.pdf.view_state().get("page", self._queue_last_pdf_page or 1))
+            if page != self._queue_last_pdf_page:
+                self._queue_last_pdf_page = page
+                self._set_active_queue_outline_by_page(page)
+                self._refresh_queue_doc_progress(page)
 
     def toggle_timer(self):
         self.timer_running = not self.timer_running
         if self.timer_running and not self.started_at:
-            self.started_at = datetime.utcnow()
+            self.started_at = now_utc()
 
     def reset_timer(self):
         self.timer_seconds = 0
@@ -1096,12 +1724,12 @@ class StudyQueuePage(QWidget):
     def rate(self, rating: str):
         if not self.active_unit:
             return
-        now = datetime.utcnow()
+        now = now_utc()
         unit_row = self.review_repo.unit_by_id(self.active_unit.unit_id)
         res = compute_next(unit_row, rating, now)
         payload = {
-            "started_at": (self.started_at or now).isoformat(timespec="seconds"),
-            "ended_at": now.isoformat(timespec="seconds"),
+            "started_at": iso_utc(self.started_at or now),
+            "ended_at": iso_utc(now),
             "elapsed_seconds": self.timer_seconds,
             "rating": rating,
             "pre_note": self.pre.toPlainText(),
@@ -1109,17 +1737,17 @@ class StudyQueuePage(QWidget):
             "interval_days": res.interval_days,
             "next_review_at": res.next_review_at,
         }
-        self.review_repo.add_event(self.active_unit.unit_id, payload)
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
-        self.review_repo.update_unit_stats(self.active_unit.unit_id, {
-            "last_review_at": now.isoformat(timespec="seconds"),
+        unit_stats = {
+            "last_review_at": iso_utc(now),
             "next_review_at": res.next_review_at,
             "review_count": count,
             "ease_factor": res.ease_factor,
             "interval_days": res.interval_days,
             "avg_rating": avg,
-        })
+        }
+        self.review_repo.record_review(self.active_unit.unit_id, payload, unit_stats)
         self.unit_drafts.pop(self.active_unit.unit_id, None)
         self.reset_timer(); self.pre.clear(); self.post.clear(); self.refresh()
 
@@ -1165,7 +1793,7 @@ class SettingsPage(QWidget):
         self.settings_changed.emit()
 
     def refresh_summary(self):
-        due_units = self.review_repo.due_units(datetime.utcnow().isoformat(timespec="seconds"))
+        due_units = self.review_repo.due_units(iso_utc(now_utc()))
         due_review_minutes = sum(self._estimate_review_seconds(u) for u in due_units) / 60.0
         avg_new_unit_seconds = self.review_repo.avg_elapsed_seconds_global() or float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         allocation = allocate_new_units(
