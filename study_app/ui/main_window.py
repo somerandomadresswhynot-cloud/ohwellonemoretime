@@ -53,33 +53,62 @@ def _enable_smooth_scroll(view: QAbstractItemView) -> None:
 
 
 class DocumentProgressBar(QWidget):
+    page_requested = Signal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._segments: list[dict] = []
         self._segment_regions: list[tuple[tuple[int, int, int, int], dict]] = []
+        self._division_markers: list[dict] = []
+        self._division_regions: list[tuple[tuple[int, int, int, int], dict]] = []
         self._total_pages = 1
         self._current_page = 1
         self._hover_key = ""
+        self._inner_rect = None
         self.setMinimumHeight(26)
         self.setMouseTracking(True)
 
-    def set_data(self, segments: list[dict], total_pages: int, current_page: int) -> None:
+    def set_data(self, segments: list[dict], total_pages: int, current_page: int, division_markers: list[dict] | None = None) -> None:
         self._segments = segments
+        self._division_markers = division_markers or []
         self._total_pages = max(1, int(total_pages or 1))
         self._current_page = max(1, int(current_page or 1))
         self.update()
 
     def _segment_tooltip(self, seg: dict) -> str:
         title = seg.get("title", "Unit")
+        hierarchy = seg.get("hierarchy_path") or title
         sp = int(seg.get("start_page", 1))
         ep = int(seg.get("end_page", sp))
         state = str(seg.get("state", "unstarted"))
         retention = seg.get("retention")
         retention_text = "n/a" if retention is None else f"{int(round(max(0.01, min(0.99, float(retention))) * 100))}%"
-        return f"{title}\nPages: {sp}-{ep}\nState: {state}\nRetention: {retention_text}"
+        return f"{title}\nHierarchy: {hierarchy}\nPages: {sp}-{ep}\nState: {state}\nRetention: {retention_text}"
+
+    def _division_tooltip(self, marker: dict) -> str:
+        title = marker.get("title", "Division")
+        hierarchy = marker.get("hierarchy_path") or title
+        page = int(marker.get("page", 1))
+        return f"Division: {title}\nHierarchy: {hierarchy}\nStarts at page {page}"
+
+    def _page_for_x(self, x: int) -> int:
+        inner = self._inner_rect
+        if not inner:
+            return self._current_page
+        clamped_x = max(inner.left(), min(inner.right(), x))
+        ratio = (clamped_x - inner.left()) / max(1, inner.width())
+        page = int(round(1 + ratio * (self._total_pages - 1)))
+        return max(1, min(self._total_pages, page))
 
     def mouseMoveEvent(self, event):
         x, y = int(event.position().x()), int(event.position().y())
+        for (lx, ty, rx, by), marker in self._division_regions:
+            if lx <= x <= rx and ty <= y <= by:
+                tip = self._division_tooltip(marker)
+                if tip != self._hover_key:
+                    self._hover_key = tip
+                    self.setToolTip(tip)
+                return
         for (lx, ty, rx, by), seg in self._segment_regions:
             if lx <= x <= rx and ty <= y <= by:
                 tip = self._segment_tooltip(seg)
@@ -91,6 +120,12 @@ class DocumentProgressBar(QWidget):
             self._hover_key = ""
             self.setToolTip("")
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._inner_rect and self._inner_rect.contains(int(event.position().x()), int(event.position().y())):
+            self.page_requested.emit(self._page_for_x(int(event.position().x())))
+            return
+        super().mousePressEvent(event)
+
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
@@ -101,7 +136,9 @@ class DocumentProgressBar(QWidget):
         p.drawRoundedRect(r, 6, 6)
 
         inner = r.adjusted(2, 3, -2, -3)
+        self._inner_rect = inner
         self._segment_regions = []
+        self._division_regions = []
         for seg in self._segments:
             sp = max(1, int(seg.get("start_page", 1)))
             ep = max(sp, int(seg.get("end_page", sp)))
@@ -137,6 +174,17 @@ class DocumentProgressBar(QWidget):
                 p.drawRect(max(seg_rect.left(), inner.left()), inner.bottom() + 1, 1, tick_h)
 
             self._segment_regions.append(((seg_rect.left(), seg_rect.top(), seg_rect.right(), seg_rect.bottom()), seg))
+
+        for marker in self._division_markers:
+            page = max(1, min(self._total_pages, int(marker.get("page", 1))))
+            depth = max(1, int(marker.get("depth", 2)))
+            x = int(inner.left() + ((page - 1) / self._total_pages) * inner.width())
+            tick_h = 10 if depth <= 1 else 7 if depth == 2 else 4
+            color = QColor("#7e9cc7") if depth <= 2 else QColor("#5f7395")
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawRect(x, inner.bottom() + 1, 2, tick_h)
+            self._division_regions.append(((x - 2, inner.top(), x + 3, inner.bottom() + tick_h + 2), marker))
 
         marker_x = int(inner.left() + ((self._current_page - 1) / self._total_pages) * inner.width())
         p.setPen(QPen(QColor("#f8fafc"), 2))
@@ -422,6 +470,7 @@ class SourceWorkspace(QWidget):
         self._active_pdf_outline_node_id: int | None = None
 
         self.doc_progress = DocumentProgressBar()
+        self.doc_progress.page_requested.connect(self._on_doc_progress_page_requested)
 
         c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
         pdf_row = QHBoxLayout(); pdf_row.addWidget(self.pdf_outline_tree); pdf_row.addWidget(self.pdf, 1)
@@ -466,6 +515,11 @@ class SourceWorkspace(QWidget):
         self._pdf_page_poll.timeout.connect(self._on_pdf_page_polled)
         self._pdf_page_poll.start(450)
         self.load_source()
+
+    def _on_doc_progress_page_requested(self, page: int) -> None:
+        self.pdf.set_page(int(page))
+        self._set_active_pdf_outline_by_page(int(page))
+        self._refresh_doc_progress(int(page))
 
     def set_source(self, source_id: int) -> None:
         if int(source_id) == int(self.source_id):
@@ -794,6 +848,20 @@ class SourceWorkspace(QWidget):
         now = now_utc()
         segments: list[dict] = []
         depth_by_node = {int(r["id"]): int(r["depth"]) for r in self._rows_by_id.values()}
+        division_markers: list[dict] = []
+        seen_division_pages: set[int] = set()
+        for row in self._rows_by_id.values():
+            depth = int(row["depth"] or 0)
+            start_page = int(row["start_page"] or 0)
+            if depth < 1 or depth > 2 or start_page < 1 or start_page in seen_division_pages:
+                continue
+            seen_division_pages.add(start_page)
+            division_markers.append({
+                "title": row["title"],
+                "hierarchy_path": self._hierarchy_path_for_node(int(row["id"])),
+                "page": start_page,
+                "depth": depth,
+            })
         for u in units:
             state = "unstarted"
             ret = None
@@ -815,8 +883,28 @@ class SourceWorkspace(QWidget):
                 "state": state,
                 "retention": ret,
                 "depth": depth_by_node.get(int(u["node_id"]), 3),
+                "hierarchy_path": self._hierarchy_path_for_node(int(u["node_id"])),
             })
-        self.doc_progress.set_data(segments, total_pages=total_pages, current_page=current_page)
+        self.doc_progress.set_data(
+            segments,
+            total_pages=total_pages,
+            current_page=current_page,
+            division_markers=sorted(division_markers, key=lambda m: (int(m["page"]), int(m["depth"]))),
+        )
+
+    def _hierarchy_path_for_node(self, node_id: int) -> str:
+        parts: list[str] = []
+        cursor: int | None = int(node_id)
+        seen: set[int] = set()
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            row = self._rows_by_id.get(cursor)
+            if not row:
+                break
+            parts.append(str(row["title"]))
+            cursor = self._parent_id.get(cursor)
+        parts.reverse()
+        return " > ".join(parts)
 
     def on_item_changed(self, item, col):
         if col != 1 or self._tree_syncing:
@@ -1182,6 +1270,7 @@ class StudyQueuePage(QWidget):
         self.pdf.setMaximumHeight(h)
 
         self.queue_doc_progress = DocumentProgressBar()
+        self.queue_doc_progress.page_requested.connect(self._on_queue_doc_progress_page_requested)
         right.addWidget(self.pdf)
         right.addWidget(self.queue_doc_progress)
 
@@ -1214,6 +1303,13 @@ class StudyQueuePage(QWidget):
         self.pdf.setMinimumHeight(new_h)
         self.pdf.setMaximumHeight(new_h)
         self.settings_repo.set_ui_state("queue_pdf_height", str(new_h))
+
+    def _on_queue_doc_progress_page_requested(self, page: int) -> None:
+        if not self.active_unit:
+            return
+        self.pdf.set_page(int(page))
+        self._queue_last_pdf_page = int(page)
+        self._refresh_queue_doc_progress(int(page))
 
     def _save_current_draft(self):
         if not self.active_unit:
@@ -1471,6 +1567,45 @@ class StudyQueuePage(QWidget):
             ORDER BY u.start_page, u.title""",
             (self.active_unit.source_id,),
         ).fetchall()
+        outline_rows = self.review_repo.db.conn.execute(
+            """SELECT id,parent_id,title,depth,start_page
+            FROM outline_nodes
+            WHERE source_id=?
+            ORDER BY order_index""",
+            (self.active_unit.source_id,),
+        ).fetchall()
+        row_by_id = {int(r["id"]): r for r in outline_rows}
+        parent_by_id = {int(r["id"]): (int(r["parent_id"]) if r["parent_id"] is not None else None) for r in outline_rows}
+
+        def hierarchy_path_for_node(node_id: int) -> str:
+            parts: list[str] = []
+            cursor: int | None = int(node_id)
+            seen: set[int] = set()
+            while cursor is not None and cursor not in seen:
+                seen.add(cursor)
+                row = row_by_id.get(cursor)
+                if not row:
+                    break
+                parts.append(str(row["title"]))
+                cursor = parent_by_id.get(cursor)
+            parts.reverse()
+            return " > ".join(parts)
+
+        division_markers: list[dict] = []
+        seen_division_pages: set[int] = set()
+        for row in outline_rows:
+            depth = int(row["depth"] or 0)
+            page = int(row["start_page"] or 0)
+            if depth < 1 or depth > 2 or page < 1 or page in seen_division_pages:
+                continue
+            seen_division_pages.add(page)
+            division_markers.append({
+                "title": row["title"],
+                "hierarchy_path": hierarchy_path_for_node(int(row["id"])),
+                "page": page,
+                "depth": depth,
+            })
+
         now = now_utc()
         segs: list[dict] = []
         for u in rows:
@@ -1494,10 +1629,16 @@ class StudyQueuePage(QWidget):
                 "state": state,
                 "retention": ret,
                 "depth": int(u["depth"] or 3),
+                "hierarchy_path": hierarchy_path_for_node(int(u["node_id"])),
             })
 
         cp = current_page if current_page is not None else int(self.pdf.view_state().get("page", self.active_unit.start_page))
-        self.queue_doc_progress.set_data(segs, total_pages=int(source.page_count or 1), current_page=int(cp))
+        self.queue_doc_progress.set_data(
+            segs,
+            total_pages=int(source.page_count or 1),
+            current_page=int(cp),
+            division_markers=sorted(division_markers, key=lambda m: (int(m["page"]), int(m["depth"]))),
+        )
 
     def pick_unit(self, idx):
         self._save_current_draft()
