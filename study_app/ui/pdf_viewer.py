@@ -15,6 +15,13 @@ except Exception:  # runtime guard if QtPdf missing
     QPdfDocument = None
     QPdfView = None
 
+try:
+    from PySide6.QtCore import QUrl
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+except Exception:
+    QUrl = None
+    QWebEngineView = None
+
 
 class _ViewerFullscreenHost(QWidget):
     def __init__(self, on_esc, parent=None):
@@ -123,6 +130,8 @@ class PersistentPdfViewer(QWidget):
         super().__init__()
         self.current_path = ""
         self._view = None
+        self._web_view = None
+        self._backend = "none"
         self._label = QLabel("PDF view unavailable (QtPdf missing).")
         self._label.setAlignment(Qt.AlignCenter)
         self._last_page = 1
@@ -146,7 +155,13 @@ class PersistentPdfViewer(QWidget):
         self._selection_enabled = False
 
         root = QVBoxLayout(self)
-        if QPdfDocument and QPdfView:
+        # Prefer web engine backend for better native text-selection behavior when available.
+        if QWebEngineView and QUrl:
+            self._backend = "web"
+            self._web_view = QWebEngineView(self)
+            root.addWidget(self._web_view)
+        elif QPdfDocument and QPdfView:
+            self._backend = "qtpdf"
             viewport_host = QWidget(self)
             viewport_layout = QVBoxLayout(viewport_host)
             viewport_layout.setContentsMargins(0, 0, 0, 0)
@@ -190,7 +205,7 @@ class PersistentPdfViewer(QWidget):
 
     def set_selection_menu_handler(self, handler) -> None:
         self._selection_menu_handler = handler
-        if not self._view:
+        if self._backend != "qtpdf" or not self._view:
             return
         self._view.setContextMenuPolicy(Qt.CustomContextMenu)
         if self._context_menu_connected:
@@ -204,7 +219,7 @@ class PersistentPdfViewer(QWidget):
             self._selection_menu_handler(QCursor.pos(), self.selected_text(), int(self.view_state().get("page", 1)))
 
     def eventFilter(self, watched, event):
-        if self._overlay and self._view and watched is self._view.viewport():
+        if self._backend == "qtpdf" and self._overlay and self._view and watched is self._view.viewport():
             if event.type() in (QEvent.Resize, QEvent.Show):
                 self._overlay.resize(self._view.viewport().size())
                 self._overlay.raise_()
@@ -229,8 +244,13 @@ class PersistentPdfViewer(QWidget):
         }
 
     def selected_text(self) -> str:
-        if not self._view:
-            return ""
+        if self._backend != "qtpdf" or not self._view:
+            try:
+                from PySide6.QtWidgets import QApplication
+
+                return (QApplication.clipboard().text() or "").strip()
+            except Exception:
+                return ""
         # Try direct selection APIs first.
         try:
             if hasattr(self._view, "selectedText"):
@@ -256,7 +276,8 @@ class PersistentPdfViewer(QWidget):
             return ""
 
     def _enable_text_selection_mode(self) -> None:
-        if not self._view:
+        if self._backend != "qtpdf" or not self._view:
+            self._selection_enabled = self._backend == "web"
             return
         enabled = False
         try:
@@ -289,7 +310,8 @@ class PersistentPdfViewer(QWidget):
         self._selection_enabled = enabled
 
     def _disable_text_selection_mode(self) -> None:
-        if not self._view:
+        if self._backend != "qtpdf" or not self._view:
+            self._selection_enabled = False
             return
         try:
             enum_cls = getattr(QPdfView, "SelectionMode", None)
@@ -315,6 +337,17 @@ class PersistentPdfViewer(QWidget):
             "erase": "erase",
         }
         self._interaction_mode = mapped.get(tool, "text_select")
+        if self._backend == "web" and self._web_view:
+            if self._interaction_mode == "text_select":
+                self._selection_enabled = True
+                self._web_view.setCursor(Qt.IBeamCursor)
+            elif self._interaction_mode == "pan":
+                self._selection_enabled = False
+                self._web_view.setCursor(Qt.OpenHandCursor)
+            else:
+                self._selection_enabled = False
+                self._web_view.setCursor(Qt.ArrowCursor)
+            return
         if not self._view:
             return
         if self._interaction_mode == "text_select":
@@ -341,6 +374,8 @@ class PersistentPdfViewer(QWidget):
             self._overlay.update()
 
     def _attach_page_changed(self, doc: QPdfDocument) -> None:
+        if self._backend != "qtpdf" or not self._view:
+            return
         nav = self._view.pageNavigator()
         if self._page_changed_connected and self._page_nav is not None:
             self._safe_disconnect(self._page_nav.currentPageChanged, self._on_page_changed)
@@ -382,6 +417,11 @@ class PersistentPdfViewer(QWidget):
         self._cache_doc(path, doc)
 
     def zoom_factor(self) -> float:
+        if self._backend == "web" and self._web_view:
+            try:
+                return float(self._web_view.zoomFactor())
+            except Exception:
+                return 1.0
         if not self._view:
             return 1.0
         try:
@@ -405,7 +445,7 @@ class PersistentPdfViewer(QWidget):
         self.set_fit_mode()
 
     def set_multi_page_mode(self) -> None:
-        if not self._view:
+        if self._backend != "qtpdf" or not self._view:
             return
         try:
             self._view.setPageMode(QPdfView.PageMode.MultiPage)
@@ -413,7 +453,7 @@ class PersistentPdfViewer(QWidget):
             pass
 
     def set_single_page_mode(self) -> None:
-        if not self._view:
+        if self._backend != "qtpdf" or not self._view:
             return
         try:
             self._view.setPageMode(QPdfView.PageMode.SinglePage)
@@ -421,7 +461,17 @@ class PersistentPdfViewer(QWidget):
             pass
 
     def load_if_needed(self, path: str) -> None:
-        if not path or not Path(path).exists() or not self._view or not QPdfDocument:
+        if not path or not Path(path).exists():
+            return
+        if self._backend == "web" and self._web_view:
+            if path == self.current_path:
+                return
+            self._web_view.setUrl(QUrl.fromLocalFile(path))
+            self.current_path = path
+            self._last_page = 1
+            self._last_location = (0.0, 0.0)
+            return
+        if not self._view or not QPdfDocument:
             return
         if path == self.current_path:
             return
@@ -442,6 +492,10 @@ class PersistentPdfViewer(QWidget):
         self._apply_default_view_mode()
 
     def set_fit_mode(self) -> None:
+        if self._backend == "web" and self._web_view:
+            self._web_view.setZoomFactor(1.0)
+            self._sync_zoom_spin()
+            return
         if self._view:
             try:
                 self._view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
@@ -453,6 +507,10 @@ class PersistentPdfViewer(QWidget):
             self._sync_zoom_spin()
 
     def set_fit_page_mode(self) -> None:
+        if self._backend == "web" and self._web_view:
+            self._web_view.setZoomFactor(1.0)
+            self._sync_zoom_spin()
+            return
         if self._view:
             try:
                 self._view.setZoomMode(QPdfView.ZoomMode.FitInView)
@@ -461,6 +519,15 @@ class PersistentPdfViewer(QWidget):
             self._sync_zoom_spin()
 
     def set_page(self, page: int, location: tuple[float, float] | None = None) -> None:
+        if self._backend == "web" and self._web_view:
+            target = max(1, int(page))
+            self._last_page = target
+            self._last_location = (0.0, 0.0) if not location else (float(location[0]), float(location[1]))
+            if self.current_path:
+                url = QUrl.fromLocalFile(self.current_path)
+                url.setFragment(f"page={target}")
+                self._web_view.setUrl(url)
+            return
         if not self._view:
             return
         nav = self._view.pageNavigator()
@@ -476,12 +543,18 @@ class PersistentPdfViewer(QWidget):
         self._last_location = (float(x), float(y))
 
     def set_zoom(self, factor: float) -> None:
+        if self._backend == "web" and self._web_view:
+            self._web_view.setZoomFactor(float(factor))
+            self._sync_zoom_spin()
+            return
         if self._view:
             self._view.setZoomMode(QPdfView.ZoomMode.Custom)
             self._view.setZoomFactor(float(factor))
             self._sync_zoom_spin()
 
     def toggle_fullscreen(self) -> None:
+        if self._backend == "web":
+            return
         if not self._view:
             return
         if self._fullscreen_host is None:
@@ -513,6 +586,8 @@ class PersistentPdfViewer(QWidget):
     def view_state(self) -> dict:
         page = self._last_page
         loc = self._last_location
+        if self._backend == "web":
+            return {"page": page, "location": loc}
         if self._view:
             nav = self._view.pageNavigator()
             try:
