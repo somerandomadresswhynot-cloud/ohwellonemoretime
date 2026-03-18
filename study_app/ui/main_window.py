@@ -460,20 +460,11 @@ class SourceWorkspace(QWidget):
         btn_unit_actions.clicked.connect(self.open_unit_actions_menu)
         self.page_label = QLabel("Page: -")
 
-        self.pdf_outline_tree = QTreeWidget()
-        self.pdf_outline_tree.setHeaderLabels(["Reading Context"])
-        self.pdf_outline_tree.setMaximumWidth(280)
-        self.pdf_outline_tree.setMinimumWidth(220)
-        _enable_smooth_scroll(self.pdf_outline_tree)
-        self.pdf_outline_tree.itemClicked.connect(self.on_pdf_outline_click)
-        self._pdf_outline_items: dict[int, QTreeWidgetItem] = {}
-        self._active_pdf_outline_node_id: int | None = None
-
         self.doc_progress = DocumentProgressBar()
         self.doc_progress.page_requested.connect(self._on_doc_progress_page_requested)
 
         c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
-        pdf_row = QHBoxLayout(); pdf_row.addWidget(self.pdf_outline_tree); pdf_row.addWidget(self.pdf, 1)
+        pdf_row = QHBoxLayout(); pdf_row.addWidget(self.pdf, 1)
         c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.page_label); c_l.addLayout(pdf_row, 1); c_l.addWidget(self.doc_progress)
 
         self.insights = QLabel()
@@ -518,7 +509,6 @@ class SourceWorkspace(QWidget):
 
     def _on_doc_progress_page_requested(self, page: int) -> None:
         self.pdf.set_page(int(page))
-        self._set_active_pdf_outline_by_page(int(page))
         self._refresh_doc_progress(int(page))
 
     def set_source(self, source_id: int) -> None:
@@ -538,7 +528,7 @@ class SourceWorkspace(QWidget):
         self.refresh_insights()
         self.refresh_highlights()
         self._last_pdf_page = int(self.pdf.view_state().get("page", 1))
-        self._refresh_pdf_context_views()
+        self._refresh_doc_progress(self._last_pdf_page)
         if self.source:
             self.context_changed.emit(self.source.title, "")
 
@@ -607,7 +597,7 @@ class SourceWorkspace(QWidget):
         if preserve_view_state and not filt:
             self._restore_tree_view_state(expanded_ids, selected_id)
 
-        self._refresh_pdf_context_views()
+        self._refresh_doc_progress(int(self.pdf.view_state().get("page", 1)))
 
     def _add_item_from_row(self, node_id: int, parent_item: QTreeWidgetItem | None, include_children: bool) -> QTreeWidgetItem:
         r = self._rows_by_id.get(node_id)
@@ -755,7 +745,6 @@ class SourceWorkspace(QWidget):
         selected_label = selected_label.replace(" · unit", "")
         if page:
             self.page_label.setText(f"Page: {page}")
-            self._set_active_pdf_outline_by_page(int(page))
         if self.source:
             self.context_changed.emit(self.source.title, selected_label)
         self.refresh_insights()
@@ -767,80 +756,7 @@ class SourceWorkspace(QWidget):
             return
         self._last_pdf_page = page
         self.page_label.setText(f"Page: {page}")
-        self._set_active_pdf_outline_by_page(page)
         self._refresh_doc_progress(page)
-
-    def on_pdf_outline_click(self, item, _col):
-        page = item.data(0, 257)
-        if page:
-            self.pdf.set_page(int(page))
-            self._last_pdf_page = int(page)
-            self.page_label.setText(f"Page: {int(page)}")
-            self._set_active_pdf_outline_by_page(int(page))
-            self._refresh_doc_progress(int(page))
-
-    def _refresh_pdf_context_views(self) -> None:
-        self._build_pdf_outline_tree()
-        self._refresh_doc_progress(int(self.pdf.view_state().get("page", 1)))
-
-    def _build_pdf_outline_tree(self) -> None:
-        self.pdf_outline_tree.clear()
-        self._pdf_outline_items = {}
-        if not self._rows_by_id:
-            return
-
-        roots = [nid for nid, parent in self._parent_id.items() if parent is None]
-
-        def add_node(node_id: int, parent_item: QTreeWidgetItem | None):
-            row = self._rows_by_id.get(node_id)
-            if not row:
-                return
-            label = row["title"]
-            if row["start_page"]:
-                label += f" [p{row['start_page']}-{row['end_page'] or row['start_page']}]"
-            item = QTreeWidgetItem([label])
-            item.setData(0, 256, int(row["id"]))
-            item.setData(0, 257, int(row["start_page"] or 1))
-            if parent_item is None:
-                self.pdf_outline_tree.addTopLevelItem(item)
-            else:
-                parent_item.addChild(item)
-            self._pdf_outline_items[int(row["id"])] = item
-            for child_id in self._child_ids.get(int(row["id"]), []):
-                add_node(child_id, item)
-
-        for rid in roots:
-            add_node(rid, None)
-
-        self.pdf_outline_tree.expandToDepth(1)
-        self._set_active_pdf_outline_by_page(int(self.pdf.view_state().get("page", 1)))
-
-    def _set_active_pdf_outline_by_page(self, page: int) -> None:
-        matches = []
-        for row in self._rows_by_id.values():
-            sp = row["start_page"]
-            ep = row["end_page"] or sp
-            if not sp:
-                continue
-            if int(sp) <= int(page) <= int(ep):
-                matches.append(row)
-        if not matches:
-            return
-        current = max(matches, key=lambda r: int(r["depth"]))
-        current_id = int(current["id"])
-
-        if self._active_pdf_outline_node_id in self._pdf_outline_items:
-            old_item = self._pdf_outline_items[self._active_pdf_outline_node_id]
-            old_item.setBackground(0, QBrush())
-            f = old_item.font(0); f.setBold(False); old_item.setFont(0, f)
-
-        active_item = self._pdf_outline_items.get(current_id)
-        if not active_item:
-            return
-        active_item.setBackground(0, QBrush(QColor("#1a2d4a")))
-        f = active_item.font(0); f.setBold(True); active_item.setFont(0, f)
-        self._active_pdf_outline_node_id = current_id
-        self.pdf_outline_tree.setCurrentItem(active_item)
 
     def _refresh_doc_progress(self, current_page: int) -> None:
         units = self.review_repo.source_units(self.source_id)
@@ -1242,6 +1158,16 @@ class StudyQueuePage(QWidget):
         self.pdf.set_multi_page_mode()
         self.pdf.set_fit_mode()
         self.pdf.setMinimumHeight(760)
+        self.queue_outline_tree = QTreeWidget()
+        self.queue_outline_tree.setHeaderLabels(["Reading Context"])
+        self.queue_outline_tree.setMaximumWidth(280)
+        self.queue_outline_tree.setMinimumWidth(220)
+        _enable_smooth_scroll(self.queue_outline_tree)
+        self.queue_outline_tree.itemClicked.connect(self._on_queue_outline_click)
+        self._queue_outline_items: dict[int, QTreeWidgetItem] = {}
+        self._queue_outline_rows_by_id: dict[int, dict] = {}
+        self._queue_outline_child_ids: dict[int, list[int]] = {}
+        self._active_queue_outline_node_id: int | None = None
         hist_btn = QPushButton("Review History")
         hist_btn.clicked.connect(self.open_history)
         jump_btn = QPushButton("Jump to Unit")
@@ -1271,7 +1197,10 @@ class StudyQueuePage(QWidget):
 
         self.queue_doc_progress = DocumentProgressBar()
         self.queue_doc_progress.page_requested.connect(self._on_queue_doc_progress_page_requested)
-        right.addWidget(self.pdf)
+        queue_pdf_row = QHBoxLayout()
+        queue_pdf_row.addWidget(self.queue_outline_tree)
+        queue_pdf_row.addWidget(self.pdf, 1)
+        right.addLayout(queue_pdf_row, 1)
         right.addWidget(self.queue_doc_progress)
 
         corner_row = QHBoxLayout()
@@ -1309,7 +1238,95 @@ class StudyQueuePage(QWidget):
             return
         self.pdf.set_page(int(page))
         self._queue_last_pdf_page = int(page)
+        self._set_active_queue_outline_by_page(int(page))
         self._refresh_queue_doc_progress(int(page))
+
+    def _on_queue_outline_click(self, item, _col) -> None:
+        page = int(item.data(0, 257) or 0)
+        if page < 1:
+            return
+        self.pdf.set_page(page)
+        self._queue_last_pdf_page = page
+        self._set_active_queue_outline_by_page(page)
+        self._refresh_queue_doc_progress(page)
+
+    def _refresh_queue_outline_tree(self, source_id: int) -> None:
+        rows = self.review_repo.db.conn.execute(
+            """SELECT id,parent_id,title,depth,order_index,start_page,end_page
+            FROM outline_nodes
+            WHERE source_id=?
+            ORDER BY order_index""",
+            (source_id,),
+        ).fetchall()
+        self.queue_outline_tree.clear()
+        self._queue_outline_items = {}
+        self._queue_outline_rows_by_id = {int(r["id"]): r for r in rows}
+        self._queue_outline_child_ids = {}
+        self._active_queue_outline_node_id = None
+        for row in rows:
+            rid = int(row["id"])
+            parent_id = int(row["parent_id"]) if row["parent_id"] is not None else None
+            if parent_id is not None:
+                self._queue_outline_child_ids.setdefault(parent_id, []).append(rid)
+
+        roots = [rid for rid, row in self._queue_outline_rows_by_id.items() if row["parent_id"] is None]
+
+        def add_node(node_id: int, parent_item: QTreeWidgetItem | None) -> None:
+            row = self._queue_outline_rows_by_id.get(node_id)
+            if not row:
+                return
+            label = str(row["title"])
+            sp = int(row["start_page"] or 0)
+            ep = int(row["end_page"] or sp)
+            if sp > 0:
+                label += f" [p{sp}-{ep}]"
+            item = QTreeWidgetItem([label])
+            item.setData(0, 256, int(row["id"]))
+            item.setData(0, 257, sp)
+            if parent_item is None:
+                self.queue_outline_tree.addTopLevelItem(item)
+            else:
+                parent_item.addChild(item)
+            self._queue_outline_items[int(row["id"])] = item
+            for child_id in self._queue_outline_child_ids.get(int(row["id"]), []):
+                add_node(child_id, item)
+
+        for root_id in roots:
+            add_node(root_id, None)
+        self.queue_outline_tree.expandToDepth(1)
+
+    def _set_active_queue_outline_by_page(self, page: int) -> None:
+        if not self._queue_outline_rows_by_id:
+            return
+        matches = []
+        for row in self._queue_outline_rows_by_id.values():
+            start_page = int(row["start_page"] or 0)
+            end_page = int(row["end_page"] or start_page)
+            if start_page < 1:
+                continue
+            if start_page <= page <= end_page:
+                matches.append(row)
+        if not matches:
+            return
+        current = max(matches, key=lambda r: int(r["depth"] or 0))
+        current_id = int(current["id"])
+
+        if self._active_queue_outline_node_id in self._queue_outline_items:
+            prev_item = self._queue_outline_items[self._active_queue_outline_node_id]
+            prev_item.setBackground(0, QBrush())
+            f = prev_item.font(0)
+            f.setBold(False)
+            prev_item.setFont(0, f)
+
+        active_item = self._queue_outline_items.get(current_id)
+        if not active_item:
+            return
+        active_item.setBackground(0, QBrush(QColor("#1a2d4a")))
+        f = active_item.font(0)
+        f.setBold(True)
+        active_item.setFont(0, f)
+        self._active_queue_outline_node_id = current_id
+        self.queue_outline_tree.setCurrentItem(active_item)
 
     def _save_current_draft(self):
         if not self.active_unit:
@@ -1644,6 +1661,11 @@ class StudyQueuePage(QWidget):
         self._save_current_draft()
         if idx < 0 or idx >= len(self.display_units):
             self.active_unit = None
+            self.queue_outline_tree.clear()
+            self._queue_outline_items = {}
+            self._queue_outline_rows_by_id = {}
+            self._queue_outline_child_ids = {}
+            self._active_queue_outline_node_id = None
             return
         self.active_unit = self.display_units[idx][0]
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
@@ -1662,7 +1684,9 @@ class StudyQueuePage(QWidget):
         except Exception:
             target_zoom = float(last_zoom)
         self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
+        self._refresh_queue_outline_tree(self.active_unit.source_id)
         self.pdf.set_page(self.active_unit.start_page)
+        self._set_active_queue_outline_by_page(int(self.active_unit.start_page))
         self._load_draft_for_active()
         self._queue_last_pdf_page = int(self.pdf.view_state().get("page", self.active_unit.start_page))
         self._refresh_queue_doc_progress(self._queue_last_pdf_page)
@@ -1679,6 +1703,7 @@ class StudyQueuePage(QWidget):
             page = int(self.pdf.view_state().get("page", self._queue_last_pdf_page or 1))
             if page != self._queue_last_pdf_page:
                 self._queue_last_pdf_page = page
+                self._set_active_queue_outline_by_page(page)
                 self._refresh_queue_doc_progress(page)
 
     def toggle_timer(self):
