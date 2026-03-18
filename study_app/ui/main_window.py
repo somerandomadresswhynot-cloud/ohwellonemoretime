@@ -195,12 +195,21 @@ class SourcesPage(QWidget):
     queue_changed = Signal()
     library_changed = Signal()
 
-    def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo, pdf_service: PdfService):
+    def __init__(
+        self,
+        source_repo: SourceRepo,
+        outline_repo: OutlineRepo,
+        review_repo: ReviewRepo,
+        highlight_repo: HighlightRepo,
+        settings_repo: SettingsRepo,
+        pdf_service: PdfService,
+    ):
         super().__init__()
         self.source_repo = source_repo
         self.outline_repo = outline_repo
         self._review_repo = review_repo
         self._highlight_repo = highlight_repo
+        self._settings_repo = settings_repo
         self.pdf_service = pdf_service
         self.current_source_id = None
 
@@ -284,7 +293,14 @@ class SourcesPage(QWidget):
 
     def show_workspace(self, source_id: int):
         if self.current_workspace is None:
-            self.current_workspace = SourceWorkspace(source_id, self.source_repo, self.outline_repo, self._review_repo, self._highlight_repo)
+            self.current_workspace = SourceWorkspace(
+                source_id,
+                self.source_repo,
+                self.outline_repo,
+                self._review_repo,
+                self._highlight_repo,
+                self._settings_repo,
+            )
             self.current_workspace.queue_changed.connect(self.queue_changed.emit)
             self.current_workspace.context_changed.connect(self.on_workspace_context_changed)
             self.workspace_host_layout.addWidget(self.current_workspace)
@@ -407,13 +423,36 @@ class SourcesPage(QWidget):
 class SourceWorkspace(QWidget):
     queue_changed = Signal()
     context_changed = Signal(str, str)
-    def __init__(self, source_id: int, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, highlight_repo: HighlightRepo):
+    def __init__(
+        self,
+        source_id: int,
+        source_repo: SourceRepo,
+        outline_repo: OutlineRepo,
+        review_repo: ReviewRepo,
+        highlight_repo: HighlightRepo,
+        settings_repo: SettingsRepo,
+    ):
         super().__init__()
         self.source_id = source_id
         self.source_repo = source_repo
         self.outline_repo = outline_repo
         self.review_repo = review_repo
         self.highlight_repo = highlight_repo
+        self.settings_repo = settings_repo
+        self._annotation_palette = [
+            ("Blue", "#2d9cdb"),
+            ("Purple", "#8b5cf6"),
+            ("Green", "#27ae60"),
+            ("Yellow", "#f1c40f"),
+            ("Red", "#e74c3c"),
+        ]
+        self._annotation_tool = self.settings_repo.get_ui_state("pdf_annotation_tool", "select_text") or "select_text"
+        self._annotation_color = self.settings_repo.get_ui_state("pdf_annotation_color", "#2d9cdb") or "#2d9cdb"
+        try:
+            self._annotation_opacity = float(self.settings_repo.get_ui_state("pdf_annotation_opacity", "0.35"))
+        except Exception:
+            self._annotation_opacity = 0.35
+        self._annotation_opacity = max(0.0, min(1.0, self._annotation_opacity))
         root = self
         split = QSplitter()
 
@@ -463,9 +502,39 @@ class SourceWorkspace(QWidget):
         self.doc_progress = DocumentProgressBar()
         self.doc_progress.page_requested.connect(self._on_doc_progress_page_requested)
 
+        self._tool_buttons: dict[str, QPushButton] = {}
+        self._tool_buttons["select_text"] = self._mk_tool_btn("Select Text", "select_text")
+        self._tool_buttons["area"] = self._mk_tool_btn("Area", "area")
+        self._tool_buttons["pan"] = self._mk_tool_btn("Pan", "pan")
+        self._tool_buttons["erase"] = self._mk_tool_btn("Erase", "erase")
+
+        color_row = QHBoxLayout()
+        color_row.addWidget(QLabel("Annotate"))
+        for btn in self._tool_buttons.values():
+            color_row.addWidget(btn)
+        color_row.addSpacing(8)
+        color_row.addWidget(QLabel("Color"))
+        self._color_buttons: dict[str, QPushButton] = {}
+        for _label, color in self._annotation_palette:
+            cbtn = QPushButton("")
+            cbtn.setCheckable(True)
+            cbtn.setFixedSize(QSize(18, 18))
+            cbtn.clicked.connect(lambda _=False, c=color: self._set_annotation_color(c))
+            self._color_buttons[color] = cbtn
+            color_row.addWidget(cbtn)
+        color_row.addSpacing(8)
+        color_row.addWidget(QLabel("Opacity"))
+        self.opacity_spin = QSpinBox()
+        self.opacity_spin.setRange(10, 100)
+        self.opacity_spin.setSuffix("%")
+        self.opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
+        self.opacity_spin.valueChanged.connect(self._on_opacity_changed)
+        color_row.addWidget(self.opacity_spin)
+        color_row.addStretch()
+
         c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
         pdf_row = QHBoxLayout(); pdf_row.addWidget(self.pdf, 1)
-        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.page_label); c_l.addLayout(pdf_row, 1); c_l.addWidget(self.doc_progress)
+        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addLayout(color_row); c_l.addWidget(self.page_label); c_l.addLayout(pdf_row, 1); c_l.addWidget(self.doc_progress)
 
         self.insights = QLabel()
         self.insights.setWordWrap(True)
@@ -505,7 +574,54 @@ class SourceWorkspace(QWidget):
         self._pdf_page_poll = QTimer(self)
         self._pdf_page_poll.timeout.connect(self._on_pdf_page_polled)
         self._pdf_page_poll.start(450)
+        self._apply_annotation_ui_state()
         self.load_source()
+
+    def _mk_tool_btn(self, label: str, key: str) -> QPushButton:
+        btn = QPushButton(label)
+        btn.setCheckable(True)
+        btn.setFixedHeight(26)
+        btn.clicked.connect(lambda _checked=False, k=key: self._set_annotation_tool(k, from_click=True))
+        return btn
+
+    def _apply_annotation_ui_state(self) -> None:
+        for key, btn in self._tool_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(key == self._annotation_tool)
+            btn.blockSignals(False)
+        for color, btn in self._color_buttons.items():
+            selected = color.lower() == self._annotation_color.lower()
+            border = "2px solid #d7e1f3" if selected else "1px solid #20304f"
+            btn.setStyleSheet(f"background:{color}; border-radius:9px; border:{border};")
+            btn.blockSignals(True)
+            btn.setChecked(selected)
+            btn.blockSignals(False)
+        self.opacity_spin.blockSignals(True)
+        self.opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
+        self.opacity_spin.blockSignals(False)
+        self.pdf.set_annotation_tool(self._annotation_tool)
+
+    def _persist_annotation_state(self) -> None:
+        self.settings_repo.set_ui_state("pdf_annotation_tool", self._annotation_tool)
+        self.settings_repo.set_ui_state("pdf_annotation_color", self._annotation_color)
+        self.settings_repo.set_ui_state("pdf_annotation_opacity", f"{self._annotation_opacity:.2f}")
+
+    def _set_annotation_tool(self, tool: str, from_click: bool = True) -> None:
+        if tool not in {"select_text", "area", "pan", "erase"}:
+            return
+        self._annotation_tool = tool
+        self._apply_annotation_ui_state()
+        if from_click:
+            self._persist_annotation_state()
+
+    def _set_annotation_color(self, color: str) -> None:
+        self._annotation_color = color
+        self._apply_annotation_ui_state()
+        self._persist_annotation_state()
+
+    def _on_opacity_changed(self, value: int) -> None:
+        self._annotation_opacity = max(0.1, min(1.0, float(value) / 100.0))
+        self._persist_annotation_state()
 
     def _on_doc_progress_page_requested(self, page: int) -> None:
         self.pdf.set_page(int(page))
@@ -979,23 +1095,26 @@ class SourceWorkspace(QWidget):
         note, ok2 = QInputDialog.getText(self, "Optional note", "Note (optional)")
         if not ok2:
             note = ""
-        self.highlight_repo.add_highlight(self.source_id, page, quote, note, "#2d9cdb")
+        self.highlight_repo.add_text_highlight(
+            self.source_id,
+            page,
+            quote,
+            note,
+            self._annotation_color,
+            opacity=self._annotation_opacity,
+        )
         self.refresh_highlights()
 
     def _color_actions(self):
-        return [
-            ("Blue", "#2d9cdb"),
-            ("Purple", "#8b5cf6"),
-            ("Green", "#27ae60"),
-            ("Yellow", "#f1c40f"),
-            ("Red", "#e74c3c"),
-        ]
+        return self._annotation_palette
 
     def open_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         quote = (selected_text or "").strip()
         if not quote:
             return
         menu = QMenu(self)
+        quick_add = menu.addAction(f"Add highlight ({self._annotation_color})")
+        quick_add.triggered.connect(lambda: self._create_highlight(page, quote, self._annotation_color))
         add_menu = menu.addMenu("Highlight selection")
         for label, color in self._color_actions():
             act = add_menu.addAction(label)
@@ -1008,7 +1127,14 @@ class SourceWorkspace(QWidget):
         menu.exec(global_pos)
 
     def _create_highlight(self, page: int, quote: str, color: str) -> None:
-        self.highlight_repo.add_highlight(self.source_id, page, quote, "", color)
+        self.highlight_repo.add_text_highlight(
+            self.source_id,
+            page,
+            quote,
+            "",
+            color,
+            opacity=self._annotation_opacity,
+        )
         self.refresh_highlights()
 
     def _remove_highlight(self, highlight_id: int) -> None:
@@ -1864,7 +1990,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         self.tabs = tabs
         self.queue = StudyQueuePage(source_repo, review_repo, settings_repo)
-        self.sources = SourcesPage(source_repo, outline_repo, review_repo, highlight_repo, pdf_service)
+        self.sources = SourcesPage(source_repo, outline_repo, review_repo, highlight_repo, settings_repo, pdf_service)
         self.settings = SettingsPage(settings_repo, review_repo)
         tabs.addTab(self.queue, "Study Queue")
         tabs.addTab(self.sources, "Sources")

@@ -48,6 +48,7 @@ class PersistentPdfViewer(QWidget):
         self._fullscreen_host = None
         self._view_original_parent = None
         self._view_original_layout = None
+        self._annotation_tool = "select_text"
 
         root = QVBoxLayout(self)
         if QPdfDocument and QPdfView:
@@ -142,6 +143,40 @@ class PersistentPdfViewer(QWidget):
                 self._view.setSelectionEnabled(True)
         except Exception:
             pass
+
+    def _disable_text_selection_mode(self) -> None:
+        if not self._view:
+            return
+        try:
+            enum_cls = getattr(QPdfView, "SelectionMode", None)
+            if enum_cls is not None:
+                for member in ("NoSelection", "None_"):
+                    if hasattr(enum_cls, member):
+                        self._view.setSelectionMode(getattr(enum_cls, member))
+                        return
+        except Exception:
+            pass
+        try:
+            if hasattr(self._view, "setSelectionEnabled"):
+                self._view.setSelectionEnabled(False)
+        except Exception:
+            pass
+
+    def set_annotation_tool(self, tool: str) -> None:
+        self._annotation_tool = tool
+        if not self._view:
+            return
+        if tool == "select_text":
+            self._enable_text_selection_mode()
+            self._view.setCursor(Qt.IBeamCursor)
+            return
+        if tool == "pan":
+            self._disable_text_selection_mode()
+            self._view.setCursor(Qt.OpenHandCursor)
+            return
+        # Area + erase modes are handled by workspace overlays; keep pointer neutral here.
+        self._disable_text_selection_mode()
+        self._view.setCursor(Qt.ArrowCursor)
 
     def _attach_page_changed(self, doc: QPdfDocument) -> None:
         nav = self._view.pageNavigator()
