@@ -19,10 +19,14 @@ class PdfViewerAnnotationSmokeTests(unittest.TestCase):
         viewer.set_area_created_handler(lambda rect, page: seen.__setitem__('area', True))
         viewer.set_highlight_hit_handler(lambda hid: seen.__setitem__('hit', True))
         viewer.set_annotation_tool('select_text')
+        diag = viewer.selection_diagnostics()
+        self.assertEqual(diag.get('interaction_mode'), 'text_select')
         overlay = getattr(viewer, '_overlay', None)
         if overlay is not None:
             self.assertTrue(bool(overlay.testAttribute(Qt.WA_TransparentForMouseEvents)))
         viewer.set_annotation_tool('area')
+        diag = viewer.selection_diagnostics()
+        self.assertEqual(diag.get('interaction_mode'), 'area_select')
         if overlay is not None:
             self.assertFalse(bool(overlay.testAttribute(Qt.WA_TransparentForMouseEvents)))
         viewer.set_annotation_tool('pan')
