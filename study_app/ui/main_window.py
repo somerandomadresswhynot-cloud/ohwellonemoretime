@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QBrush, QCursor, QPainter, QPen, QLinearGradie
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -546,11 +547,32 @@ class SourceWorkspace(QWidget):
         self.source_hl_tree = QTreeWidget(); self.source_hl_tree.setHeaderLabels(["Page", "Context", "Quote"])
         _enable_smooth_scroll(self.source_hl_tree)
         self.source_hl_tree.itemDoubleClicked.connect(self.on_source_highlight_double_clicked)
+        self.source_hl_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.source_hl_tree.customContextMenuRequested.connect(self.open_source_highlight_context_menu)
+        self.source_hl_count = QLabel("0 highlights")
+        self.source_hl_count.setStyleSheet("color:#9aa7b2;")
+        self.source_filter_type = QComboBox()
+        self.source_filter_type.addItems(["All Types", "Text", "Area"])
+        self.source_filter_type.currentIndexChanged.connect(lambda *_: self.refresh_highlights())
+        self.source_filter_color = QComboBox()
+        self.source_filter_color.addItem("All Colors", "")
+        for label, color in self._annotation_palette:
+            self.source_filter_color.addItem(label, color)
+        self.source_filter_color.currentIndexChanged.connect(lambda *_: self.refresh_highlights())
         tabs = QTabWidget()
         tab_ins = QWidget(); l1 = QVBoxLayout(tab_ins); l1.addWidget(self.insights); l1.addStretch()
         tab_unit = QWidget(); l2 = QVBoxLayout(tab_unit); l2.addWidget(self.unit_hl_list)
         self.unit_hl_list.itemDoubleClicked.connect(self.edit_unit_highlight)
-        tab_src = QWidget(); l3 = QVBoxLayout(tab_src); l3.addWidget(self.source_hl_tree)
+        tab_src = QWidget(); l3 = QVBoxLayout(tab_src)
+        source_filters = QHBoxLayout()
+        source_filters.addWidget(QLabel("Type"))
+        source_filters.addWidget(self.source_filter_type)
+        source_filters.addWidget(QLabel("Color"))
+        source_filters.addWidget(self.source_filter_color)
+        source_filters.addStretch()
+        source_filters.addWidget(self.source_hl_count)
+        l3.addLayout(source_filters)
+        l3.addWidget(self.source_hl_tree)
         tabs.addTab(tab_ins, "Insights")
         tabs.addTab(tab_unit, "Unit Highlights")
         tabs.addTab(tab_src, "Source Highlights")
@@ -1228,6 +1250,54 @@ class SourceWorkspace(QWidget):
         self.highlight_repo.delete_highlight(highlight_id)
         self.refresh_highlights()
 
+    def _selected_source_highlight_id(self) -> int | None:
+        item = self.source_hl_tree.currentItem()
+        if not item:
+            return None
+        hid = item.data(0, 258)
+        return int(hid) if hid else None
+
+    def open_source_highlight_context_menu(self, pos) -> None:
+        item = self.source_hl_tree.itemAt(pos)
+        if not item:
+            return
+        hid = item.data(0, 258)
+        if not hid:
+            return
+        menu = QMenu(self)
+        jump = menu.addAction("Jump to Highlight")
+        edit_note = menu.addAction("Edit Note")
+        recolor_menu = menu.addMenu("Recolor")
+        recolor_actions = []
+        for label, color in self._annotation_palette:
+            recolor_actions.append((recolor_menu.addAction(label), color))
+        delete = menu.addAction("Delete")
+        chosen = menu.exec(self.source_hl_tree.viewport().mapToGlobal(pos))
+        if chosen == jump:
+            self._jump_to_highlight_and_focus(int(hid))
+            return
+        if chosen == edit_note:
+            note = item.data(0, 259) or ""
+            text, ok = QInputDialog.getMultiLineText(self, "Edit highlight note", "Note", note)
+            if ok:
+                self.highlight_repo.update_highlight_note(int(hid), text)
+                self.refresh_highlights()
+            return
+        for act, color in recolor_actions:
+            if chosen == act:
+                self.highlight_repo.update_highlight_color(int(hid), color)
+                self.refresh_highlights()
+                return
+        if chosen == delete:
+            self._remove_highlight(int(hid))
+
+    def _jump_to_highlight_and_focus(self, highlight_id: int) -> None:
+        hrow = self.highlight_repo.get_highlight(int(highlight_id))
+        if not hrow:
+            return
+        page = self._reanchor_page_for_text_highlight(hrow)
+        self.pdf.set_page(int(page))
+
     def on_source_highlight_double_clicked(self, item, _col):
         hid = item.data(0, 258)
         page = item.data(0, 256)
@@ -1287,24 +1357,60 @@ class SourceWorkspace(QWidget):
                 self.unit_hl_list.addItem(item)
 
         self.source_hl_tree.clear()
-        group_nodes = {}
-        for h in self.highlight_repo.list_source_highlights(self.source_id):
+        all_rows = list(self.highlight_repo.list_source_highlights(self.source_id))
+        selected_type = self.source_filter_type.currentText()
+        selected_color = self.source_filter_color.currentData()
+
+        filtered_rows = []
+        for h in all_rows:
+            anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
+            if selected_type == "Text" and anchor_type != "text":
+                continue
+            if selected_type == "Area" and anchor_type != "rect":
+                continue
+            if selected_color and str(h["color"] or "").lower() != str(selected_color).lower():
+                continue
+            filtered_rows.append(h)
+
+        self.source_hl_count.setText(f"{len(filtered_rows)} shown / {len(all_rows)} total")
+        group_nodes: dict[str, QTreeWidgetItem] = {}
+        page_nodes: dict[tuple[str, int], QTreeWidgetItem] = {}
+        page_counts: dict[tuple[str, int], int] = {}
+
+        for h in filtered_rows:
             ctx = h["unit_title"] if h["unit_title"] else "(no unit)"
+            page = int(h["page"])
+            anchor_type = "area" if (str(h["anchor_type"]) if "anchor_type" in h.keys() else "text") == "rect" else "text"
+
             if ctx not in group_nodes:
-                parent = QTreeWidgetItem(["", ctx, ""])
-                self.source_hl_tree.addTopLevelItem(parent)
-                group_nodes[ctx] = parent
-            quote = h["quote_text"][:120]
+                group_nodes[ctx] = QTreeWidgetItem(["", f"{ctx}", ""])
+                self.source_hl_tree.addTopLevelItem(group_nodes[ctx])
+
+            key = (ctx, page)
+            if key not in page_nodes:
+                page_nodes[key] = QTreeWidgetItem([str(page), f"Page {page}", ""])
+                group_nodes[ctx].addChild(page_nodes[key])
+                page_counts[key] = 0
+
+            page_counts[key] += 1
+            quote = h["quote_text"][:120] if h["quote_text"] else "(area highlight)"
             if h["note"]:
                 quote = f"{quote}   📝 {h['note'][:70]}"
-            item = QTreeWidgetItem([str(h["page"]), ctx, quote])
+            quote = f"[{anchor_type}] {quote}"
+            item = QTreeWidgetItem([str(page), ctx, quote])
             item.setData(0, 256, h["page"])
             item.setData(0, 258, h["id"])
             item.setData(0, 259, h["note"] or "")
             color = QColor(h["color"] or "#2d9cdb")
             item.setForeground(0, QBrush(color))
             item.setForeground(2, QBrush(color))
-            group_nodes[ctx].addChild(item)
+            page_nodes[key].addChild(item)
+
+        for (ctx, page), node in page_nodes.items():
+            node.setText(1, f"Page {page} ({page_counts[(ctx, page)]})")
+        for ctx, node in group_nodes.items():
+            total = sum(page_counts[(g, p)] for (g, p) in page_counts if g == ctx)
+            node.setText(1, f"{ctx} ({total})")
         self.source_hl_tree.expandAll()
         self._sync_pdf_overlay_highlights()
 
