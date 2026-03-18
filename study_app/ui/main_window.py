@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from datetime import timedelta
 
@@ -490,6 +491,8 @@ class SourceWorkspace(QWidget):
 
         self.pdf = PersistentPdfViewer()
         self.pdf.set_selection_menu_handler(self.open_selection_menu)
+        self.pdf.set_area_created_handler(self._on_area_rect_created)
+        self.pdf.set_highlight_hit_handler(self._on_overlay_highlight_hit)
         self.zoom = QSpinBox(); self.zoom.setRange(50, 250); self.zoom.setValue(100)
         self.zoom.valueChanged.connect(lambda v: self.pdf.set_zoom(v / 100))
         btn_jump = QPushButton("Jump To Selected Unit")
@@ -623,9 +626,51 @@ class SourceWorkspace(QWidget):
         self._annotation_opacity = max(0.1, min(1.0, float(value) / 100.0))
         self._persist_annotation_state()
 
+    def _on_area_rect_created(self, norm_rect: dict, page: int) -> None:
+        if self._annotation_tool != "area":
+            return
+        self.highlight_repo.add_area_highlight(
+            source_id=self.source_id,
+            page=page,
+            rects=[norm_rect],
+            note="",
+            color=self._annotation_color,
+            opacity=self._annotation_opacity,
+        )
+        self.refresh_highlights()
+
+    def _on_overlay_highlight_hit(self, highlight_id: int) -> None:
+        if self._annotation_tool == "erase" and highlight_id:
+            self._remove_highlight(int(highlight_id))
+
+    def _sync_pdf_overlay_highlights(self) -> None:
+        page = int(self.pdf.view_state().get("page", 1))
+        overlays: list[dict] = []
+        for h in self.highlight_repo.list_source_highlights(self.source_id):
+            anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
+            if anchor_type != "rect":
+                continue
+            if int(h["page"]) != page:
+                continue
+            rects_raw = h["rects_json"] or "[]"
+            try:
+                rects = json.loads(rects_raw)
+            except Exception:
+                rects = []
+            if not isinstance(rects, list):
+                rects = []
+            overlays.append({
+                "id": int(h["id"]),
+                "color": h["color"] or "#2d9cdb",
+                "opacity": float(h["opacity"] or 0.35),
+                "rects": [r for r in rects if isinstance(r, dict)],
+            })
+        self.pdf.set_overlay_highlights(overlays)
+
     def _on_doc_progress_page_requested(self, page: int) -> None:
         self.pdf.set_page(int(page))
         self._refresh_doc_progress(int(page))
+        self._sync_pdf_overlay_highlights()
 
     def set_source(self, source_id: int) -> None:
         if int(source_id) == int(self.source_id):
@@ -645,6 +690,7 @@ class SourceWorkspace(QWidget):
         self.refresh_highlights()
         self._last_pdf_page = int(self.pdf.view_state().get("page", 1))
         self._refresh_doc_progress(self._last_pdf_page)
+        self._sync_pdf_overlay_highlights()
         if self.source:
             self.context_changed.emit(self.source.title, "")
 
@@ -873,6 +919,7 @@ class SourceWorkspace(QWidget):
         self._last_pdf_page = page
         self.page_label.setText(f"Page: {page}")
         self._refresh_doc_progress(page)
+        self._sync_pdf_overlay_highlights()
 
     def _refresh_doc_progress(self, current_page: int) -> None:
         units = self.review_repo.source_units(self.source_id)
@@ -1209,6 +1256,7 @@ class SourceWorkspace(QWidget):
             item.setForeground(2, QBrush(color))
             group_nodes[ctx].addChild(item)
         self.source_hl_tree.expandAll()
+        self._sync_pdf_overlay_highlights()
 
 
 class CornerResizeHandle(QFrame):
