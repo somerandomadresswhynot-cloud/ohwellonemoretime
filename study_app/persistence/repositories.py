@@ -314,7 +314,7 @@ class HighlightRepo:
     def __init__(self, db: Database):
         self.db = db
 
-    def add_highlight(self, source_id: int, page: int, quote_text: str, note: str = "", color: str = "#2d9cdb") -> int:
+    def _resolve_unit_id(self, source_id: int, page: int) -> int | None:
         unit_row = self.db.conn.execute(
             """SELECT u.id AS unit_id, n.depth AS depth, (u.end_page-u.start_page) AS span
             FROM units u JOIN outline_nodes n ON n.id=u.node_id
@@ -323,32 +323,158 @@ class HighlightRepo:
             LIMIT 1""",
             (source_id, page, page),
         ).fetchone()
-        unit_id = unit_row["unit_id"] if unit_row else None
+        return int(unit_row["unit_id"]) if unit_row else None
+
+    def _normalize_page(self, page: int) -> int:
+        return max(1, int(page))
+
+    def _normalize_opacity(self, opacity: float) -> float:
+        return max(0.0, min(1.0, float(opacity)))
+
+    def _normalize_text_anchor(self, value: str) -> str:
+        return " ".join((value or "").split()).strip()
+
+    def add_highlight(self, source_id: int, page: int, quote_text: str, note: str = "", color: str = "#2d9cdb") -> int:
+        return self.add_text_highlight(
+            source_id=source_id,
+            page=page,
+            quote_text=quote_text,
+            note=note,
+            color=color,
+        )
+
+    def add_text_highlight(
+        self,
+        source_id: int,
+        page: int,
+        quote_text: str,
+        note: str = "",
+        color: str = "#2d9cdb",
+        text_prefix: str = "",
+        text_exact: str = "",
+        text_suffix: str = "",
+        opacity: float = 0.35,
+        label: str = "",
+    ) -> int:
+        normalized_page = self._normalize_page(page)
+        unit_id = self._resolve_unit_id(source_id, normalized_page)
+        normalized_exact = self._normalize_text_anchor(text_exact or quote_text or "")
+        normalized_quote = self._normalize_text_anchor(quote_text or "")
+        now_iso = utcnow_iso()
         cur = self.db.conn.execute(
-            "INSERT INTO highlights(source_id,unit_id,page,quote_text,note,color,created_at) VALUES(?,?,?,?,?,?,?)",
-            (source_id, unit_id, page, quote_text, note, color, utcnow_iso()),
+            """INSERT INTO highlights(
+                source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                source_id,
+                unit_id,
+                normalized_page,
+                max(0, normalized_page - 1),
+                normalized_quote,
+                "text",
+                text_prefix,
+                normalized_exact,
+                text_suffix,
+                "[]",
+                self._normalize_opacity(opacity),
+                label,
+                note,
+                color,
+                now_iso,
+                now_iso,
+            ),
+        )
+        self.db.conn.commit()
+        return int(cur.lastrowid)
+
+    def add_area_highlight(
+        self,
+        source_id: int,
+        page: int,
+        rects: list[dict],
+        note: str = "",
+        color: str = "#2d9cdb",
+        quote_text: str = "",
+        opacity: float = 0.35,
+        label: str = "",
+    ) -> int:
+        normalized_page = self._normalize_page(page)
+        unit_id = self._resolve_unit_id(source_id, normalized_page)
+        rects_json = json.dumps(rects, separators=(",", ":"))
+        now_iso = utcnow_iso()
+        cur = self.db.conn.execute(
+            """INSERT INTO highlights(
+                source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                source_id,
+                unit_id,
+                normalized_page,
+                max(0, normalized_page - 1),
+                quote_text,
+                "rect",
+                "",
+                quote_text,
+                "",
+                rects_json,
+                self._normalize_opacity(opacity),
+                label,
+                note,
+                color,
+                now_iso,
+                now_iso,
+            ),
         )
         self.db.conn.commit()
         return int(cur.lastrowid)
 
     def find_exact(self, source_id: int, page: int, quote_text: str):
+        normalized_text = self._normalize_text_anchor(quote_text)
         return self.db.conn.execute(
             """SELECT * FROM highlights
-            WHERE source_id=? AND page=? AND quote_text=?
+            WHERE source_id=? AND page=? AND anchor_type='text' AND (text_exact=? OR quote_text=?)
             ORDER BY created_at DESC LIMIT 1""",
-            (source_id, page, quote_text),
+            (source_id, self._normalize_page(page), normalized_text, normalized_text),
         ).fetchone()
+
+    def get_highlight(self, highlight_id: int):
+        return self.db.conn.execute("SELECT * FROM highlights WHERE id=?", (highlight_id,)).fetchone()
+
+    def resolve_text_anchor_page(self, source_id: int, text_exact: str, quote_text: str = "", page_hint: int | None = None) -> int | None:
+        exact = self._normalize_text_anchor(text_exact)
+        quote = self._normalize_text_anchor(quote_text)
+        candidates = []
+        if exact:
+            candidates = self.db.conn.execute(
+                """SELECT page FROM highlights
+                WHERE source_id=? AND anchor_type='text' AND text_exact=?
+                ORDER BY updated_at DESC, created_at DESC""",
+                (source_id, exact),
+            ).fetchall()
+        if not candidates and quote:
+            candidates = self.db.conn.execute(
+                """SELECT page FROM highlights
+                WHERE source_id=? AND anchor_type='text' AND quote_text=?
+                ORDER BY updated_at DESC, created_at DESC""",
+                (source_id, quote),
+            ).fetchall()
+        if not candidates:
+            return None
+        pages = [int(r["page"]) for r in candidates]
+        if page_hint is None:
+            return pages[0]
+        return min(pages, key=lambda p: abs(int(page_hint) - p))
 
     def delete_highlight(self, highlight_id: int) -> None:
         self.db.conn.execute("DELETE FROM highlights WHERE id=?", (highlight_id,))
         self.db.conn.commit()
 
     def update_highlight_note(self, highlight_id: int, note: str) -> None:
-        self.db.conn.execute("UPDATE highlights SET note=? WHERE id=?", (note, highlight_id))
+        self.db.conn.execute("UPDATE highlights SET note=?, updated_at=? WHERE id=?", (note, utcnow_iso(), highlight_id))
         self.db.conn.commit()
 
     def update_highlight_color(self, highlight_id: int, color: str) -> None:
-        self.db.conn.execute("UPDATE highlights SET color=? WHERE id=?", (color, highlight_id))
+        self.db.conn.execute("UPDATE highlights SET color=?, updated_at=? WHERE id=?", (color, utcnow_iso(), highlight_id))
         self.db.conn.commit()
 
     def list_unit_highlights(self, unit_id: int):
