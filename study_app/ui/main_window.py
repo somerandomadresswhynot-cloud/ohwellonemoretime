@@ -1250,13 +1250,6 @@ class SourceWorkspace(QWidget):
         self.highlight_repo.delete_highlight(highlight_id)
         self.refresh_highlights()
 
-    def _selected_source_highlight_id(self) -> int | None:
-        item = self.source_hl_tree.currentItem()
-        if not item:
-            return None
-        hid = item.data(0, 258)
-        return int(hid) if hid else None
-
     def open_source_highlight_context_menu(self, pos) -> None:
         item = self.source_hl_tree.itemAt(pos)
         if not item:

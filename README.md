@@ -51,3 +51,24 @@ run_study_app.bat setup
 4. Use **Study Queue** for due-only review with timer/notes/ratings.
 5. Open review history to edit notes or delete mistaken events.
 6. Restart app; data persists in SQLite.
+
+## PDF annotation modes (workspace)
+
+Inside a source workspace, the PDF panel supports annotation tooling:
+
+- **Select Text**: select text and right-click to add/remove text highlights.
+- **Area**: drag on the page to create a rectangular area highlight.
+- **Pan**: switch cursor for navigation-focused reading.
+- **Erase**: click an existing overlay highlight to remove it.
+
+Annotation toolbar state is persisted in `ui_state`:
+
+- `pdf_annotation_tool`
+- `pdf_annotation_color`
+- `pdf_annotation_opacity`
+
+### Known limitations / fallback behavior
+
+- `QPdfView` does not reliably expose text glyph quad geometry across Qt versions, so text highlight rendering uses a **fallback cue overlay** on the current page rather than exact text-shape painting.
+- Area highlight rectangles are currently normalized to the visible viewport and intended as a foundation for richer page-geometry anchoring in future updates.
+- UI interactions (drag, erase, context menu) are interactive behaviors; automated UI smoke coverage is best-effort and skipped when GUI dependencies are unavailable.
