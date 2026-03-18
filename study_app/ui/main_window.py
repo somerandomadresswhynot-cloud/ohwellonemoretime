@@ -643,27 +643,59 @@ class SourceWorkspace(QWidget):
         if self._annotation_tool == "erase" and highlight_id:
             self._remove_highlight(int(highlight_id))
 
+    def _build_text_anchor_payload(self, raw_text: str) -> dict:
+        exact = " ".join((raw_text or "").split()).strip()
+        if not exact:
+            return {"text_exact": "", "text_prefix": "", "text_suffix": ""}
+        prefix = exact[:24]
+        suffix = exact[-24:] if len(exact) > 24 else exact
+        return {"text_exact": exact, "text_prefix": prefix, "text_suffix": suffix}
+
+    def _reanchor_page_for_text_highlight(self, hrow) -> int:
+        page = int(hrow["page"] or 1)
+        anchor_type = str(hrow["anchor_type"]) if "anchor_type" in hrow.keys() else "text"
+        if anchor_type != "text":
+            return page
+        resolved = self.highlight_repo.resolve_text_anchor_page(
+            source_id=self.source_id,
+            text_exact=hrow["text_exact"] if "text_exact" in hrow.keys() else hrow["quote_text"],
+            quote_text=hrow["quote_text"],
+            page_hint=page,
+        )
+        return int(resolved) if resolved else page
+
     def _sync_pdf_overlay_highlights(self) -> None:
         page = int(self.pdf.view_state().get("page", 1))
         overlays: list[dict] = []
+        text_marker_index = 0
         for h in self.highlight_repo.list_source_highlights(self.source_id):
             anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
-            if anchor_type != "rect":
-                continue
             if int(h["page"]) != page:
                 continue
-            rects_raw = h["rects_json"] or "[]"
-            try:
-                rects = json.loads(rects_raw)
-            except Exception:
-                rects = []
-            if not isinstance(rects, list):
-                rects = []
+            if anchor_type == "rect":
+                rects_raw = h["rects_json"] or "[]"
+                try:
+                    rects = json.loads(rects_raw)
+                except Exception:
+                    rects = []
+                if not isinstance(rects, list):
+                    rects = []
+                overlays.append({
+                    "id": int(h["id"]),
+                    "color": h["color"] or "#2d9cdb",
+                    "opacity": float(h["opacity"] or 0.35),
+                    "rects": [r for r in rects if isinstance(r, dict)],
+                })
+                continue
+
+            # Graceful fallback for text anchors when glyph-quad geometry is unavailable.
+            marker_y = 0.03 + (text_marker_index * 0.035)
+            text_marker_index += 1
             overlays.append({
                 "id": int(h["id"]),
                 "color": h["color"] or "#2d9cdb",
-                "opacity": float(h["opacity"] or 0.35),
-                "rects": [r for r in rects if isinstance(r, dict)],
+                "opacity": min(0.9, max(0.2, float(h["opacity"] or 0.35))),
+                "rects": [{"x": 0.02, "y": min(0.95, marker_y), "w": 0.22, "h": 0.02}],
             })
         self.pdf.set_overlay_highlights(overlays)
 
@@ -1142,12 +1174,16 @@ class SourceWorkspace(QWidget):
         note, ok2 = QInputDialog.getText(self, "Optional note", "Note (optional)")
         if not ok2:
             note = ""
+        anchor = self._build_text_anchor_payload(quote)
         self.highlight_repo.add_text_highlight(
             self.source_id,
             page,
             quote,
             note,
             self._annotation_color,
+            text_prefix=anchor["text_prefix"],
+            text_exact=anchor["text_exact"],
+            text_suffix=anchor["text_suffix"],
             opacity=self._annotation_opacity,
         )
         self.refresh_highlights()
@@ -1174,12 +1210,16 @@ class SourceWorkspace(QWidget):
         menu.exec(global_pos)
 
     def _create_highlight(self, page: int, quote: str, color: str) -> None:
+        anchor = self._build_text_anchor_payload(quote)
         self.highlight_repo.add_text_highlight(
             self.source_id,
             page,
             quote,
             "",
             color,
+            text_prefix=anchor["text_prefix"],
+            text_exact=anchor["text_exact"],
+            text_suffix=anchor["text_suffix"],
             opacity=self._annotation_opacity,
         )
         self.refresh_highlights()
@@ -1192,7 +1232,12 @@ class SourceWorkspace(QWidget):
         hid = item.data(0, 258)
         page = item.data(0, 256)
         if page:
-            self.pdf.set_page(int(page))
+            jump_page = int(page)
+            if hid:
+                hrow = self.highlight_repo.get_highlight(int(hid))
+                if hrow:
+                    jump_page = self._reanchor_page_for_text_highlight(hrow)
+            self.pdf.set_page(jump_page)
         if hid:
             note = item.data(0, 259) or ""
             text, ok = QInputDialog.getMultiLineText(self, "Edit highlight note", "Note", note)
@@ -1204,7 +1249,12 @@ class SourceWorkspace(QWidget):
         hid = item.data(256)
         page = item.data(257)
         if page:
-            self.pdf.set_page(int(page))
+            jump_page = int(page)
+            if hid:
+                hrow = self.highlight_repo.get_highlight(int(hid))
+                if hrow:
+                    jump_page = self._reanchor_page_for_text_highlight(hrow)
+            self.pdf.set_page(jump_page)
         if not hid:
             return
         note = item.data(258) or ""

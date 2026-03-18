@@ -112,6 +112,24 @@ class HighlightAnnotationsTests(unittest.TestCase):
             self.assertIsNotNone(found)
             self.assertEqual(int(found['id']), hid)
 
+    def test_repo_resolve_text_anchor_page_prefers_exact_then_fallback(self):
+        with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
+            db = Database(tmp.name)
+            self.addCleanup(db.close)
+            source_repo = SourceRepo(db)
+            source_id = source_repo.create('Book', '/tmp/book.pdf', 10, 100)
+            repo = HighlightRepo(db)
+
+            repo.add_text_highlight(source_id=source_id, page=5, quote_text='quote one', text_exact='Exact Alpha')
+            repo.add_text_highlight(source_id=source_id, page=20, quote_text='quote two', text_exact='Exact Alpha')
+            repo.add_text_highlight(source_id=source_id, page=33, quote_text='Fallback Quote', text_exact='Something Else')
+
+            resolved = repo.resolve_text_anchor_page(source_id=source_id, text_exact='Exact Alpha', page_hint=18)
+            self.assertEqual(resolved, 20)
+
+            resolved_fallback = repo.resolve_text_anchor_page(source_id=source_id, text_exact='No Match', quote_text='Fallback Quote')
+            self.assertEqual(resolved_fallback, 33)
+
 
 if __name__ == '__main__':
     unittest.main()
