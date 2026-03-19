@@ -29,12 +29,10 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTabWidget,
     QTextEdit,
-    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
-    QWidgetAction,
     QStyle,
 )
 
@@ -1285,13 +1283,9 @@ class SourceWorkspace(QWidget):
         if not row:
             return
         menu = QMenu(self)
-        delete_btn = QToolButton()
-        delete_btn.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
-        delete_btn.setToolTip("Delete highlight")
-        delete_btn.clicked.connect(lambda: self._remove_highlight(int(highlight_id)))
-        wa = QWidgetAction(menu)
-        wa.setDefaultWidget(delete_btn)
-        menu.addAction(wa)
+        delete_act = menu.addAction(self.style().standardIcon(QStyle.SP_TrashIcon), "")
+        delete_act.setToolTip("Delete highlight")
+        delete_act.triggered.connect(lambda: self._remove_highlight(int(highlight_id)))
         menu.addSeparator()
         color_menu = menu.addMenu("Color")
         for label, color in self._annotation_palette:
@@ -1846,13 +1840,9 @@ class StudyQueuePage(QWidget):
         if not row:
             return
         menu = QMenu(self)
-        delete_btn = QToolButton()
-        delete_btn.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
-        delete_btn.setToolTip("Delete highlight")
-        delete_btn.clicked.connect(lambda: self._delete_queue_highlight(int(highlight_id)))
-        wa = QWidgetAction(menu)
-        wa.setDefaultWidget(delete_btn)
-        menu.addAction(wa)
+        delete_act = menu.addAction(self.style().standardIcon(QStyle.SP_TrashIcon), "")
+        delete_act.setToolTip("Delete highlight")
+        delete_act.triggered.connect(lambda: self._delete_queue_highlight(int(highlight_id)))
         menu.addSeparator()
         color_menu = menu.addMenu("Color")
         for label, color in self._annotation_palette:

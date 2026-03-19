@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRectF, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPen, QShortcut, QWheelEvent
 from PySide6.QtQml import QQmlProperty
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
@@ -149,6 +149,11 @@ class _AnnotationOverlay(QWidget):
                 )
                 event.accept()
                 return
+        if event.button() == Qt.LeftButton and mode == "pan":
+            self._edit_mode = "pan_drag"
+            self._last_pos = event.position()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and mode == "area_select":
             entry, hit_rect = self._hit_highlight(event.position())
             if entry is not None and hit_rect is not None:
@@ -182,6 +187,13 @@ class _AnnotationOverlay(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._edit_mode == "pan_drag" and self._last_pos is not None:
+            delta = event.position() - self._last_pos
+            self._last_pos = event.position()
+            if self._owner._pan_delta_handler:
+                self._owner._pan_delta_handler(float(delta.x()), float(delta.y()), self.mapToGlobal(event.position().toPoint()))
+            event.accept()
+            return
         if self._edit_mode and self._active_highlight_id:
             _entry, rect = self._active_rect()
             if rect is None or self._last_pos is None:
@@ -215,6 +227,11 @@ class _AnnotationOverlay(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._edit_mode == "pan_drag":
+            self._edit_mode = ""
+            self._last_pos = None
+            event.accept()
+            return
         if self._edit_mode:
             self._edit_mode = ""
             self._last_pos = None
@@ -257,6 +274,7 @@ class PersistentPdfViewer(QWidget):
         self._overlay = None
         self._highlight_context_menu_handler = None
         self._highlight_rect_changed_handler = None
+        self._pan_delta_handler = self._pan_by_delta
 
         root = QVBoxLayout(self)
 
@@ -418,7 +436,9 @@ class PersistentPdfViewer(QWidget):
         elif self._interaction_mode == "pan":
             self._quick.setCursor(Qt.OpenHandCursor)
             if self._overlay:
-                self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                self._overlay.raise_()
+                self._overlay.update()
         else:
             self._quick.setCursor(Qt.ArrowCursor)
             if self._overlay:
@@ -572,3 +592,21 @@ class PersistentPdfViewer(QWidget):
                 if QRectF(x, y, w, h).contains(local):
                     return int(entry.get("id", 0))
         return 0
+
+    def _pan_by_delta(self, _dx: float, dy: float, global_pos: QPoint) -> None:
+        if self._quick is None:
+            return
+        local = self._quick.mapFromGlobal(global_pos)
+        pixel_delta = QPoint(0, int(-dy))
+        angle_delta = QPoint(0, int(-dy * 8.0))
+        ev = QWheelEvent(
+            local,
+            global_pos,
+            pixel_delta,
+            angle_delta,
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QCoreApplication.sendEvent(self._quick, ev)
