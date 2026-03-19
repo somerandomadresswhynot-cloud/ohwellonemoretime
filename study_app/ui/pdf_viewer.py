@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QUrl
-from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtQml import QQmlProperty
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
@@ -29,6 +29,103 @@ class _ViewerFullscreenHost(QWidget):
         super().keyPressEvent(event)
 
 
+class _PdfQuickWidget(QQuickWidget):
+    """Quick widget that keeps wheel scrolling local to the PDF surface."""
+
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
+        event.accept()
+
+
+class _AnnotationOverlay(QWidget):
+    def __init__(self, owner: "PersistentPdfViewer", parent: QWidget):
+        super().__init__(parent)
+        self._owner = owner
+        self._drag_start = None
+        self._drag_end = None
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setMouseTracking(True)
+
+    def _norm_to_px_rect(self, norm_rect: dict) -> QRectF:
+        x = float(norm_rect.get("x", 0.0))
+        y = float(norm_rect.get("y", 0.0))
+        w = float(norm_rect.get("w", 0.0))
+        h = float(norm_rect.get("h", 0.0))
+        return QRectF(x * self.width(), y * self.height(), w * self.width(), h * self.height())
+
+    def _px_to_norm_rect(self, rect: QRectF) -> dict:
+        if self.width() <= 0 or self.height() <= 0:
+            return {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        x = max(0.0, min(1.0, rect.left() / self.width()))
+        y = max(0.0, min(1.0, rect.top() / self.height()))
+        w = max(0.0, min(1.0 - x, rect.width() / self.width()))
+        h = max(0.0, min(1.0 - y, rect.height() / self.height()))
+        return {"x": round(x, 6), "y": round(y, 6), "w": round(w, 6), "h": round(h, 6)}
+
+    def _draft_rect(self) -> QRectF | None:
+        if self._drag_start is None or self._drag_end is None:
+            return None
+        return QRectF(self._drag_start, self._drag_end).normalized()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        for entry in self._owner._overlay_highlights:
+            color = QColor(entry.get("color", "#2d9cdb"))
+            color.setAlpha(max(25, min(220, int(255 * float(entry.get("opacity", 0.35))))))
+            p.setBrush(color)
+            pen = QPen(QColor(entry.get("color", "#2d9cdb")))
+            pen.setWidth(2)
+            p.setPen(pen)
+            for norm_rect in entry.get("rects", []):
+                p.drawRoundedRect(self._norm_to_px_rect(norm_rect), 3, 3)
+
+        draft = self._draft_rect()
+        if draft and self._owner._interaction_mode == "area_select":
+            p.setBrush(QColor(45, 156, 219, 65))
+            p.setPen(QPen(QColor("#7ecbff"), 2, Qt.DashLine))
+            p.drawRoundedRect(draft, 2, 2)
+
+    def mousePressEvent(self, event):
+        mode = self._owner._interaction_mode
+        if event.button() == Qt.LeftButton and mode == "area_select":
+            self._drag_start = event.position()
+            self._drag_end = event.position()
+            self.update()
+            return
+        if event.button() == Qt.LeftButton and mode == "erase":
+            clicked = event.position()
+            for entry in reversed(self._owner._overlay_highlights):
+                for norm_rect in entry.get("rects", []):
+                    if self._norm_to_px_rect(norm_rect).contains(clicked):
+                        if self._owner._highlight_hit_handler:
+                            self._owner._highlight_hit_handler(int(entry.get("id", 0)))
+                        event.accept()
+                        return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._owner._interaction_mode == "area_select" and self._drag_start is not None:
+            self._drag_end = event.position()
+            self.update()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._owner._interaction_mode == "area_select" and event.button() == Qt.LeftButton and self._drag_start is not None:
+            self._drag_end = event.position()
+            rect = self._draft_rect()
+            self._drag_start = None
+            self._drag_end = None
+            self.update()
+            if rect is None or rect.width() < 6 or rect.height() < 6:
+                return
+            if self._owner._area_created_handler:
+                self._owner._area_created_handler(self._px_to_norm_rect(rect), int(self._owner.view_state().get("page", 1)))
+            return
+        super().mouseReleaseEvent(event)
+
+
 class PersistentPdfViewer(QWidget):
     """Shared Qt Quick PDF viewer host used by Sources and Study Queue pages."""
 
@@ -49,12 +146,14 @@ class PersistentPdfViewer(QWidget):
         self._cached_paths: list[str] = []
         self._overlay_highlights: list[dict] = []
         self._context_menu_connected = False
+        self._overlay = None
 
         root = QVBoxLayout(self)
 
-        self._quick = QQuickWidget(self)
+        self._quick = _PdfQuickWidget(self)
         self._quick.setResizeMode(QQuickWidget.SizeRootObjectToView)
         self._quick.setFocusPolicy(Qt.StrongFocus)
+        self._quick.installEventFilter(self)
 
         qml_path = Path(__file__).with_name("qml").joinpath("PdfViewer.qml")
         if not qml_path.exists():
@@ -74,6 +173,9 @@ class PersistentPdfViewer(QWidget):
             return
 
         root.addWidget(self._quick)
+        self._overlay = _AnnotationOverlay(self, self._quick)
+        self._overlay.raise_()
+        self._overlay.resize(self._quick.size())
 
         controls = QHBoxLayout()
         self.zoom_out_btn = QPushButton("-")
@@ -103,6 +205,8 @@ class PersistentPdfViewer(QWidget):
         self._copy_shortcut = QShortcut(QKeySequence.Copy, self)
         self._copy_shortcut.activated.connect(self.copy_selected_text)
         self._apply_interaction_mode()
+        QTimer.singleShot(0, self._deferred_initial_fit)
+        QTimer.singleShot(75, self._deferred_initial_fit)
 
     def _root_object(self):
         return self._quick.rootObject() if self._quick is not None else None
@@ -150,6 +254,15 @@ class PersistentPdfViewer(QWidget):
         except Exception:
             return False
 
+    def eventFilter(self, watched, event):
+        if watched is self._quick and self._overlay is not None and event.type() in (QEvent.Resize, QEvent.Show):
+            self._overlay.resize(self._quick.size())
+            self._overlay.raise_()
+        if watched is self._quick and event.type() == QEvent.Wheel:
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
     def _get_root_prop(self, name: str, fallback=None):
         root = self._root_object()
         if root is None:
@@ -183,13 +296,23 @@ class PersistentPdfViewer(QWidget):
             return
         if self._interaction_mode == "text_select":
             self._quick.setCursor(Qt.IBeamCursor)
+            if self._overlay:
+                self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         elif self._interaction_mode == "pan":
             self._quick.setCursor(Qt.OpenHandCursor)
+            if self._overlay:
+                self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         else:
             self._quick.setCursor(Qt.ArrowCursor)
+            if self._overlay:
+                self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                self._overlay.raise_()
+                self._overlay.update()
 
     def set_overlay_highlights(self, highlights: list[dict]) -> None:
         self._overlay_highlights = highlights or []
+        if self._overlay:
+            self._overlay.update()
 
     def prime_path(self, path: str) -> None:
         if not path or not Path(path).exists():
@@ -221,12 +344,14 @@ class PersistentPdfViewer(QWidget):
 
     def set_fit_mode(self) -> None:
         self._fit_mode = "fit_width"
-        self._call_root("fitToWidth")
+        if self.width() > 40 and self.height() > 40:
+            self._call_root("fitToWidth")
         self._sync_zoom_spin()
 
     def set_fit_page_mode(self) -> None:
         self._fit_mode = "fit_page"
-        self._call_root("fitToPage")
+        if self.width() > 40 and self.height() > 40:
+            self._call_root("fitToPage")
         self._sync_zoom_spin()
 
     def set_zoom(self, factor: float) -> None:
@@ -276,6 +401,7 @@ class PersistentPdfViewer(QWidget):
             self._fullscreen_host.showFullScreen()
             if hasattr(self, "fullscreen_btn"):
                 self.fullscreen_btn.setText("Exit Viewer Full Screen")
+            QTimer.singleShot(0, self._deferred_initial_fit)
         else:
             host = self._fullscreen_host
             host.layout().removeWidget(self._quick)
@@ -287,3 +413,24 @@ class PersistentPdfViewer(QWidget):
             self._fullscreen_host = None
             if hasattr(self, "fullscreen_btn"):
                 self.fullscreen_btn.setText("Viewer Full Screen")
+            QTimer.singleShot(0, self._deferred_initial_fit)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._deferred_initial_fit)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._deferred_initial_fit)
+
+    def _deferred_initial_fit(self) -> None:
+        if self._quick is None or not self.isVisible():
+            return
+        if self._quick.width() < 40 or self._quick.height() < 40:
+            return
+        if self._fit_mode == "fit_page":
+            self._call_root("fitToPage")
+        elif self._fit_mode == "custom":
+            self._call_root("setRenderScale", self.zoom_factor())
+        else:
+            self._call_root("fitToWidth")

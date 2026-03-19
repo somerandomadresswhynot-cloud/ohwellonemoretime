@@ -14,9 +14,24 @@ Item {
         source: root.documentSource
     }
 
+    Rectangle {
+        anchors.fill: parent
+        color: "#1b2431"
+    }
+
+    Rectangle {
+        anchors.fill: parent
+        anchors.margins: 10
+        color: "#202b3a"
+        border.color: "#2a374a"
+        border.width: 1
+        radius: 4
+    }
+
     PdfMultiPageView {
         id: pdfView
         anchors.fill: parent
+        anchors.margins: 14
         document: pdfDoc
     }
 
