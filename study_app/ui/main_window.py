@@ -703,14 +703,14 @@ class SourceWorkspace(QWidget):
             anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
             if int(h["page"]) != page:
                 continue
-            if anchor_type == "rect":
-                rects_raw = h["rects_json"] or "[]"
-                try:
-                    rects = json.loads(rects_raw)
-                except Exception:
-                    rects = []
-                if not isinstance(rects, list):
-                    rects = []
+            rects_raw = h["rects_json"] or "[]"
+            try:
+                rects = json.loads(rects_raw)
+            except Exception:
+                rects = []
+            if not isinstance(rects, list):
+                rects = []
+            if rects:
                 overlays.append({
                     "id": int(h["id"]),
                     "color": h["color"] or "#2d9cdb",
@@ -1257,7 +1257,7 @@ class SourceWorkspace(QWidget):
 
     def _create_highlight(self, page: int, quote: str, color: str, opacity: float) -> None:
         anchor = self._build_text_anchor_payload(quote)
-        self.highlight_repo.add_text_highlight(
+        hid = self.highlight_repo.add_text_highlight(
             self.source_id,
             page,
             quote,
@@ -1268,6 +1268,9 @@ class SourceWorkspace(QWidget):
             text_suffix=anchor["text_suffix"],
             opacity=opacity,
         )
+        selection_rect = self.pdf.selection_anchor_rect(quote)
+        if selection_rect:
+            self.highlight_repo.update_highlight_rects(int(hid), [selection_rect])
         self.refresh_highlights()
 
     def _remove_highlight(self, highlight_id: int) -> None:
@@ -1765,52 +1768,38 @@ class StudyQueuePage(QWidget):
         menu = QMenu(self)
         quick = menu.addAction("Create highlight")
         quick.triggered.connect(
-            lambda: self.highlight_repo.add_text_highlight(
-                source_id,
-                page,
-                quote,
-                "",
-                self._annotation_color,
-                text_prefix=anchor["text_prefix"],
-                text_exact=anchor["text_exact"],
-                text_suffix=anchor["text_suffix"],
-                opacity=self._annotation_opacity,
-            )
+            lambda: self._create_queue_text_highlight(source_id, page, quote, anchor, self._annotation_color, self._annotation_opacity)
         )
         color_menu = menu.addMenu("Color")
         for _label, color in self._annotation_palette:
             act = color_menu.addAction(_label)
             act.triggered.connect(
-                lambda _=False, c=color: self.highlight_repo.add_text_highlight(
-                    source_id,
-                    page,
-                    quote,
-                    "",
-                    c,
-                    text_prefix=anchor["text_prefix"],
-                    text_exact=anchor["text_exact"],
-                    text_suffix=anchor["text_suffix"],
-                    opacity=self._annotation_opacity,
-                )
+                lambda _=False, c=color: self._create_queue_text_highlight(source_id, page, quote, anchor, c, self._annotation_opacity)
             )
         op_menu = menu.addMenu("Opacity")
         for pct in (20, 35, 50, 65, 80):
             act = op_menu.addAction(f"{pct}%")
             act.triggered.connect(
-                lambda _=False, p=pct: self.highlight_repo.add_text_highlight(
-                    source_id,
-                    page,
-                    quote,
-                    "",
-                    self._annotation_color,
-                    text_prefix=anchor["text_prefix"],
-                    text_exact=anchor["text_exact"],
-                    text_suffix=anchor["text_suffix"],
-                    opacity=p / 100.0,
-                )
+                lambda _=False, p=pct: self._create_queue_text_highlight(source_id, page, quote, anchor, self._annotation_color, p / 100.0)
             )
         menu.exec(global_pos)
         self._sync_queue_pdf_overlays()
+
+    def _create_queue_text_highlight(self, source_id: int, page: int, quote: str, anchor: dict, color: str, opacity: float) -> None:
+        hid = self.highlight_repo.add_text_highlight(
+            source_id,
+            page,
+            quote,
+            "",
+            color,
+            text_prefix=anchor["text_prefix"],
+            text_exact=anchor["text_exact"],
+            text_suffix=anchor["text_suffix"],
+            opacity=opacity,
+        )
+        selection_rect = self.pdf.selection_anchor_rect(quote)
+        if selection_rect:
+            self.highlight_repo.update_highlight_rects(int(hid), [selection_rect])
 
     def _on_queue_area_rect_created(self, norm_rect: dict, page: int) -> None:
         source_id = self._active_source_id()
@@ -1877,11 +1866,11 @@ class StudyQueuePage(QWidget):
             if int(h["page"]) != page:
                 continue
             anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
-            if anchor_type == "rect":
-                try:
-                    rects = json.loads(h["rects_json"] or "[]")
-                except Exception:
-                    rects = []
+            try:
+                rects = json.loads(h["rects_json"] or "[]")
+            except Exception:
+                rects = []
+            if rects:
                 overlays.append({
                     "id": int(h["id"]),
                     "color": h["color"] or "#2d9cdb",

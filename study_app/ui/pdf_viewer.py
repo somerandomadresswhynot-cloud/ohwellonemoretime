@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSpinBox,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -275,12 +276,15 @@ class PersistentPdfViewer(QWidget):
         self._highlight_context_menu_handler = None
         self._highlight_rect_changed_handler = None
         self._pan_delta_handler = self._pan_by_delta
+        self._last_context_point = QPoint(0, 0)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
 
         self._quick = _PdfQuickWidget(self)
         self._quick.setResizeMode(QQuickWidget.SizeRootObjectToView)
         self._quick.setFocusPolicy(Qt.StrongFocus)
+        self._quick.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._quick.installEventFilter(self)
 
         qml_path = Path(__file__).with_name("qml").joinpath("PdfViewer.qml")
@@ -353,6 +357,7 @@ class PersistentPdfViewer(QWidget):
         self._context_menu_connected = True
 
     def _on_context_menu(self, pos: QPoint) -> None:
+        self._last_context_point = QPoint(pos)
         hit_id = self._overlay_hit_id_at_global(self._quick.mapToGlobal(pos))
         if hit_id and self._highlight_context_menu_handler:
             self._highlight_context_menu_handler(self._quick.mapToGlobal(pos), int(hit_id), int(self.view_state().get("page", 1)))
@@ -564,7 +569,10 @@ class PersistentPdfViewer(QWidget):
     def _deferred_initial_fit(self) -> None:
         if self._quick is None or not self.isVisible():
             return
+        if self.layout() is not None:
+            self.layout().activate()
         if self._quick.width() < 40 or self._quick.height() < 40:
+            QTimer.singleShot(80, self._deferred_initial_fit)
             return
         if self._fit_mode == "fit_page":
             self._call_root("fitToPage")
@@ -573,6 +581,19 @@ class PersistentPdfViewer(QWidget):
         else:
             self._call_root("fitToWidth")
         self._sync_overlay_geometry()
+
+    def selection_anchor_rect(self, text: str = "") -> dict | None:
+        if self._overlay is None or self._overlay.width() < 10 or self._overlay.height() < 10:
+            return None
+        local = self._overlay.mapFromGlobal(self._quick.mapToGlobal(self._last_context_point))
+        nx = max(0.02, min(0.98, float(local.x()) / float(self._overlay.width())))
+        ny = max(0.02, min(0.98, float(local.y()) / float(self._overlay.height())))
+        text_len = max(6, min(80, len((text or "").strip())))
+        w = max(0.08, min(0.6, text_len * 0.006))
+        h = 0.024
+        x = max(0.0, min(1.0 - w, nx - (w * 0.45)))
+        y = max(0.0, min(1.0 - h, ny - (h * 0.55)))
+        return {"x": round(x, 6), "y": round(y, 6), "w": round(w, 6), "h": round(h, 6)}
 
     def _sync_overlay_geometry(self) -> None:
         if self._overlay is None or self._quick is None:
