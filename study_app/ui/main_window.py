@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from datetime import timedelta
 
@@ -44,6 +45,8 @@ from study_app.services.scheduler import allocate_new_units, compute_next, recom
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
+
+log = logging.getLogger(__name__)
 
 
 def _enable_smooth_scroll(view: QAbstractItemView) -> None:
@@ -698,7 +701,6 @@ class SourceWorkspace(QWidget):
     def _sync_pdf_overlay_highlights(self) -> None:
         page = int(self.pdf.view_state().get("page", 1))
         overlays: list[dict] = []
-        text_marker_index = 0
         for h in self.highlight_repo.list_source_highlights(self.source_id):
             anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
             if int(h["page"]) != page:
@@ -728,6 +730,7 @@ class SourceWorkspace(QWidget):
                     h["text_suffix"] if "text_suffix" in h.keys() else "",
                 )
                 if resolved_rects:
+                    log.debug("text highlight render resolve source=%s hid=%s page=%s spans=%s", self.source_id, int(h["id"]), page, len(resolved_rects))
                     overlays.append({
                         "id": int(h["id"]),
                         "kind": "text",
@@ -736,17 +739,7 @@ class SourceWorkspace(QWidget):
                         "rects": resolved_rects,
                     })
                     continue
-
-            # Graceful fallback for text anchors when glyph-quad geometry is unavailable.
-            marker_y = 0.03 + (text_marker_index * 0.035)
-            text_marker_index += 1
-            overlays.append({
-                "id": int(h["id"]),
-                "kind": "text",
-                "color": h["color"] or "#2d9cdb",
-                "opacity": min(0.9, max(0.2, float(h["opacity"] or 0.35))),
-                "rects": [{"x": 0.02, "y": min(0.95, marker_y), "w": 0.22, "h": 0.02}],
-            })
+                log.warning("text highlight render resolve miss source=%s hid=%s page=%s", self.source_id, int(h["id"]), page)
         self.pdf.set_overlay_highlights(overlays)
 
     def _on_doc_progress_page_requested(self, page: int) -> None:
@@ -1276,7 +1269,7 @@ class SourceWorkspace(QWidget):
 
     def _create_highlight(self, page: int, quote: str, color: str, opacity: float) -> None:
         anchor = self._build_text_anchor_payload(quote)
-        self.highlight_repo.add_text_highlight(
+        hid = self.highlight_repo.add_text_highlight(
             self.source_id,
             page,
             quote,
@@ -1287,6 +1280,19 @@ class SourceWorkspace(QWidget):
             text_suffix=anchor["text_suffix"],
             opacity=opacity,
         )
+        if getattr(self, "source", None) and self.source and self.source.file_path:
+            resolved_rects = self.pdf_service.resolve_text_anchor_rects(
+                self.source.file_path,
+                int(page),
+                anchor["text_exact"],
+                anchor["text_prefix"],
+                anchor["text_suffix"],
+            )
+            log.debug("text highlight create resolve source=%s hid=%s page=%s spans=%s", self.source_id, hid, page, len(resolved_rects))
+            if resolved_rects:
+                self.highlight_repo.update_highlight_rects(int(hid), resolved_rects)
+            else:
+                log.warning("text highlight create resolve failed source=%s hid=%s page=%s", self.source_id, hid, page)
         self.refresh_highlights()
 
     def _remove_highlight(self, highlight_id: int) -> None:
@@ -1802,7 +1808,7 @@ class StudyQueuePage(QWidget):
         self._sync_queue_pdf_overlays()
 
     def _create_queue_text_highlight(self, source_id: int, page: int, quote: str, anchor: dict, color: str, opacity: float) -> None:
-        self.highlight_repo.add_text_highlight(
+        hid = self.highlight_repo.add_text_highlight(
             source_id,
             page,
             quote,
@@ -1813,6 +1819,20 @@ class StudyQueuePage(QWidget):
             text_suffix=anchor["text_suffix"],
             opacity=opacity,
         )
+        source_path = self.source_path_cache.get(source_id, "")
+        if source_path:
+            resolved_rects = self.pdf_service.resolve_text_anchor_rects(
+                source_path,
+                int(page),
+                anchor["text_exact"],
+                anchor["text_prefix"],
+                anchor["text_suffix"],
+            )
+            log.debug("queue text highlight create resolve source=%s hid=%s page=%s spans=%s", source_id, hid, page, len(resolved_rects))
+            if resolved_rects:
+                self.highlight_repo.update_highlight_rects(int(hid), resolved_rects)
+            else:
+                log.warning("queue text highlight create resolve failed source=%s hid=%s page=%s", source_id, hid, page)
 
     def _on_queue_area_rect_created(self, norm_rect: dict, page: int) -> None:
         source_id = self._active_source_id()
@@ -1874,7 +1894,6 @@ class StudyQueuePage(QWidget):
             return
         page = int(self.pdf.view_state().get("page", 1))
         overlays: list[dict] = []
-        text_marker_index = 0
         for h in self.highlight_repo.list_source_highlights(source_id):
             if int(h["page"]) != page:
                 continue
@@ -1903,6 +1922,7 @@ class StudyQueuePage(QWidget):
                         h["text_suffix"] if "text_suffix" in h.keys() else "",
                     )
                     if resolved_rects:
+                        log.debug("queue text highlight render resolve source=%s hid=%s page=%s spans=%s", source_id, int(h["id"]), page, len(resolved_rects))
                         overlays.append({
                             "id": int(h["id"]),
                             "kind": "text",
@@ -1911,15 +1931,7 @@ class StudyQueuePage(QWidget):
                             "rects": resolved_rects,
                         })
                         continue
-            marker_y = 0.03 + (text_marker_index * 0.035)
-            text_marker_index += 1
-            overlays.append({
-                "id": int(h["id"]),
-                "kind": "text",
-                "color": h["color"] or "#2d9cdb",
-                "opacity": min(0.9, max(0.2, float(h["opacity"] or 0.35))),
-                "rects": [{"x": 0.02, "y": min(0.95, marker_y), "w": 0.22, "h": 0.02}],
-            })
+                    log.warning("queue text highlight render resolve miss source=%s hid=%s page=%s", source_id, int(h["id"]), page)
         self.pdf.set_overlay_highlights(overlays)
 
     def _refresh_queue_outline_tree(self, source_id: int) -> None:
