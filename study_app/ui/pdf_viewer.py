@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QPoint, Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtQml import QQmlProperty
 from PySide6.QtQuickWidgets import QQuickWidget
@@ -29,29 +29,6 @@ class _ViewerFullscreenHost(QWidget):
         super().keyPressEvent(event)
 
 
-class _QuickViewerBridge(QObject):
-    selectionMenuRequested = Signal(float, float, str, int)
-    areaRectCreated = Signal("QVariantMap", int)
-    highlightHit = Signal(int)
-    pageChanged = Signal(int, float, float)
-
-    @Slot(float, float, str, int)
-    def emitSelectionMenuRequested(self, x: float, y: float, selected_text: str, page: int) -> None:
-        self.selectionMenuRequested.emit(float(x), float(y), str(selected_text or ""), int(page))
-
-    @Slot("QVariantMap", int)
-    def emitAreaRectCreated(self, rect: dict, page: int) -> None:
-        self.areaRectCreated.emit(rect or {}, int(page))
-
-    @Slot(int)
-    def emitHighlightHit(self, highlight_id: int) -> None:
-        self.highlightHit.emit(int(highlight_id))
-
-    @Slot(int, float, float)
-    def emitPageChanged(self, page: int, x: float, y: float) -> None:
-        self.pageChanged.emit(int(page), float(x), float(y))
-
-
 class PersistentPdfViewer(QWidget):
     """Shared Qt Quick PDF viewer host used by Sources and Study Queue pages."""
 
@@ -70,19 +47,14 @@ class PersistentPdfViewer(QWidget):
         self._interaction_mode = "text_select"
         self._fit_mode = "fit_width"
         self._cached_paths: list[str] = []
+        self._overlay_highlights: list[dict] = []
+        self._context_menu_connected = False
 
         root = QVBoxLayout(self)
-
-        self._bridge = _QuickViewerBridge()
-        self._bridge.selectionMenuRequested.connect(self._on_selection_menu_request)
-        self._bridge.areaRectCreated.connect(self._on_area_rect_created)
-        self._bridge.highlightHit.connect(self._on_highlight_hit)
-        self._bridge.pageChanged.connect(self._on_page_changed)
 
         self._quick = QQuickWidget(self)
         self._quick.setResizeMode(QQuickWidget.SizeRootObjectToView)
         self._quick.setFocusPolicy(Qt.StrongFocus)
-        self._quick.rootContext().setContextProperty("viewerBridge", self._bridge)
 
         qml_path = Path(__file__).with_name("qml").joinpath("PdfViewer.qml")
         if not qml_path.exists():
@@ -137,35 +109,46 @@ class PersistentPdfViewer(QWidget):
 
     def set_selection_menu_handler(self, handler) -> None:
         self._selection_menu_handler = handler
+        if self._quick is None:
+            return
+        self._quick.setContextMenuPolicy(Qt.CustomContextMenu)
+        if self._context_menu_connected:
+            try:
+                self._quick.customContextMenuRequested.disconnect(self._on_context_menu)
+            except Exception:
+                pass
+        self._quick.customContextMenuRequested.connect(self._on_context_menu)
+        self._context_menu_connected = True
 
-    def _on_selection_menu_request(self, x: float, y: float, text: str, page: int) -> None:
+    def _on_context_menu(self, pos: QPoint) -> None:
         if not self._selection_menu_handler:
             return
-        global_pos = self.mapToGlobal(QPoint(int(round(x)), int(round(y))))
-        self._selection_menu_handler(global_pos, text, int(page))
+        global_pos = self._quick.mapToGlobal(pos)
+        self._selection_menu_handler(global_pos, self.selected_text(), int(self.view_state().get("page", 1)))
 
     def set_area_created_handler(self, handler) -> None:
         self._area_created_handler = handler
 
-    def _on_area_rect_created(self, norm_rect: dict, page: int) -> None:
-        if self._area_created_handler:
-            self._area_created_handler(norm_rect, int(page))
-
     def set_highlight_hit_handler(self, handler) -> None:
         self._highlight_hit_handler = handler
-
-    def _on_highlight_hit(self, highlight_id: int) -> None:
-        if self._highlight_hit_handler:
-            self._highlight_hit_handler(int(highlight_id))
-
-    def _on_page_changed(self, page: int, x: float, y: float) -> None:
-        self._last_page = max(1, int(page))
-        self._last_location = (float(x), float(y))
 
     def _set_root_prop(self, name: str, value) -> None:
         root = self._root_object()
         if root is not None:
             root.setProperty(name, value)
+
+    def _call_root(self, name: str, *args) -> bool:
+        root = self._root_object()
+        if root is None:
+            return False
+        fn = getattr(root, name, None)
+        if not callable(fn):
+            return False
+        try:
+            fn(*args)
+            return True
+        except Exception:
+            return False
 
     def _get_root_prop(self, name: str, fallback=None):
         root = self._root_object()
@@ -179,9 +162,10 @@ class PersistentPdfViewer(QWidget):
         return str(text or "").strip()
 
     def copy_selected_text(self) -> None:
-        text = self.selected_text()
-        if text:
-            QGuiApplication.clipboard().setText(text)
+        if not self._call_root("copySelection"):
+            text = self.selected_text()
+            if text:
+                QGuiApplication.clipboard().setText(text)
 
     def set_annotation_tool(self, tool: str) -> None:
         self._annotation_tool = tool
@@ -195,7 +179,6 @@ class PersistentPdfViewer(QWidget):
         self._apply_interaction_mode()
 
     def _apply_interaction_mode(self) -> None:
-        self._set_root_prop("interactionMode", self._interaction_mode)
         if self._quick is None:
             return
         if self._interaction_mode == "text_select":
@@ -206,7 +189,7 @@ class PersistentPdfViewer(QWidget):
             self._quick.setCursor(Qt.ArrowCursor)
 
     def set_overlay_highlights(self, highlights: list[dict]) -> None:
-        self._set_root_prop("overlayHighlights", highlights or [])
+        self._overlay_highlights = highlights or []
 
     def prime_path(self, path: str) -> None:
         if not path or not Path(path).exists():
@@ -225,36 +208,30 @@ class PersistentPdfViewer(QWidget):
         self._last_page = 1
         self._last_location = (0.0, 0.0)
         self._set_root_prop("documentSource", QUrl.fromLocalFile(path).toString())
-        self._set_root_prop("pendingPage", 1)
-        self._set_root_prop("pendingLocationX", 0.0)
-        self._set_root_prop("pendingLocationY", 0.0)
+        self._call_root("jumpToPage", 1)
         self.set_multi_page_mode()
-        if self._fit_mode == "fit_page":
-            self.set_fit_page_mode()
-        else:
-            self.set_fit_mode()
+        self.set_fit_mode() if self._fit_mode != "fit_page" else self.set_fit_page_mode()
         self._apply_interaction_mode()
 
     def set_multi_page_mode(self) -> None:
-        self._set_root_prop("singlePageMode", False)
+        return
 
     def set_single_page_mode(self) -> None:
-        self._set_root_prop("singlePageMode", True)
+        return
 
     def set_fit_mode(self) -> None:
         self._fit_mode = "fit_width"
-        self._set_root_prop("zoomMode", "fit_width")
+        self._call_root("fitToWidth")
         self._sync_zoom_spin()
 
     def set_fit_page_mode(self) -> None:
         self._fit_mode = "fit_page"
-        self._set_root_prop("zoomMode", "fit_page")
+        self._call_root("fitToPage")
         self._sync_zoom_spin()
 
     def set_zoom(self, factor: float) -> None:
         self._fit_mode = "custom"
-        self._set_root_prop("zoomMode", "custom")
-        self._set_root_prop("zoomFactor", float(factor))
+        self._call_root("setRenderScale", float(factor))
         self._sync_zoom_spin()
 
     def zoom_factor(self) -> float:
@@ -271,14 +248,15 @@ class PersistentPdfViewer(QWidget):
         x, y = location if location else (0.0, 0.0)
         self._last_page = max(1, int(page))
         self._last_location = (float(x), float(y))
-        self._set_root_prop("pendingPage", self._last_page)
-        self._set_root_prop("pendingLocationX", float(x))
-        self._set_root_prop("pendingLocationY", float(y))
+        if location:
+            self._call_root("jumpToLocation", self._last_page, float(x), float(y), self.zoom_factor())
+        else:
+            self._call_root("jumpToPage", self._last_page)
 
     def view_state(self) -> dict:
         page = int(self._get_root_prop("currentPage", self._last_page) or self._last_page)
-        x = float(self._get_root_prop("locationX", self._last_location[0]) or self._last_location[0])
-        y = float(self._get_root_prop("locationY", self._last_location[1]) or self._last_location[1])
+        x = float(self._last_location[0])
+        y = float(self._last_location[1])
         return {"page": max(1, page), "location": (x, y)}
 
     def toggle_fullscreen(self) -> None:
