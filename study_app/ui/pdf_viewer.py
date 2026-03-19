@@ -3,14 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QGuiApplication, QKeySequence
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtQml import QQmlProperty
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QShortcut,
     QSpinBox,
     QVBoxLayout,
     QWidget,
