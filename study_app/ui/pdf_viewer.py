@@ -139,6 +139,9 @@ class PersistentPdfViewer(QWidget):
         self._view_original_layout = None
         self._annotation_tool = "select_text"
         self._interaction_mode = "text_select"
+        self._manual_sel_start: QPointF | None = None
+        self._manual_sel_end: QPointF | None = None
+        self._manual_selected_text = ""
         self._area_created_handler = None
         self._highlight_hit_handler = None
         self._overlay = None
@@ -207,6 +210,17 @@ class PersistentPdfViewer(QWidget):
             if event.type() in (QEvent.Resize, QEvent.Show):
                 self._overlay.resize(self._view.viewport().size())
                 self._overlay.raise_()
+            if self._interaction_mode == "text_select":
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                    self._manual_sel_start = event.position()
+                    self._manual_sel_end = event.position()
+                elif event.type() == QEvent.MouseMove and self._manual_sel_start is not None:
+                    self._manual_sel_end = event.position()
+                elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                    self._manual_sel_end = event.position()
+                    self._manual_selected_text = self._manual_extract_selected_text()
+                    self._manual_sel_start = None
+                    self._manual_sel_end = None
         return super().eventFilter(watched, event)
 
     def set_area_created_handler(self, handler) -> None:
@@ -221,6 +235,8 @@ class PersistentPdfViewer(QWidget):
             self._overlay.update()
 
     def selected_text(self) -> str:
+        if self._manual_selected_text:
+            return self._manual_selected_text
         if not self._view:
             return ""
         # Try direct selection APIs first.
@@ -246,6 +262,48 @@ class PersistentPdfViewer(QWidget):
             return (QApplication.clipboard().text() or "").strip()
         except Exception:
             return ""
+
+    def _manual_extract_selected_text(self) -> str:
+        if not self._view or self._manual_sel_start is None or self._manual_sel_end is None:
+            return ""
+        doc = self._view.document()
+        if doc is None:
+            return ""
+
+        page = max(0, int(self.view_state().get("page", 1)) - 1)
+        p0 = self._manual_sel_start
+        p1 = self._manual_sel_end
+
+        # Best effort: map viewport drag points into page-space points.
+        # If direct mapping APIs are missing in the current Qt build, fall back
+        # to normalized viewport coordinates. This still improves determinism
+        # versus relying solely on clipboard.
+        w = max(1.0, float(self._view.viewport().width()))
+        h = max(1.0, float(self._view.viewport().height()))
+        start = QPointF(max(0.0, min(1.0, float(p0.x()) / w)), max(0.0, min(1.0, float(p0.y()) / h)))
+        end = QPointF(max(0.0, min(1.0, float(p1.x()) / w)), max(0.0, min(1.0, float(p1.y()) / h)))
+
+        sel_obj = None
+        # Try known/likely getSelection signatures across PySide6 versions.
+        for args in ((page, start, end), (page, QRectF(start, end).normalized()), (page, start.x(), start.y(), end.x(), end.y())):
+            try:
+                sel_obj = doc.getSelection(*args)
+                if sel_obj is not None:
+                    break
+            except Exception:
+                continue
+        if sel_obj is None:
+            return ""
+
+        for attr in ("text", "selectedText", "string"):
+            try:
+                member = getattr(sel_obj, attr, None)
+                value = member() if callable(member) else member
+                if value:
+                    return str(value).strip()
+            except Exception:
+                continue
+        return ""
 
     def _enable_text_selection_mode(self) -> None:
         if not self._view:
@@ -299,18 +357,21 @@ class PersistentPdfViewer(QWidget):
             self._view.setCursor(Qt.IBeamCursor)
             if self._overlay:
                 self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                self._overlay.setEnabled(False)
             return
         if self._interaction_mode == "pan":
             self._disable_text_selection_mode()
             self._view.setCursor(Qt.OpenHandCursor)
             if self._overlay:
                 self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                self._overlay.setEnabled(False)
             return
         # Area + erase modes are handled by workspace overlays; keep pointer neutral here.
         self._disable_text_selection_mode()
         self._view.setCursor(Qt.ArrowCursor)
         if self._overlay:
             self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+            self._overlay.setEnabled(True)
             self._overlay.raise_()
             self._overlay.update()
 
@@ -413,6 +474,7 @@ class PersistentPdfViewer(QWidget):
         self.current_path = path
         self._last_page = 1
         self._last_location = (0.0, 0.0)
+        self._manual_selected_text = ""
         self._apply_default_view_mode()
 
     def set_fit_mode(self) -> None:
@@ -448,6 +510,7 @@ class PersistentPdfViewer(QWidget):
                 pass
         self._last_page = max(1, int(page))
         self._last_location = (float(x), float(y))
+        self._manual_selected_text = ""
 
     def set_zoom(self, factor: float) -> None:
         if self._view:
