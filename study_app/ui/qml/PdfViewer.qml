@@ -198,7 +198,6 @@ Item {
         anchors.fill: parent
         anchors.margins: 4
         document: pdfDoc
-        currentPage: Math.max(0, root.currentPage - 1)
         renderScale: pdfView.renderScale
         visible: root.singlePageMode
     }
