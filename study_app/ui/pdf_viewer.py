@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtQml import QQmlProperty
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
@@ -173,9 +173,9 @@ class PersistentPdfViewer(QWidget):
             return
 
         root.addWidget(self._quick)
-        self._overlay = _AnnotationOverlay(self, self._quick)
+        self._overlay = _AnnotationOverlay(self, self)
+        self._sync_overlay_geometry()
         self._overlay.raise_()
-        self._overlay.resize(self._quick.size())
 
         controls = QHBoxLayout()
         self.zoom_out_btn = QPushButton("-")
@@ -256,11 +256,8 @@ class PersistentPdfViewer(QWidget):
 
     def eventFilter(self, watched, event):
         if watched is self._quick and self._overlay is not None and event.type() in (QEvent.Resize, QEvent.Show):
-            self._overlay.resize(self._quick.size())
+            self._sync_overlay_geometry()
             self._overlay.raise_()
-        if watched is self._quick and event.type() == QEvent.Wheel:
-            event.accept()
-            return True
         return super().eventFilter(watched, event)
 
     def _get_root_prop(self, name: str, fallback=None):
@@ -421,6 +418,7 @@ class PersistentPdfViewer(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._sync_overlay_geometry()
         QTimer.singleShot(0, self._deferred_initial_fit)
 
     def _deferred_initial_fit(self) -> None:
@@ -434,3 +432,9 @@ class PersistentPdfViewer(QWidget):
             self._call_root("setRenderScale", self.zoom_factor())
         else:
             self._call_root("fitToWidth")
+        self._sync_overlay_geometry()
+
+    def _sync_overlay_geometry(self) -> None:
+        if self._overlay is None or self._quick is None:
+            return
+        self._overlay.setGeometry(self._quick.geometry())
