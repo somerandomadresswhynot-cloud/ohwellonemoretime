@@ -90,11 +90,6 @@ Item {
             overlayCanvas.requestPaint()
         }
 
-        onVisibleAreaChanged: {
-            root.locationY = root._clamp(visibleArea.yPosition, 0.0, 1.0)
-            viewerBridge.emitPageChanged(root.currentPage, root.locationX, root.locationY)
-        }
-
         onSelectedTextChanged: {
             root.selectedText = selectedText || ""
         }
