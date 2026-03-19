@@ -43,6 +43,9 @@ class _AnnotationOverlay(QWidget):
         self._owner = owner
         self._drag_start = None
         self._drag_end = None
+        self._active_highlight_id = 0
+        self._edit_mode = ""
+        self._last_pos = None
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setMouseTracking(True)
 
@@ -85,10 +88,84 @@ class _AnnotationOverlay(QWidget):
             p.setBrush(QColor(45, 156, 219, 65))
             p.setPen(QPen(QColor("#7ecbff"), 2, Qt.DashLine))
             p.drawRoundedRect(draft, 2, 2)
+        self._paint_active_handles(p)
+
+    def _active_rect(self) -> tuple[dict, QRectF] | tuple[None, None]:
+        if not self._active_highlight_id:
+            return None, None
+        for entry in self._owner._overlay_highlights:
+            if int(entry.get("id", 0)) != int(self._active_highlight_id):
+                continue
+            rects = entry.get("rects", [])
+            if not rects:
+                return entry, None
+            return entry, self._norm_to_px_rect(rects[0])
+        return None, None
+
+    def _paint_active_handles(self, p: QPainter) -> None:
+        _entry, rect = self._active_rect()
+        if rect is None:
+            return
+        p.setPen(QPen(QColor("#f8fdff"), 1))
+        p.setBrush(QColor("#4ec0ff"))
+        for handle in self._handle_rects(rect).values():
+            p.drawRect(handle)
+
+    def _handle_rects(self, rect: QRectF) -> dict[str, QRectF]:
+        hs = 8.0
+        return {
+            "nw": QRectF(rect.left() - hs, rect.top() - hs, hs * 2, hs * 2),
+            "ne": QRectF(rect.right() - hs, rect.top() - hs, hs * 2, hs * 2),
+            "sw": QRectF(rect.left() - hs, rect.bottom() - hs, hs * 2, hs * 2),
+            "se": QRectF(rect.right() - hs, rect.bottom() - hs, hs * 2, hs * 2),
+        }
+
+    def _hit_highlight(self, pos) -> tuple[dict | None, QRectF | None]:
+        for entry in reversed(self._owner._overlay_highlights):
+            for norm_rect in entry.get("rects", []):
+                px_rect = self._norm_to_px_rect(norm_rect)
+                if px_rect.contains(pos):
+                    return entry, px_rect
+        return None, None
+
+    def _persist_active_rect(self, rect: QRectF) -> None:
+        entry, _ = self._active_rect()
+        if entry is None or self._owner._highlight_rect_changed_handler is None:
+            return
+        hid = int(entry.get("id", 0))
+        self._owner._highlight_rect_changed_handler(hid, self._px_to_norm_rect(rect), int(self._owner.view_state().get("page", 1)))
 
     def mousePressEvent(self, event):
         mode = self._owner._interaction_mode
+        if event.button() == Qt.RightButton:
+            entry, _ = self._hit_highlight(event.position())
+            if entry and self._owner._highlight_context_menu_handler:
+                self._active_highlight_id = int(entry.get("id", 0))
+                self.update()
+                self._owner._highlight_context_menu_handler(
+                    self.mapToGlobal(event.position().toPoint()),
+                    int(entry.get("id", 0)),
+                    int(self._owner.view_state().get("page", 1)),
+                )
+                event.accept()
+                return
         if event.button() == Qt.LeftButton and mode == "area_select":
+            entry, hit_rect = self._hit_highlight(event.position())
+            if entry is not None and hit_rect is not None:
+                self._active_highlight_id = int(entry.get("id", 0))
+                for name, hrect in self._handle_rects(hit_rect).items():
+                    if hrect.contains(event.position()):
+                        self._edit_mode = f"resize_{name}"
+                        self._last_pos = event.position()
+                        event.accept()
+                        self.update()
+                        return
+                if hit_rect.contains(event.position()):
+                    self._edit_mode = "move"
+                    self._last_pos = event.position()
+                    event.accept()
+                    self.update()
+                    return
             self._drag_start = event.position()
             self._drag_end = event.position()
             self.update()
@@ -105,6 +182,32 @@ class _AnnotationOverlay(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._edit_mode and self._active_highlight_id:
+            _entry, rect = self._active_rect()
+            if rect is None or self._last_pos is None:
+                return
+            delta = event.position() - self._last_pos
+            self._last_pos = event.position()
+            if self._edit_mode == "move":
+                rect.translate(delta.x(), delta.y())
+            elif self._edit_mode.startswith("resize_"):
+                corner = self._edit_mode.split("_", 1)[1]
+                if "n" in corner:
+                    rect.setTop(rect.top() + delta.y())
+                if "s" in corner:
+                    rect.setBottom(rect.bottom() + delta.y())
+                if "w" in corner:
+                    rect.setLeft(rect.left() + delta.x())
+                if "e" in corner:
+                    rect.setRight(rect.right() + delta.x())
+            rect = rect.normalized()
+            rect.setLeft(max(0.0, rect.left()))
+            rect.setTop(max(0.0, rect.top()))
+            rect.setRight(min(float(self.width()), rect.right()))
+            rect.setBottom(min(float(self.height()), rect.bottom()))
+            self._persist_active_rect(rect)
+            self.update()
+            return
         if self._owner._interaction_mode == "area_select" and self._drag_start is not None:
             self._drag_end = event.position()
             self.update()
@@ -112,6 +215,11 @@ class _AnnotationOverlay(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._edit_mode:
+            self._edit_mode = ""
+            self._last_pos = None
+            event.accept()
+            return
         if self._owner._interaction_mode == "area_select" and event.button() == Qt.LeftButton and self._drag_start is not None:
             self._drag_end = event.position()
             rect = self._draft_rect()
@@ -147,6 +255,8 @@ class PersistentPdfViewer(QWidget):
         self._overlay_highlights: list[dict] = []
         self._context_menu_connected = False
         self._overlay = None
+        self._highlight_context_menu_handler = None
+        self._highlight_rect_changed_handler = None
 
         root = QVBoxLayout(self)
 
@@ -225,6 +335,10 @@ class PersistentPdfViewer(QWidget):
         self._context_menu_connected = True
 
     def _on_context_menu(self, pos: QPoint) -> None:
+        hit_id = self._overlay_hit_id_at_global(self._quick.mapToGlobal(pos))
+        if hit_id and self._highlight_context_menu_handler:
+            self._highlight_context_menu_handler(self._quick.mapToGlobal(pos), int(hit_id), int(self.view_state().get("page", 1)))
+            return
         if not self._selection_menu_handler:
             return
         global_pos = self._quick.mapToGlobal(pos)
@@ -235,6 +349,12 @@ class PersistentPdfViewer(QWidget):
 
     def set_highlight_hit_handler(self, handler) -> None:
         self._highlight_hit_handler = handler
+
+    def set_highlight_context_menu_handler(self, handler) -> None:
+        self._highlight_context_menu_handler = handler
+
+    def set_highlight_rect_changed_handler(self, handler) -> None:
+        self._highlight_rect_changed_handler = handler
 
     def _set_root_prop(self, name: str, value) -> None:
         root = self._root_object()
@@ -438,3 +558,17 @@ class PersistentPdfViewer(QWidget):
         if self._overlay is None or self._quick is None:
             return
         self._overlay.setGeometry(self._quick.geometry())
+
+    def _overlay_hit_id_at_global(self, global_pos: QPoint) -> int:
+        if self._overlay is None or not self._overlay.isVisible():
+            return 0
+        local = self._overlay.mapFromGlobal(global_pos)
+        for entry in reversed(self._overlay_highlights):
+            for norm_rect in entry.get("rects", []):
+                x = float(norm_rect.get("x", 0.0)) * self._overlay.width()
+                y = float(norm_rect.get("y", 0.0)) * self._overlay.height()
+                w = float(norm_rect.get("w", 0.0)) * self._overlay.width()
+                h = float(norm_rect.get("h", 0.0)) * self._overlay.height()
+                if QRectF(x, y, w, h).contains(local):
+                    return int(entry.get("id", 0))
+        return 0

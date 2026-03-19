@@ -477,6 +477,20 @@ class HighlightRepo:
         self.db.conn.execute("UPDATE highlights SET color=?, updated_at=? WHERE id=?", (color, utcnow_iso(), highlight_id))
         self.db.conn.commit()
 
+    def update_highlight_opacity(self, highlight_id: int, opacity: float) -> None:
+        self.db.conn.execute(
+            "UPDATE highlights SET opacity=?, updated_at=? WHERE id=?",
+            (self._normalize_opacity(opacity), utcnow_iso(), highlight_id),
+        )
+        self.db.conn.commit()
+
+    def update_highlight_rects(self, highlight_id: int, rects: list[dict]) -> None:
+        self.db.conn.execute(
+            "UPDATE highlights SET rects_json=?, updated_at=? WHERE id=?",
+            (json.dumps(rects, separators=(',', ':')), utcnow_iso(), highlight_id),
+        )
+        self.db.conn.commit()
+
     def list_unit_highlights(self, unit_id: int):
         return self.db.conn.execute(
             "SELECT * FROM highlights WHERE unit_id=? ORDER BY created_at DESC", (unit_id,)

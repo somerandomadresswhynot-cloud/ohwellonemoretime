@@ -29,10 +29,13 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
+    QStyle,
 )
 
 from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
@@ -497,6 +500,8 @@ class SourceWorkspace(QWidget):
         self.pdf.set_selection_menu_handler(self.open_selection_menu)
         self.pdf.set_area_created_handler(self._on_area_rect_created)
         self.pdf.set_highlight_hit_handler(self._on_overlay_highlight_hit)
+        self.pdf.set_highlight_context_menu_handler(self.open_existing_highlight_menu)
+        self.pdf.set_highlight_rect_changed_handler(self._on_overlay_highlight_rect_changed)
         self.zoom = QSpinBox(); self.zoom.setRange(50, 250); self.zoom.setValue(100)
         self.zoom.valueChanged.connect(lambda v: self.pdf.set_zoom(v / 100))
         btn_jump = QPushButton("Jump To Selected Unit")
@@ -1240,20 +1245,19 @@ class SourceWorkspace(QWidget):
         if not quote:
             return
         menu = QMenu(self)
-        quick_add = menu.addAction(f"Add highlight ({self._annotation_color})")
-        quick_add.triggered.connect(lambda: self._create_highlight(page, quote, self._annotation_color))
-        add_menu = menu.addMenu("Highlight selection")
+        create_act = menu.addAction("Create highlight")
+        create_act.triggered.connect(lambda: self._create_highlight(page, quote, self._annotation_color, self._annotation_opacity))
+        add_menu = menu.addMenu("Color")
         for label, color in self._color_actions():
             act = add_menu.addAction(label)
-            act.triggered.connect(lambda _=False, c=color: self._create_highlight(page, quote, c))
-        menu.addSeparator()
-        existing = self.highlight_repo.find_exact(self.source_id, page, quote)
-        if existing:
-            remove_act = menu.addAction("Remove matching highlight")
-            remove_act.triggered.connect(lambda: self._remove_highlight(int(existing["id"])))
+            act.triggered.connect(lambda _=False, c=color: self._create_highlight(page, quote, c, self._annotation_opacity))
+        op_menu = menu.addMenu("Opacity")
+        for pct in (20, 35, 50, 65, 80):
+            act = op_menu.addAction(f"{pct}%")
+            act.triggered.connect(lambda _=False, p=pct: self._create_highlight(page, quote, self._annotation_color, p / 100.0))
         menu.exec(global_pos)
 
-    def _create_highlight(self, page: int, quote: str, color: str) -> None:
+    def _create_highlight(self, page: int, quote: str, color: str, opacity: float) -> None:
         anchor = self._build_text_anchor_payload(quote)
         self.highlight_repo.add_text_highlight(
             self.source_id,
@@ -1264,12 +1268,46 @@ class SourceWorkspace(QWidget):
             text_prefix=anchor["text_prefix"],
             text_exact=anchor["text_exact"],
             text_suffix=anchor["text_suffix"],
-            opacity=self._annotation_opacity,
+            opacity=opacity,
         )
         self.refresh_highlights()
 
     def _remove_highlight(self, highlight_id: int) -> None:
         self.highlight_repo.delete_highlight(highlight_id)
+        self.refresh_highlights()
+
+    def _on_overlay_highlight_rect_changed(self, highlight_id: int, norm_rect: dict, _page: int) -> None:
+        self.highlight_repo.update_highlight_rects(int(highlight_id), [norm_rect])
+        self._sync_pdf_overlay_highlights()
+
+    def open_existing_highlight_menu(self, global_pos, highlight_id: int, _page: int) -> None:
+        row = self.highlight_repo.get_highlight(int(highlight_id))
+        if not row:
+            return
+        menu = QMenu(self)
+        delete_btn = QToolButton()
+        delete_btn.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
+        delete_btn.setToolTip("Delete highlight")
+        delete_btn.clicked.connect(lambda: self._remove_highlight(int(highlight_id)))
+        wa = QWidgetAction(menu)
+        wa.setDefaultWidget(delete_btn)
+        menu.addAction(wa)
+        menu.addSeparator()
+        color_menu = menu.addMenu("Color")
+        for label, color in self._annotation_palette:
+            act = color_menu.addAction(label)
+            act.triggered.connect(lambda _=False, c=color: self._update_highlight_style(int(highlight_id), c, None))
+        op_menu = menu.addMenu("Opacity")
+        for pct in (20, 35, 50, 65, 80):
+            act = op_menu.addAction(f"{pct}%")
+            act.triggered.connect(lambda _=False, p=pct: self._update_highlight_style(int(highlight_id), None, p / 100.0))
+        menu.exec(global_pos)
+
+    def _update_highlight_style(self, highlight_id: int, color: str | None, opacity: float | None) -> None:
+        if color is not None:
+            self.highlight_repo.update_highlight_color(int(highlight_id), color)
+        if opacity is not None:
+            self.highlight_repo.update_highlight_opacity(int(highlight_id), float(opacity))
         self.refresh_highlights()
 
     def open_source_highlight_context_menu(self, pos) -> None:
@@ -1526,6 +1564,8 @@ class StudyQueuePage(QWidget):
         self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
         self.pdf.set_area_created_handler(self._on_queue_area_rect_created)
         self.pdf.set_highlight_hit_handler(self._on_queue_overlay_highlight_hit)
+        self.pdf.set_highlight_context_menu_handler(self.open_queue_existing_highlight_menu)
+        self.pdf.set_highlight_rect_changed_handler(self._on_queue_overlay_highlight_rect_changed)
         self.pdf.set_multi_page_mode()
         self.pdf.set_fit_mode()
         self.pdf.setMinimumHeight(760)
@@ -1729,7 +1769,7 @@ class StudyQueuePage(QWidget):
             return
         anchor = self._queue_text_anchor_payload(quote)
         menu = QMenu(self)
-        quick = menu.addAction(f"Add highlight ({self._annotation_color})")
+        quick = menu.addAction("Create highlight")
         quick.triggered.connect(
             lambda: self.highlight_repo.add_text_highlight(
                 source_id,
@@ -1743,11 +1783,38 @@ class StudyQueuePage(QWidget):
                 opacity=self._annotation_opacity,
             )
         )
-        menu.addSeparator()
-        existing = self.highlight_repo.find_exact(source_id, page, quote)
-        if existing:
-            remove = menu.addAction("Remove matching highlight")
-            remove.triggered.connect(lambda: self.highlight_repo.delete_highlight(int(existing["id"])))
+        color_menu = menu.addMenu("Color")
+        for _label, color in self._annotation_palette:
+            act = color_menu.addAction(_label)
+            act.triggered.connect(
+                lambda _=False, c=color: self.highlight_repo.add_text_highlight(
+                    source_id,
+                    page,
+                    quote,
+                    "",
+                    c,
+                    text_prefix=anchor["text_prefix"],
+                    text_exact=anchor["text_exact"],
+                    text_suffix=anchor["text_suffix"],
+                    opacity=self._annotation_opacity,
+                )
+            )
+        op_menu = menu.addMenu("Opacity")
+        for pct in (20, 35, 50, 65, 80):
+            act = op_menu.addAction(f"{pct}%")
+            act.triggered.connect(
+                lambda _=False, p=pct: self.highlight_repo.add_text_highlight(
+                    source_id,
+                    page,
+                    quote,
+                    "",
+                    self._annotation_color,
+                    text_prefix=anchor["text_prefix"],
+                    text_exact=anchor["text_exact"],
+                    text_suffix=anchor["text_suffix"],
+                    opacity=p / 100.0,
+                )
+            )
         menu.exec(global_pos)
         self._sync_queue_pdf_overlays()
 
@@ -1769,6 +1836,44 @@ class StudyQueuePage(QWidget):
         if self._annotation_tool == "erase" and highlight_id:
             self.highlight_repo.delete_highlight(int(highlight_id))
             self._sync_queue_pdf_overlays()
+
+    def _on_queue_overlay_highlight_rect_changed(self, highlight_id: int, norm_rect: dict, _page: int) -> None:
+        self.highlight_repo.update_highlight_rects(int(highlight_id), [norm_rect])
+        self._sync_queue_pdf_overlays()
+
+    def open_queue_existing_highlight_menu(self, global_pos, highlight_id: int, _page: int) -> None:
+        row = self.highlight_repo.get_highlight(int(highlight_id))
+        if not row:
+            return
+        menu = QMenu(self)
+        delete_btn = QToolButton()
+        delete_btn.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
+        delete_btn.setToolTip("Delete highlight")
+        delete_btn.clicked.connect(lambda: self._delete_queue_highlight(int(highlight_id)))
+        wa = QWidgetAction(menu)
+        wa.setDefaultWidget(delete_btn)
+        menu.addAction(wa)
+        menu.addSeparator()
+        color_menu = menu.addMenu("Color")
+        for label, color in self._annotation_palette:
+            act = color_menu.addAction(label)
+            act.triggered.connect(lambda _=False, c=color: self._update_queue_highlight_style(int(highlight_id), c, None))
+        op_menu = menu.addMenu("Opacity")
+        for pct in (20, 35, 50, 65, 80):
+            act = op_menu.addAction(f"{pct}%")
+            act.triggered.connect(lambda _=False, p=pct: self._update_queue_highlight_style(int(highlight_id), None, p / 100.0))
+        menu.exec(global_pos)
+
+    def _delete_queue_highlight(self, highlight_id: int) -> None:
+        self.highlight_repo.delete_highlight(int(highlight_id))
+        self._sync_queue_pdf_overlays()
+
+    def _update_queue_highlight_style(self, highlight_id: int, color: str | None, opacity: float | None) -> None:
+        if color is not None:
+            self.highlight_repo.update_highlight_color(int(highlight_id), color)
+        if opacity is not None:
+            self.highlight_repo.update_highlight_opacity(int(highlight_id), float(opacity))
+        self._sync_queue_pdf_overlays()
 
     def _sync_queue_pdf_overlays(self) -> None:
         source_id = self._active_source_id()
