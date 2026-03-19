@@ -109,7 +109,7 @@ class PdfService:
             return list(self._text_anchor_rect_cache[key])
         if PdfReader is None:
             return []
-        exact = (text_exact or "").strip()
+        exact = " ".join((text_exact or "").split()).strip()
         if not exact:
             return []
         try:
@@ -138,10 +138,34 @@ class PdfService:
             if not chunks:
                 return []
             joined = "".join(c["text"] for c in chunks)
+            # Normalize whitespace to improve anchor matching against PDF extraction variance.
+            norm_chars: list[str] = []
+            norm_to_raw: list[int] = []
+            prev_space = False
+            for idx, ch in enumerate(joined):
+                if ch.isspace():
+                    if prev_space:
+                        continue
+                    norm_chars.append(" ")
+                    norm_to_raw.append(idx)
+                    prev_space = True
+                    continue
+                prev_space = False
+                norm_chars.append(ch)
+                norm_to_raw.append(idx)
+            while norm_chars and norm_chars[0] == " ":
+                norm_chars.pop(0)
+                norm_to_raw.pop(0)
+            while norm_chars and norm_chars[-1] == " ":
+                norm_chars.pop()
+                norm_to_raw.pop()
+            joined_norm = "".join(norm_chars)
+            if not joined_norm or not norm_to_raw:
+                return []
             search_start = 0
             matches: list[tuple[int, int]] = []
             while True:
-                idx = joined.find(exact, search_start)
+                idx = joined_norm.find(exact, search_start)
                 if idx < 0:
                     break
                 matches.append((idx, idx + len(exact)))
@@ -155,13 +179,13 @@ class PdfService:
                 s = c["text"]
                 spans.append((cursor, cursor + len(s), c))
                 cursor += len(s)
-            prefix = (text_prefix or "").strip()
-            suffix = (text_suffix or "").strip()
+            prefix = " ".join((text_prefix or "").split()).strip()
+            suffix = " ".join((text_suffix or "").split()).strip()
 
             def _score(match):
                 a, b = match
-                left = joined[max(0, a - len(prefix) - 8):a] if prefix else ""
-                right = joined[b:b + len(suffix) + 8] if suffix else ""
+                left = joined_norm[max(0, a - len(prefix) - 8):a] if prefix else ""
+                right = joined_norm[b:b + len(suffix) + 8] if suffix else ""
                 score = 0
                 if prefix and prefix in left:
                     score += 1
@@ -171,12 +195,14 @@ class PdfService:
 
             best = max(matches, key=_score)
             a, b = best
+            raw_a = norm_to_raw[max(0, min(len(norm_to_raw) - 1, a))]
+            raw_b = norm_to_raw[max(0, min(len(norm_to_raw) - 1, b - 1))] + 1
             rects: list[dict] = []
             for s0, s1, chunk in spans:
-                if s1 <= a or s0 >= b:
+                if s1 <= raw_a or s0 >= raw_b:
                     continue
-                overlap_start = max(s0, a)
-                overlap_end = min(s1, b)
+                overlap_start = max(s0, raw_a)
+                overlap_end = min(s1, raw_b)
                 overlap_text = chunk["text"][overlap_start - s0: overlap_end - s0]
                 chars = max(1, len(overlap_text))
                 fs = float(chunk["fs"])
