@@ -78,7 +78,6 @@ Item {
         anchors.fill: parent
         anchors.margins: 4
         document: pdfDoc
-        pageSpacing: 10
         clip: true
         focus: true
         visible: !root.singlePageMode
