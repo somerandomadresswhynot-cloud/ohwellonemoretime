@@ -713,17 +713,36 @@ class SourceWorkspace(QWidget):
             if rects:
                 overlays.append({
                     "id": int(h["id"]),
+                    "kind": "rect" if anchor_type == "rect" else "text",
                     "color": h["color"] or "#2d9cdb",
                     "opacity": float(h["opacity"] or 0.35),
                     "rects": [r for r in rects if isinstance(r, dict)],
                 })
                 continue
+            if anchor_type == "text" and getattr(self, "source", None) and self.source and self.source.file_path:
+                resolved_rects = self.pdf_service.resolve_text_anchor_rects(
+                    self.source.file_path,
+                    int(h["page"]),
+                    h["text_exact"] if "text_exact" in h.keys() else h["quote_text"],
+                    h["text_prefix"] if "text_prefix" in h.keys() else "",
+                    h["text_suffix"] if "text_suffix" in h.keys() else "",
+                )
+                if resolved_rects:
+                    overlays.append({
+                        "id": int(h["id"]),
+                        "kind": "text",
+                        "color": h["color"] or "#2d9cdb",
+                        "opacity": float(h["opacity"] or 0.35),
+                        "rects": resolved_rects,
+                    })
+                    continue
 
             # Graceful fallback for text anchors when glyph-quad geometry is unavailable.
             marker_y = 0.03 + (text_marker_index * 0.035)
             text_marker_index += 1
             overlays.append({
                 "id": int(h["id"]),
+                "kind": "text",
                 "color": h["color"] or "#2d9cdb",
                 "opacity": min(0.9, max(0.2, float(h["opacity"] or 0.35))),
                 "rects": [{"x": 0.02, "y": min(0.95, marker_y), "w": 0.22, "h": 0.02}],
@@ -1257,7 +1276,7 @@ class SourceWorkspace(QWidget):
 
     def _create_highlight(self, page: int, quote: str, color: str, opacity: float) -> None:
         anchor = self._build_text_anchor_payload(quote)
-        hid = self.highlight_repo.add_text_highlight(
+        self.highlight_repo.add_text_highlight(
             self.source_id,
             page,
             quote,
@@ -1268,9 +1287,6 @@ class SourceWorkspace(QWidget):
             text_suffix=anchor["text_suffix"],
             opacity=opacity,
         )
-        selection_rect = self.pdf.selection_anchor_rect(quote)
-        if selection_rect:
-            self.highlight_repo.update_highlight_rects(int(hid), [selection_rect])
         self.refresh_highlights()
 
     def _remove_highlight(self, highlight_id: int) -> None:
@@ -1786,7 +1802,7 @@ class StudyQueuePage(QWidget):
         self._sync_queue_pdf_overlays()
 
     def _create_queue_text_highlight(self, source_id: int, page: int, quote: str, anchor: dict, color: str, opacity: float) -> None:
-        hid = self.highlight_repo.add_text_highlight(
+        self.highlight_repo.add_text_highlight(
             source_id,
             page,
             quote,
@@ -1797,9 +1813,6 @@ class StudyQueuePage(QWidget):
             text_suffix=anchor["text_suffix"],
             opacity=opacity,
         )
-        selection_rect = self.pdf.selection_anchor_rect(quote)
-        if selection_rect:
-            self.highlight_repo.update_highlight_rects(int(hid), [selection_rect])
 
     def _on_queue_area_rect_created(self, norm_rect: dict, page: int) -> None:
         source_id = self._active_source_id()
@@ -1873,15 +1886,36 @@ class StudyQueuePage(QWidget):
             if rects:
                 overlays.append({
                     "id": int(h["id"]),
+                    "kind": "rect" if anchor_type == "rect" else "text",
                     "color": h["color"] or "#2d9cdb",
                     "opacity": float(h["opacity"] or 0.35),
                     "rects": [r for r in rects if isinstance(r, dict)],
                 })
                 continue
+            if anchor_type == "text":
+                source_path = self.source_path_cache.get(source_id, "")
+                if source_path:
+                    resolved_rects = self.pdf_service.resolve_text_anchor_rects(
+                        source_path,
+                        int(h["page"]),
+                        h["text_exact"] if "text_exact" in h.keys() else h["quote_text"],
+                        h["text_prefix"] if "text_prefix" in h.keys() else "",
+                        h["text_suffix"] if "text_suffix" in h.keys() else "",
+                    )
+                    if resolved_rects:
+                        overlays.append({
+                            "id": int(h["id"]),
+                            "kind": "text",
+                            "color": h["color"] or "#2d9cdb",
+                            "opacity": float(h["opacity"] or 0.35),
+                            "rects": resolved_rects,
+                        })
+                        continue
             marker_y = 0.03 + (text_marker_index * 0.035)
             text_marker_index += 1
             overlays.append({
                 "id": int(h["id"]),
+                "kind": "text",
                 "color": h["color"] or "#2d9cdb",
                 "opacity": min(0.9, max(0.2, float(h["opacity"] or 0.35))),
                 "rects": [{"x": 0.02, "y": min(0.95, marker_y), "w": 0.22, "h": 0.02}],

@@ -98,7 +98,7 @@ class _AnnotationOverlay(QWidget):
             if int(entry.get("id", 0)) != int(self._active_highlight_id):
                 continue
             rects = entry.get("rects", [])
-            if not rects:
+            if not rects or str(entry.get("kind", "rect")) != "rect":
                 return entry, None
             return entry, self._norm_to_px_rect(rects[0])
         return None, None
@@ -133,6 +133,8 @@ class _AnnotationOverlay(QWidget):
         entry, _ = self._active_rect()
         if entry is None or self._owner._highlight_rect_changed_handler is None:
             return
+        if str(entry.get("kind", "rect")) != "rect":
+            return
         hid = int(entry.get("id", 0))
         self._owner._highlight_rect_changed_handler(hid, self._px_to_norm_rect(rect), int(self._owner.view_state().get("page", 1)))
 
@@ -157,7 +159,7 @@ class _AnnotationOverlay(QWidget):
             return
         if event.button() == Qt.LeftButton and mode == "area_select":
             entry, hit_rect = self._hit_highlight(event.position())
-            if entry is not None and hit_rect is not None:
+            if entry is not None and hit_rect is not None and str(entry.get("kind", "rect")) == "rect":
                 self._active_highlight_id = int(entry.get("id", 0))
                 for name, hrect in self._handle_rects(hit_rect).items():
                     if hrect.contains(event.position()):

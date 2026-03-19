@@ -13,6 +13,7 @@ from study_app.services.outline_service import entries_from_bookmarks, seed_outl
 class PdfService:
     def __init__(self) -> None:
         self._text_layer_probe_cache: dict[str, dict] = {}
+        self._text_anchor_rect_cache: dict[tuple[str, int, str, str, str], list[dict]] = {}
 
     def inspect(self, path: str) -> tuple[int, int]:
         from pathlib import Path
@@ -94,3 +95,103 @@ class PdfService:
         if isinstance(outline, list):
             walk(outline, 1)
         return out
+
+    def resolve_text_anchor_rects(
+        self,
+        path: str,
+        page: int,
+        text_exact: str,
+        text_prefix: str = "",
+        text_suffix: str = "",
+    ) -> list[dict]:
+        key = (path, int(page), str(text_exact or ""), str(text_prefix or ""), str(text_suffix or ""))
+        if key in self._text_anchor_rect_cache:
+            return list(self._text_anchor_rect_cache[key])
+        if PdfReader is None:
+            return []
+        exact = (text_exact or "").strip()
+        if not exact:
+            return []
+        try:
+            reader = PdfReader(path)
+            page_idx = max(0, int(page) - 1)
+            if page_idx >= len(reader.pages):
+                return []
+            p = reader.pages[page_idx]
+            media = p.mediabox
+            page_w = max(1.0, float(media.width))
+            page_h = max(1.0, float(media.height))
+            chunks: list[dict] = []
+
+            def _visitor(txt, _cm, tm, _font_dict, font_size):
+                if not txt:
+                    return
+                s = str(txt)
+                if not s.strip():
+                    return
+                x = float(tm[4]) if tm and len(tm) > 5 else 0.0
+                y = float(tm[5]) if tm and len(tm) > 5 else 0.0
+                fs = max(6.0, float(font_size or 10.0))
+                chunks.append({"text": s, "x": x, "y": y, "fs": fs})
+
+            p.extract_text(visitor_text=_visitor)
+            if not chunks:
+                return []
+            joined = "".join(c["text"] for c in chunks)
+            search_start = 0
+            matches: list[tuple[int, int]] = []
+            while True:
+                idx = joined.find(exact, search_start)
+                if idx < 0:
+                    break
+                matches.append((idx, idx + len(exact)))
+                search_start = idx + 1
+            if not matches:
+                return []
+            # Build character index map for chunk ranges.
+            spans = []
+            cursor = 0
+            for c in chunks:
+                s = c["text"]
+                spans.append((cursor, cursor + len(s), c))
+                cursor += len(s)
+            prefix = (text_prefix or "").strip()
+            suffix = (text_suffix or "").strip()
+
+            def _score(match):
+                a, b = match
+                left = joined[max(0, a - len(prefix) - 8):a] if prefix else ""
+                right = joined[b:b + len(suffix) + 8] if suffix else ""
+                score = 0
+                if prefix and prefix in left:
+                    score += 1
+                if suffix and suffix in right:
+                    score += 1
+                return score
+
+            best = max(matches, key=_score)
+            a, b = best
+            rects: list[dict] = []
+            for s0, s1, chunk in spans:
+                if s1 <= a or s0 >= b:
+                    continue
+                overlap_start = max(s0, a)
+                overlap_end = min(s1, b)
+                overlap_text = chunk["text"][overlap_start - s0: overlap_end - s0]
+                chars = max(1, len(overlap_text))
+                fs = float(chunk["fs"])
+                x = float(chunk["x"])
+                y = float(chunk["y"])
+                w = max(3.0, fs * 0.55 * chars)
+                h = max(8.0, fs * 1.25)
+                top = page_h - (y + (h * 0.9))
+                rects.append({
+                    "x": round(max(0.0, min(1.0, x / page_w)), 6),
+                    "y": round(max(0.0, min(1.0, top / page_h)), 6),
+                    "w": round(max(0.0, min(1.0, w / page_w)), 6),
+                    "h": round(max(0.0, min(1.0, h / page_h)), 6),
+                })
+            self._text_anchor_rect_cache[key] = list(rects)
+            return rects
+        except Exception:
+            return []
