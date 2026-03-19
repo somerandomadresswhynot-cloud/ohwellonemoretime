@@ -90,9 +90,8 @@ Item {
             overlayCanvas.requestPaint()
         }
 
-        onContentYChanged: {
-            const maxScroll = Math.max(1.0, contentHeight - height)
-            root.locationY = root._clamp(contentY / maxScroll, 0.0, 1.0)
+        onVisibleAreaChanged: {
+            root.locationY = root._clamp(visibleArea.yPosition, 0.0, 1.0)
             viewerBridge.emitPageChanged(root.currentPage, root.locationX, root.locationY)
         }
 
