@@ -136,3 +136,22 @@ class ReviewHistoryDialog(QDialog):
         QMessageBox.information(self, "Deleted", "Event marked deleted.")
         self.events = [e for e in self.events if e["id"] != ev["id"]]
         self._load()
+
+
+class RecallNoteDialog(QDialog):
+    def __init__(self, title: str, text: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(560, 360)
+        self.editor = QTextEdit()
+        self.editor.setPlainText(text or "")
+        self.editor.setAcceptRichText(False)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.editor)
+        lay.addWidget(buttons)
+
+    def value(self) -> str:
+        return self.editor.toPlainText()

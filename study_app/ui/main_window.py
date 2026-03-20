@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QInputDialog,
@@ -41,7 +42,7 @@ from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
 from study_app.services.scheduler import allocate_new_units, compute_next, recommend_new_units_with_guardrail, retention_estimate
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
-from study_app.ui.dialogs import OutlineEditorDialog, ReviewHistoryDialog, SourceMetadataDialog
+from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 
 
@@ -1457,6 +1458,65 @@ class CornerResizeHandle(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class QueueTimerTile(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._phase = 0
+        self.setObjectName("queueTimerTile")
+        self.setMinimumSize(170, 170)
+        self.setMaximumSize(190, 190)
+        self.time_lbl = QLabel("00:00")
+        self.time_lbl.setAlignment(Qt.AlignCenter)
+        self.time_lbl.setStyleSheet("font-size:28px; font-weight:700; color:#ebf1ff;")
+        self.start_btn = QPushButton("▶")
+        self.pause_btn = QPushButton("⏸")
+        self.reset_btn = QPushButton("↺")
+        for b in [self.start_btn, self.pause_btn, self.reset_btn]:
+            b.setFixedSize(30, 30)
+            b.setToolTip({"▶": "Start", "⏸": "Pause", "↺": "Reset"}[b.text()])
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(4)
+        lay.addWidget(QLabel("Timer"))
+        lay.addWidget(self.time_lbl, 1)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.pause_btn)
+        btn_row.addWidget(self.reset_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+        self._fx = QTimer(self)
+        self._fx.timeout.connect(self._tick_fx)
+        self._apply_glow(0.0)
+
+    def _tick_fx(self):
+        self._phase = (self._phase + 1) % 60
+        strength = (self._phase if self._phase <= 30 else (60 - self._phase)) / 30.0
+        self._apply_glow(strength)
+
+    def _apply_glow(self, strength: float):
+        alpha = int(28 + strength * 35)
+        border = int(85 + strength * 35)
+        self.setStyleSheet(
+            f"#queueTimerTile {{"
+            f"background:rgba(18,27,51,{205 + min(50, alpha)});"
+            f"border:1px solid rgba(110,140,200,{border});"
+            f"border-radius:10px;"
+            f"padding:1px;"
+            f"}}"
+        )
+
+    def set_running(self, running: bool):
+        if running:
+            if not self._fx.isActive():
+                self._fx.start(85)
+        else:
+            if self._fx.isActive():
+                self._fx.stop()
+            self._apply_glow(0.0)
+
+
 class StudyQueuePage(QWidget):
     def __init__(
         self,
@@ -1512,16 +1572,16 @@ class StudyQueuePage(QWidget):
         left.addWidget(self.list)
 
         self.title = QLabel("No unit selected")
-        self.timer_lbl = QLabel("00:00")
-        self.pre = QTextEdit(); self.post = QTextEdit()
-        self.pre.setMinimumHeight(140)
-        self.post.setMinimumHeight(140)
-        self.pre.setMaximumHeight(220)
-        self.post.setMaximumHeight(220)
-        timer_start = QPushButton("Start/Pause")
-        timer_reset = QPushButton("Reset")
-        timer_start.clicked.connect(self.toggle_timer)
-        timer_reset.clicked.connect(self.reset_timer)
+        self.pre_note_text = ""
+        self.post_note_text = ""
+        self.timer_tile = QueueTimerTile()
+        self.timer_tile.start_btn.clicked.connect(self.start_timer)
+        self.timer_tile.pause_btn.clicked.connect(self.pause_timer)
+        self.timer_tile.reset_btn.clicked.connect(self.reset_timer)
+        self.pre_note_btn = QPushButton("Edit Pre-recall Note")
+        self.post_note_btn = QPushButton("Edit Post-recall Note")
+        self.pre_note_btn.clicked.connect(self.edit_pre_note)
+        self.post_note_btn.clicked.connect(self.edit_post_note)
         self.pdf = PersistentPdfViewer()
         self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
         self.pdf.set_area_created_handler(self._on_queue_area_rect_created)
@@ -1531,32 +1591,43 @@ class StudyQueuePage(QWidget):
         self.pdf.setMinimumHeight(760)
         self.queue_outline_tree = QTreeWidget()
         self.queue_outline_tree.setHeaderLabels(["Reading Context"])
-        self.queue_outline_tree.setMaximumWidth(280)
-        self.queue_outline_tree.setMinimumWidth(220)
+        self.queue_outline_tree.setMinimumWidth(320)
         _enable_smooth_scroll(self.queue_outline_tree)
         self.queue_outline_tree.itemClicked.connect(self._on_queue_outline_click)
         self._queue_outline_items: dict[int, QTreeWidgetItem] = {}
         self._queue_outline_rows_by_id: dict[int, dict] = {}
         self._queue_outline_child_ids: dict[int, list[int]] = {}
         self._active_queue_outline_node_id: int | None = None
-        hist_btn = QPushButton("Review History")
-        hist_btn.clicked.connect(self.open_history)
-        jump_btn = QPushButton("Jump to Unit")
-        jump_btn.clicked.connect(self.jump_to_active_unit)
+        self.review_history_list = QListWidget()
+        self.review_history_list.setMinimumHeight(86)
+        self.review_history_list.setMaximumHeight(130)
+        self.review_history_list.setMinimumWidth(270)
+        _enable_smooth_scroll(self.review_history_list)
+        self.review_history_list.setStyleSheet("QListWidget{font-size:11px;}")
+        self.full_history_btn = QPushButton("View Full History")
+        self.full_history_btn.clicked.connect(self.open_history)
 
-        ratings = QHBoxLayout()
-        for label, r in [("Easy", "easy"), ("With Effort", "with_effort"), ("Hard", "hard"), ("Skip", "skip")]:
+        ratings = QGridLayout()
+        ratings.setSpacing(8)
+        rating_pos = [("Easy", "easy", 0, 0), ("With Effort", "with_effort", 0, 1), ("Hard", "hard", 1, 0), ("Skip", "skip", 1, 1)]
+        rating_styles = {
+            "easy": "background:#24503f; border:1px solid #2e7257; color:#d5f4e4;",
+            "with_effort": "background:#564b2a; border:1px solid #86743a; color:#fff0cc;",
+            "hard": "background:#5a3036; border:1px solid #8a4a54; color:#ffdbe0;",
+            "skip": "background:#3a435d; border:1px solid #4c5877; color:#dbe4ff;",
+        }
+        for label, r, row, col in rating_pos:
             b = QPushButton(label)
             b.clicked.connect(lambda _, rr=r: self.rate(rr))
-            ratings.addWidget(b)
+            b.setMinimumHeight(36)
+            b.setMinimumWidth(132)
+            b.setStyleSheet(rating_styles.get(r, ""))
+            ratings.addWidget(b, row, col)
 
         content = QWidget()
         right = QVBoxLayout(content)
+        right.setSpacing(6)
         right.addWidget(self.title)
-        right.addWidget(self.timer_lbl); right.addWidget(timer_start); right.addWidget(timer_reset)
-        right.addWidget(QLabel("Pre-recall note")); right.addWidget(self.pre)
-        right.addWidget(QLabel("Post-recall note")); right.addWidget(self.post)
-        right.addLayout(ratings); right.addWidget(jump_btn); right.addWidget(hist_btn)
 
         saved_h = self.settings_repo.get_ui_state("queue_pdf_height", "760")
         try:
@@ -1568,8 +1639,11 @@ class StudyQueuePage(QWidget):
 
         self.queue_doc_progress = DocumentProgressBar()
         self.queue_doc_progress.page_requested.connect(self._on_queue_doc_progress_page_requested)
-        queue_annotation_controls = QHBoxLayout()
-        queue_annotation_controls.addWidget(QLabel("Annotate"))
+        queue_annotation_controls = QVBoxLayout()
+        queue_annotation_controls.setSpacing(4)
+        queue_ann_row1 = QHBoxLayout()
+        queue_ann_row1.setSpacing(6)
+        queue_ann_row1.addWidget(QLabel("Annotate"))
         self._queue_tool_buttons: dict[str, QPushButton] = {}
         for label, key in [("Select Text", "select_text"), ("Area", "area"), ("Pan", "pan"), ("Erase", "erase")]:
             btn = QPushButton(label)
@@ -1577,9 +1651,13 @@ class StudyQueuePage(QWidget):
             btn.setFixedHeight(24)
             btn.clicked.connect(lambda _=False, k=key: self._set_queue_annotation_tool(k))
             self._queue_tool_buttons[key] = btn
-            queue_annotation_controls.addWidget(btn)
-        queue_annotation_controls.addSpacing(8)
-        queue_annotation_controls.addWidget(QLabel("Color"))
+            queue_ann_row1.addWidget(btn)
+        queue_ann_row1.addStretch()
+        queue_annotation_controls.addLayout(queue_ann_row1)
+
+        queue_ann_row2 = QHBoxLayout()
+        queue_ann_row2.setSpacing(6)
+        queue_ann_row2.addWidget(QLabel("Color"))
         self._queue_color_buttons: dict[str, QPushButton] = {}
         for _label, color in self._annotation_palette:
             cbtn = QPushButton("")
@@ -1587,33 +1665,98 @@ class StudyQueuePage(QWidget):
             cbtn.setFixedSize(QSize(16, 16))
             cbtn.clicked.connect(lambda _=False, c=color: self._set_queue_annotation_color(c))
             self._queue_color_buttons[color] = cbtn
-            queue_annotation_controls.addWidget(cbtn)
-        queue_annotation_controls.addSpacing(8)
-        queue_annotation_controls.addWidget(QLabel("Opacity"))
+            queue_ann_row2.addWidget(cbtn)
+        queue_ann_row2.addSpacing(6)
+        queue_ann_row2.addWidget(QLabel("Opacity"))
         self.queue_opacity_spin = QSpinBox()
         self.queue_opacity_spin.setRange(10, 100)
         self.queue_opacity_spin.setSuffix("%")
         self.queue_opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
         self.queue_opacity_spin.valueChanged.connect(self._on_queue_opacity_changed)
-        queue_annotation_controls.addWidget(self.queue_opacity_spin)
+        queue_ann_row2.addWidget(self.queue_opacity_spin)
+        queue_ann_row2.addStretch()
+        queue_annotation_controls.addLayout(queue_ann_row2)
+
         self.queue_text_layer_hint = QLabel("Text layer: probing…")
         self.queue_text_layer_hint.setStyleSheet("color:#9aa7b2;")
         queue_annotation_controls.addWidget(self.queue_text_layer_hint)
-        queue_annotation_controls.addStretch()
-        queue_pdf_row = QHBoxLayout()
-        queue_pdf_row.addWidget(self.queue_outline_tree)
-        queue_pdf_row.addWidget(self.pdf, 1)
-        right.addLayout(queue_annotation_controls)
-        right.addLayout(queue_pdf_row, 1)
-        right.addWidget(self.queue_doc_progress)
+        self.pre_note_btn.setMinimumHeight(32)
+        self.post_note_btn.setMinimumHeight(32)
+        self.queue_outline_tree.setMinimumHeight(210)
+        self.queue_outline_tree.setMaximumHeight(230)
+        self.review_history_list.setMinimumHeight(96)
+        self.review_history_list.setMaximumHeight(118)
+
+        left_controls_col = QVBoxLayout()
+        left_controls_col.setSpacing(7)
+
+        timer_notes_section = QWidget()
+        timer_section_l = QHBoxLayout(timer_notes_section)
+        timer_section_l.setContentsMargins(0, 0, 0, 0)
+        timer_section_l.setSpacing(8)
+        timer_section_l.addWidget(self.timer_tile, 0, Qt.AlignLeft | Qt.AlignTop)
+        notes_col = QVBoxLayout()
+        notes_col.setSpacing(6)
+        notes_col.addWidget(self.pre_note_btn)
+        notes_col.addWidget(self.post_note_btn)
+        notes_col.addStretch()
+        timer_section_l.addLayout(notes_col, 1)
+        left_controls_col.addWidget(timer_notes_section)
+
+        srs_section = QWidget()
+        srs_section_l = QVBoxLayout(srs_section)
+        srs_section_l.setContentsMargins(0, 0, 0, 0)
+        srs_section_l.addLayout(ratings)
+        left_controls_col.addWidget(srs_section)
+
+        annotation_section = QWidget()
+        annotation_section_l = QVBoxLayout(annotation_section)
+        annotation_section_l.setContentsMargins(0, 0, 0, 0)
+        annotation_section_l.setSpacing(4)
+        annotation_section_l.addWidget(QLabel("Annotations"))
+        annotation_section_l.addLayout(queue_annotation_controls)
+        left_controls_col.addWidget(annotation_section)
+
+        outline_section = QWidget()
+        outline_section_l = QVBoxLayout(outline_section)
+        outline_section_l.setContentsMargins(0, 0, 0, 0)
+        outline_section_l.setSpacing(4)
+        outline_section_l.addWidget(QLabel("Reading Context"))
+        outline_section_l.addWidget(self.queue_outline_tree)
+        left_controls_col.addWidget(outline_section)
+
+        history_section = QWidget()
+        history_section_l = QVBoxLayout(history_section)
+        history_section_l.setContentsMargins(0, 0, 0, 0)
+        history_section_l.setSpacing(4)
+        history_section_l.addWidget(QLabel("Review History"))
+        history_section_l.addWidget(self.review_history_list)
+        history_section_l.addWidget(self.full_history_btn)
+        left_controls_col.addWidget(history_section)
+        left_controls_col.addStretch()
+
+        right_pdf_col = QVBoxLayout()
+        right_pdf_col.setSpacing(6)
+        right_pdf_col.addWidget(self.pdf, 1)
+        right_pdf_col.addWidget(self.queue_doc_progress)
+
+        two_col = QHBoxLayout()
+        two_col.setSpacing(10)
+        left_col_widget = QWidget()
+        left_col_widget.setLayout(left_controls_col)
+        left_col_widget.setMinimumWidth(360)
+        left_col_widget.setMaximumWidth(360)
+        right_col_widget = QWidget()
+        right_col_widget.setLayout(right_pdf_col)
+        two_col.addWidget(left_col_widget)
+        two_col.addWidget(right_col_widget, 1)
+        right.addLayout(two_col, 1)
 
         corner_row = QHBoxLayout()
         corner_row.addStretch()
         self.resize_corner = CornerResizeHandle(self._resize_pdf_by_delta)
         corner_row.addWidget(self.resize_corner)
         right.addLayout(corner_row)
-        right.addSpacing(90)
-        right.addStretch()
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
@@ -1887,8 +2030,8 @@ class StudyQueuePage(QWidget):
             return
         state = self.pdf.view_state()
         self.unit_drafts[self.active_unit.unit_id] = {
-            "pre": self.pre.toPlainText(),
-            "post": self.post.toPlainText(),
+            "pre": self.pre_note_text,
+            "post": self.post_note_text,
             "timer_seconds": self.timer_seconds,
             "timer_running": self.timer_running,
             "started_at": self.started_at.isoformat() if self.started_at else "",
@@ -1899,18 +2042,21 @@ class StudyQueuePage(QWidget):
         self.settings_repo.set_ui_state("queue_pdf_zoom", str(self.pdf.zoom_factor()))
 
     def _load_draft_for_active(self):
-        self.pre.clear(); self.post.clear()
+        self.pre_note_text = ""
+        self.post_note_text = ""
         self.timer_seconds = 0
         self.timer_running = False
         self.started_at = None
-        self.timer_lbl.setText("00:00")
+        self.timer_tile.time_lbl.setText("00:00")
+        self.timer_tile.set_running(False)
+        self._refresh_note_previews()
         if not self.active_unit:
             return
         draft = self.unit_drafts.get(self.active_unit.unit_id)
         if not draft:
             return
-        self.pre.setText(draft.get("pre", ""))
-        self.post.setText(draft.get("post", ""))
+        self.pre_note_text = draft.get("pre", "")
+        self.post_note_text = draft.get("post", "")
         self.timer_seconds = int(draft.get("timer_seconds", 0))
         self.timer_running = bool(draft.get("timer_running", False))
         started = draft.get("started_at", "")
@@ -1919,7 +2065,9 @@ class StudyQueuePage(QWidget):
                 self.started_at = parse_iso_to_utc(started)
             except Exception:
                 self.started_at = None
-        self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
+        self.timer_tile.time_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
+        self.timer_tile.set_running(self.timer_running)
+        self._refresh_note_previews()
         zoom = float(draft.get("pdf_zoom", self.settings_repo.get_ui_state("queue_pdf_zoom", "1.0") or "1.0"))
         self.pdf.set_zoom(max(0.25, min(4.0, zoom)))
         self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
@@ -2222,6 +2370,7 @@ class StudyQueuePage(QWidget):
             self._queue_outline_child_ids = {}
             self._active_queue_outline_node_id = None
             self.queue_text_layer_hint.setText("Text layer: unknown")
+            self.review_history_list.clear()
             return
         self.active_unit = self.display_units[idx][0]
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
@@ -2245,6 +2394,7 @@ class StudyQueuePage(QWidget):
         self.pdf.set_page(self.active_unit.start_page)
         self._set_active_queue_outline_by_page(int(self.active_unit.start_page))
         self._load_draft_for_active()
+        self._refresh_queue_history_panel()
         self._queue_last_pdf_page = int(self.pdf.view_state().get("page", self.active_unit.start_page))
         self._refresh_queue_doc_progress(self._queue_last_pdf_page)
         self._sync_queue_pdf_overlays()
@@ -2257,7 +2407,7 @@ class StudyQueuePage(QWidget):
     def tick(self):
         if self.timer_running:
             self.timer_seconds += 1
-            self.timer_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
+            self.timer_tile.time_lbl.setText(f"{self.timer_seconds//60:02d}:{self.timer_seconds%60:02d}")
         if self.active_unit:
             page = int(self.pdf.view_state().get("page", self._queue_last_pdf_page or 1))
             if page != self._queue_last_pdf_page:
@@ -2266,16 +2416,22 @@ class StudyQueuePage(QWidget):
                 self._refresh_queue_doc_progress(page)
                 self._sync_queue_pdf_overlays()
 
-    def toggle_timer(self):
-        self.timer_running = not self.timer_running
-        if self.timer_running and not self.started_at:
+    def start_timer(self):
+        self.timer_running = True
+        if not self.started_at:
             self.started_at = now_utc()
+        self.timer_tile.set_running(True)
+
+    def pause_timer(self):
+        self.timer_running = False
+        self.timer_tile.set_running(False)
 
     def reset_timer(self):
         self.timer_seconds = 0
         self.started_at = None
         self.timer_running = False
-        self.timer_lbl.setText("00:00")
+        self.timer_tile.time_lbl.setText("00:00")
+        self.timer_tile.set_running(False)
         if self.active_unit and self.active_unit.unit_id in self.unit_drafts:
             self.unit_drafts[self.active_unit.unit_id]["timer_seconds"] = 0
             self.unit_drafts[self.active_unit.unit_id]["timer_running"] = False
@@ -2292,8 +2448,8 @@ class StudyQueuePage(QWidget):
             "ended_at": iso_utc(now),
             "elapsed_seconds": self.timer_seconds,
             "rating": rating,
-            "pre_note": self.pre.toPlainText(),
-            "post_note": self.post.toPlainText(),
+            "pre_note": self.pre_note_text,
+            "post_note": self.post_note_text,
             "interval_days": res.interval_days,
             "next_review_at": res.next_review_at,
         }
@@ -2309,7 +2465,11 @@ class StudyQueuePage(QWidget):
         }
         self.review_repo.record_review(self.active_unit.unit_id, payload, unit_stats)
         self.unit_drafts.pop(self.active_unit.unit_id, None)
-        self.reset_timer(); self.pre.clear(); self.post.clear(); self.refresh()
+        self.reset_timer()
+        self.pre_note_text = ""
+        self.post_note_text = ""
+        self._refresh_note_previews()
+        self.refresh()
 
     def open_history(self):
         if not self.active_unit:
@@ -2317,6 +2477,37 @@ class StudyQueuePage(QWidget):
         events = self.review_repo.events_for_unit(self.active_unit.unit_id)
         dlg = ReviewHistoryDialog(events, self.review_repo, self)
         dlg.exec()
+
+    def _refresh_note_previews(self) -> None:
+        pre = (self.pre_note_text or "").strip()
+        post = (self.post_note_text or "").strip()
+        pre_label = "Edit Pre-recall Note ✓" if pre else "Edit Pre-recall Note"
+        post_label = "Edit Post-recall Note ✓" if post else "Edit Post-recall Note"
+        self.pre_note_btn.setText(pre_label)
+        self.post_note_btn.setText(post_label)
+        self.pre_note_btn.setToolTip(pre[:220] if pre else "No pre-recall note")
+        self.post_note_btn.setToolTip(post[:220] if post else "No post-recall note")
+
+    def edit_pre_note(self) -> None:
+        dlg = RecallNoteDialog("Pre-recall Note", self.pre_note_text, self)
+        if dlg.exec():
+            self.pre_note_text = dlg.value()
+            self._refresh_note_previews()
+
+    def edit_post_note(self) -> None:
+        dlg = RecallNoteDialog("Post-recall Note", self.post_note_text, self)
+        if dlg.exec():
+            self.post_note_text = dlg.value()
+            self._refresh_note_previews()
+
+    def _refresh_queue_history_panel(self) -> None:
+        self.review_history_list.clear()
+        if not self.active_unit:
+            return
+        events = self.review_repo.events_for_unit(self.active_unit.unit_id)[:8]
+        for ev in events:
+            text = f"• {ev['ended_at']} · {ev['rating']} · {ev['elapsed_seconds']}s"
+            self.review_history_list.addItem(text)
 
 
 class SettingsPage(QWidget):
