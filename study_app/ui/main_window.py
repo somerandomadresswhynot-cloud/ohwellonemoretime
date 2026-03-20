@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QInputDialog,
@@ -1463,8 +1462,8 @@ class QueueTimerTile(QFrame):
         super().__init__(parent)
         self._phase = 0
         self.setObjectName("queueTimerTile")
-        self.setMinimumSize(220, 220)
-        self.setMaximumHeight(280)
+        self.setMinimumSize(190, 190)
+        self.setMaximumSize(220, 220)
         self.time_lbl = QLabel("00:00")
         self.time_lbl.setAlignment(Qt.AlignCenter)
         self.time_lbl.setStyleSheet("font-size:32px; font-weight:700; color:#ebf1ff;")
@@ -1472,10 +1471,10 @@ class QueueTimerTile(QFrame):
         self.pause_btn = QPushButton("Pause")
         self.reset_btn = QPushButton("Reset")
         for b in [self.start_btn, self.pause_btn, self.reset_btn]:
-            b.setMinimumHeight(28)
+            b.setMinimumHeight(24)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 14, 14, 14)
-        lay.setSpacing(8)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(6)
         lay.addWidget(QLabel("Timer"))
         lay.addWidget(self.time_lbl, 1)
         lay.addWidget(self.start_btn)
@@ -1577,10 +1576,6 @@ class StudyQueuePage(QWidget):
         self.post_note_btn = QPushButton("Edit Post-recall Note")
         self.pre_note_btn.clicked.connect(self.edit_pre_note)
         self.post_note_btn.clicked.connect(self.edit_post_note)
-        self.pre_note_preview = QLabel("No pre-recall note")
-        self.post_note_preview = QLabel("No post-recall note")
-        self.pre_note_preview.setStyleSheet("color:#9aa7b2;")
-        self.post_note_preview.setStyleSheet("color:#9aa7b2;")
         self.pdf = PersistentPdfViewer()
         self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
         self.pdf.set_area_created_handler(self._on_queue_area_rect_created)
@@ -1606,32 +1601,34 @@ class StudyQueuePage(QWidget):
         self.full_history_btn = QPushButton("View Full History")
         self.full_history_btn.clicked.connect(self.open_history)
 
-        ratings = QGridLayout()
-        ratings.setHorizontalSpacing(8)
-        ratings.setVerticalSpacing(8)
-        rating_pos = [("Easy", "easy", 0, 0), ("With Effort", "with_effort", 0, 1), ("Hard", "hard", 1, 0), ("Skip", "skip", 1, 1)]
+        ratings = QHBoxLayout()
+        ratings.setSpacing(8)
+        rating_pos = [("Easy", "easy"), ("With Effort", "with_effort"), ("Hard", "hard"), ("Skip", "skip")]
         rating_styles = {
             "easy": "background:#24503f; border:1px solid #2e7257; color:#d5f4e4;",
             "with_effort": "background:#564b2a; border:1px solid #86743a; color:#fff0cc;",
             "hard": "background:#5a3036; border:1px solid #8a4a54; color:#ffdbe0;",
             "skip": "background:#3a435d; border:1px solid #4c5877; color:#dbe4ff;",
         }
-        for label, r, row, col in rating_pos:
+        for label, r in rating_pos:
             b = QPushButton(label)
             b.clicked.connect(lambda _, rr=r: self.rate(rr))
-            b.setMinimumHeight(38)
+            b.setMinimumHeight(36)
+            b.setMinimumWidth(124)
             b.setStyleSheet(rating_styles.get(r, ""))
-            ratings.addWidget(b, row, col)
+            ratings.addWidget(b)
 
         content = QWidget()
         right = QVBoxLayout(content)
         right.addWidget(self.title)
-        right.addWidget(self.timer_tile, 0, Qt.AlignLeft)
-        right.addWidget(self.pre_note_btn)
-        right.addWidget(self.pre_note_preview)
-        right.addWidget(self.post_note_btn)
-        right.addWidget(self.post_note_preview)
-        right.addLayout(ratings)
+        control_row = QHBoxLayout()
+        control_row.setSpacing(10)
+        control_row.addWidget(self.timer_tile, 0, Qt.AlignLeft | Qt.AlignTop)
+        control_row.addWidget(self.pre_note_btn)
+        control_row.addWidget(self.post_note_btn)
+        control_row.addLayout(ratings)
+        control_row.addStretch()
+        right.addLayout(control_row)
 
         saved_h = self.settings_repo.get_ui_state("queue_pdf_height", "760")
         try:
@@ -2422,8 +2419,12 @@ class StudyQueuePage(QWidget):
     def _refresh_note_previews(self) -> None:
         pre = (self.pre_note_text or "").strip()
         post = (self.post_note_text or "").strip()
-        self.pre_note_preview.setText(pre[:96] + ("…" if len(pre) > 96 else "") if pre else "No pre-recall note")
-        self.post_note_preview.setText(post[:96] + ("…" if len(post) > 96 else "") if post else "No post-recall note")
+        pre_label = "Edit Pre-recall Note ✓" if pre else "Edit Pre-recall Note"
+        post_label = "Edit Post-recall Note ✓" if post else "Edit Post-recall Note"
+        self.pre_note_btn.setText(pre_label)
+        self.post_note_btn.setText(post_label)
+        self.pre_note_btn.setToolTip(pre[:220] if pre else "No pre-recall note")
+        self.post_note_btn.setToolTip(post[:220] if post else "No post-recall note")
 
     def edit_pre_note(self) -> None:
         dlg = RecallNoteDialog("Pre-recall Note", self.pre_note_text, self)
