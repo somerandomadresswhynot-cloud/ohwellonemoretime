@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QInputDialog,
@@ -1467,19 +1468,24 @@ class QueueTimerTile(QFrame):
         self.time_lbl = QLabel("00:00")
         self.time_lbl.setAlignment(Qt.AlignCenter)
         self.time_lbl.setStyleSheet("font-size:32px; font-weight:700; color:#ebf1ff;")
-        self.start_btn = QPushButton("Start")
-        self.pause_btn = QPushButton("Pause")
-        self.reset_btn = QPushButton("Reset")
+        self.start_btn = QPushButton("▶")
+        self.pause_btn = QPushButton("⏸")
+        self.reset_btn = QPushButton("↺")
         for b in [self.start_btn, self.pause_btn, self.reset_btn]:
-            b.setMinimumHeight(24)
+            b.setFixedSize(30, 30)
+            b.setToolTip({"▶": "Start", "⏸": "Pause", "↺": "Reset"}[b.text()])
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(6)
         lay.addWidget(QLabel("Timer"))
         lay.addWidget(self.time_lbl, 1)
-        lay.addWidget(self.start_btn)
-        lay.addWidget(self.pause_btn)
-        lay.addWidget(self.reset_btn)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.pause_btn)
+        btn_row.addWidget(self.reset_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
         self._fx = QTimer(self)
         self._fx.timeout.connect(self._tick_fx)
         self._apply_glow(0.0)
@@ -1494,10 +1500,10 @@ class QueueTimerTile(QFrame):
         border = int(85 + strength * 35)
         self.setStyleSheet(
             f"#queueTimerTile {{"
-            f"background:#121b33;"
+            f"background:rgba(18,27,51,{205 + min(50, alpha)});"
             f"border:1px solid rgba(110,140,200,{border});"
             f"border-radius:10px;"
-            f"box-shadow:0 0 22px rgba(94,146,220,{alpha});"
+            f"padding:1px;"
             f"}}"
         )
 
@@ -1587,6 +1593,7 @@ class StudyQueuePage(QWidget):
         self.queue_outline_tree.setHeaderLabels(["Reading Context"])
         self.queue_outline_tree.setMaximumWidth(280)
         self.queue_outline_tree.setMinimumWidth(220)
+        self.queue_outline_tree.setMaximumHeight(430)
         _enable_smooth_scroll(self.queue_outline_tree)
         self.queue_outline_tree.itemClicked.connect(self._on_queue_outline_click)
         self._queue_outline_items: dict[int, QTreeWidgetItem] = {}
@@ -1601,31 +1608,36 @@ class StudyQueuePage(QWidget):
         self.full_history_btn = QPushButton("View Full History")
         self.full_history_btn.clicked.connect(self.open_history)
 
-        ratings = QHBoxLayout()
+        ratings = QGridLayout()
         ratings.setSpacing(8)
-        rating_pos = [("Easy", "easy"), ("With Effort", "with_effort"), ("Hard", "hard"), ("Skip", "skip")]
+        rating_pos = [("Easy", "easy", 0, 0), ("With Effort", "with_effort", 0, 1), ("Hard", "hard", 1, 0), ("Skip", "skip", 1, 1)]
         rating_styles = {
             "easy": "background:#24503f; border:1px solid #2e7257; color:#d5f4e4;",
             "with_effort": "background:#564b2a; border:1px solid #86743a; color:#fff0cc;",
             "hard": "background:#5a3036; border:1px solid #8a4a54; color:#ffdbe0;",
             "skip": "background:#3a435d; border:1px solid #4c5877; color:#dbe4ff;",
         }
-        for label, r in rating_pos:
+        for label, r, row, col in rating_pos:
             b = QPushButton(label)
             b.clicked.connect(lambda _, rr=r: self.rate(rr))
             b.setMinimumHeight(36)
-            b.setMinimumWidth(124)
+            b.setMinimumWidth(132)
             b.setStyleSheet(rating_styles.get(r, ""))
-            ratings.addWidget(b)
+            ratings.addWidget(b, row, col)
 
         content = QWidget()
         right = QVBoxLayout(content)
         right.addWidget(self.title)
         control_row = QHBoxLayout()
-        control_row.setSpacing(10)
+        control_row.setSpacing(18)
         control_row.addWidget(self.timer_tile, 0, Qt.AlignLeft | Qt.AlignTop)
-        control_row.addWidget(self.pre_note_btn)
-        control_row.addWidget(self.post_note_btn)
+        notes_col = QVBoxLayout()
+        notes_col.setSpacing(10)
+        notes_col.addWidget(self.pre_note_btn)
+        notes_col.addWidget(self.post_note_btn)
+        notes_col.addStretch()
+        control_row.addLayout(notes_col)
+        control_row.addSpacing(8)
         control_row.addLayout(ratings)
         control_row.addStretch()
         right.addLayout(control_row)
@@ -1676,10 +1688,11 @@ class StudyQueuePage(QWidget):
         queue_outline_layout = QVBoxLayout(queue_outline_column)
         queue_outline_layout.setContentsMargins(0, 0, 0, 0)
         queue_outline_layout.setSpacing(8)
-        queue_outline_layout.addWidget(self.queue_outline_tree, 1)
+        queue_outline_layout.addWidget(self.queue_outline_tree)
         queue_outline_layout.addWidget(QLabel("Review History"))
         queue_outline_layout.addWidget(self.review_history_list)
         queue_outline_layout.addWidget(self.full_history_btn)
+        queue_outline_layout.addStretch()
 
         queue_pdf_row = QHBoxLayout()
         queue_pdf_row.addWidget(queue_outline_column)
