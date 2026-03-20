@@ -143,10 +143,12 @@ class PersistentPdfViewer(QWidget):
         self._highlight_hit_handler = None
         self._overlay = None
         self._overlay_highlights: list[dict] = []
+        self._viewport_host = None
 
         root = QVBoxLayout(self)
         if QPdfDocument and QPdfView:
             viewport_host = QWidget(self)
+            self._viewport_host = viewport_host
             viewport_layout = QVBoxLayout(viewport_host)
             viewport_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -459,28 +461,33 @@ class PersistentPdfViewer(QWidget):
         if not self._view:
             return
         if self._fullscreen_host is None:
-            self._view_original_parent = self._view.parentWidget()
+            host_widget = self._viewport_host or self._view
+            self._view_original_parent = host_widget.parentWidget()
             self._view_original_layout = self.layout()
             if self._view_original_layout:
-                self._view_original_layout.removeWidget(self._view)
+                self._view_original_layout.removeWidget(host_widget)
             self._fullscreen_host = _ViewerFullscreenHost(self.toggle_fullscreen)
             self._fullscreen_host.setWindowTitle("PDF Viewer")
             self._fullscreen_host.setWindowFlag(Qt.Window)
             lay = QVBoxLayout(self._fullscreen_host)
             lay.setContentsMargins(0, 0, 0, 0)
-            lay.addWidget(self._view)
+            lay.addWidget(host_widget)
             self._fullscreen_host.showFullScreen()
             if hasattr(self, "fullscreen_btn"):
                 self.fullscreen_btn.setText("Exit Viewer Full Screen")
         else:
             host = self._fullscreen_host
-            host.layout().removeWidget(self._view)
+            host_widget = self._viewport_host or self._view
+            host.layout().removeWidget(host_widget)
             if self._view_original_layout:
-                self._view_original_layout.insertWidget(0, self._view)
-            self._view.setParent(self._view_original_parent)
+                self._view_original_layout.insertWidget(0, host_widget)
+            host_widget.setParent(self._view_original_parent)
             host.close()
             host.deleteLater()
             self._fullscreen_host = None
+            if self._overlay:
+                self._overlay.resize(self._view.viewport().size())
+                self._overlay.raise_()
             if hasattr(self, "fullscreen_btn"):
                 self.fullscreen_btn.setText("Viewer Full Screen")
 
