@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush, QCursor, QPainter, QPen, QLinearGradient
@@ -2606,62 +2606,6 @@ class SettingsPage(QWidget):
         return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
 
-class WeeklyBarsWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._points: list[tuple[str, float]] = []
-        self._average = 0.0
-        self.setMinimumHeight(190)
-
-    def set_points(self, points: list[tuple[str, float]]) -> None:
-        self._points = points
-        vals = [max(0.0, float(v)) for _, v in points]
-        self._average = (sum(vals) / len(vals)) if vals else 0.0
-        self.update()
-
-    def paintEvent(self, _event) -> None:
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-
-        outer = self.rect().adjusted(1, 1, -1, -1)
-        p.setPen(QPen(QColor("#28506a"), 1))
-        p.setBrush(QColor("#042738"))
-        p.drawRoundedRect(outer, 10, 10)
-        if not self._points:
-            return
-
-        content = outer.adjusted(24, 16, -18, -30)
-        max_v = max([v for _, v in self._points] + [1.0])
-        bar_space = max(8, content.width() // max(1, len(self._points)))
-        bar_w = max(12, min(34, int(bar_space * 0.62)))
-
-        avg_y = int(content.bottom() - (self._average / max_v) * content.height())
-        p.setPen(QPen(QColor("#53b4ff"), 1, Qt.DashLine))
-        p.drawLine(content.left(), avg_y, content.right(), avg_y)
-        p.setPen(QColor("#8acfff"))
-        p.drawText(content.left(), max(content.top() + 10, avg_y - 4), f"Avg {self._average:.1f}")
-
-        for idx, (label, value) in enumerate(self._points):
-            x = int(content.left() + idx * bar_space + (bar_space - bar_w) / 2)
-            h = int((max(0.0, value) / max_v) * content.height())
-            y = content.bottom() - h
-            rect = outer.adjusted(0, 0, 0, 0)
-            bar_rect = rect.adjusted(x - outer.left(), y - outer.top(), -(outer.width() - (x - outer.left()) - bar_w), -(outer.height() - (y - outer.top()) - h))
-            grad = QLinearGradient(bar_rect.topLeft(), bar_rect.bottomLeft())
-            grad.setColorAt(0.0, QColor("#6a5cff"))
-            grad.setColorAt(1.0, QColor("#4d7dff"))
-            p.setPen(Qt.NoPen)
-            p.setBrush(grad)
-            p.drawRoundedRect(bar_rect, 4, 4)
-
-            p.setPen(QColor("#9eb7c7"))
-            p.drawText(bar_rect.left() - 8, content.bottom() + 16, bar_w + 16, 14, Qt.AlignCenter, label)
-
-        p.setPen(QColor("#7591a3"))
-        p.drawText(content.right() - 42, content.top(), 40, 16, Qt.AlignRight, f"{int(round(max_v))}")
-        p.drawText(content.right() - 42, content.bottom() - 6, 40, 16, Qt.AlignRight, "0")
-
-
 class StatisticsPage(QWidget):
     def __init__(self, review_repo: ReviewRepo, settings_repo: SettingsRepo, source_repo: SourceRepo):
         super().__init__()
@@ -2670,35 +2614,57 @@ class StatisticsPage(QWidget):
         self.source_repo = source_repo
 
         root = QVBoxLayout(self)
-        root.setSpacing(12)
+        root.setSpacing(8)
 
-        top = QHBoxLayout()
-        self.streak_card = QFrame()
-        self.streak_card.setObjectName("statsCard")
-        self.streak_card.setStyleSheet("#statsCard { background:#053448; border:1px solid #1f5c78; border-radius:10px; }")
-        streak_l = QVBoxLayout(self.streak_card)
-        self.streak_title = QLabel("Don't lose your streak!")
-        self.streak_title.setStyleSheet("font-size:34px; font-weight:700; color:#ecf8ff;")
-        self.streak_sub = QLabel("Study a few units to keep your streak alive.")
-        self.streak_sub.setStyleSheet("font-size:18px; color:#cbe7f8;")
-        self.weekly_bars = WeeklyBarsWidget()
-        streak_l.addWidget(self.streak_title)
-        streak_l.addWidget(self.streak_sub)
-        streak_l.addWidget(self.weekly_bars, 1)
+        headline = QLabel("Statistics")
+        root.addWidget(headline)
 
-        self.weekly_card = QFrame()
-        self.weekly_card.setObjectName("statsCard")
-        self.weekly_card.setStyleSheet("#statsCard { background:#053448; border:1px solid #1f5c78; border-radius:10px; }")
-        weekly_l = QVBoxLayout(self.weekly_card)
-        weekly_t = QLabel("Weekly Summary")
-        weekly_t.setStyleSheet("font-size:30px; font-weight:700; color:#ecf8ff;")
-        self.weekly_time = QLabel("Time studied: 0m")
-        self.weekly_units = QLabel("Units studied: 0")
-        self.weekly_time.setStyleSheet("font-size:18px;")
-        self.weekly_units.setStyleSheet("font-size:18px;")
-        weekly_l.addWidget(weekly_t)
-        weekly_l.addWidget(self.weekly_time)
-        weekly_l.addWidget(self.weekly_units)
+        top_panel = QFrame()
+        top_panel.setObjectName("panel")
+        top_grid = QGridLayout(top_panel)
+        top_grid.setContentsMargins(8, 8, 8, 8)
+        top_grid.setHorizontalSpacing(14)
+        top_grid.setVerticalSpacing(6)
+
+        self.metric_labels: dict[str, QLabel] = {}
+        metric_rows = [
+            ("Time studied (7d)", "time_studied"),
+            ("Cards/units studied (7d)", "units_studied"),
+            ("Daily goal", "daily_goal"),
+            ("Current streak", "current_streak"),
+            ("Due now", "due_now"),
+            ("Avg retention (learned)", "avg_retention"),
+            ("Low retention (learned)", "low_retention"),
+            ("Learned units", "learned_units"),
+        ]
+        for idx, (label, key) in enumerate(metric_rows):
+            row = idx // 4
+            col = (idx % 4) * 2
+            top_grid.addWidget(QLabel(label), row, col)
+            value = QLabel("—")
+            top_grid.addWidget(value, row, col + 1)
+            self.metric_labels[key] = value
+        root.addWidget(top_panel)
+
+        mid = QHBoxLayout()
+
+        trend_panel = QFrame()
+        trend_panel.setObjectName("panel")
+        trend_l = QVBoxLayout(trend_panel)
+        trend_l.setContentsMargins(8, 8, 8, 8)
+        trend_l.addWidget(QLabel("Last 7 days"))
+        self.weekly_trend = QTreeWidget()
+        self.weekly_trend.setHeaderLabels(["Day", "Reviews", "Minutes"])
+        _enable_smooth_scroll(self.weekly_trend)
+        self.weekly_trend.setMaximumHeight(210)
+        trend_l.addWidget(self.weekly_trend)
+        mid.addWidget(trend_panel, 2)
+
+        perf_panel = QFrame()
+        perf_panel.setObjectName("panel")
+        perf_l = QVBoxLayout(perf_panel)
+        perf_l.setContentsMargins(8, 8, 8, 8)
+        perf_l.addWidget(QLabel("Performance (7d)"))
         self.rating_bars: dict[str, QProgressBar] = {}
         self.rating_labels: dict[str, QLabel] = {}
         for key, label in [
@@ -2709,7 +2675,7 @@ class StatisticsPage(QWidget):
         ]:
             row = QHBoxLayout()
             name = QLabel(label)
-            name.setMinimumWidth(130)
+            name.setMinimumWidth(110)
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setValue(0)
@@ -2719,28 +2685,17 @@ class StatisticsPage(QWidget):
             row.addWidget(name)
             row.addWidget(bar, 1)
             row.addWidget(pct)
-            weekly_l.addLayout(row)
+            perf_l.addLayout(row)
             self.rating_bars[key] = bar
             self.rating_labels[key] = pct
-        weekly_l.addStretch()
-
-        top.addWidget(self.streak_card, 2)
-        top.addWidget(self.weekly_card, 1)
-        root.addLayout(top, 2)
-
-        bottom = QHBoxLayout()
-        self.daily_goal = QLabel("Daily Goal: 0 units")
-        self.current_streak = QLabel("Current Streak: 0 days")
-        self.due_now = QLabel("Due now: 0 units")
-        self.avg_retention = QLabel("Avg retention (learned): n/a")
-        for w in (self.daily_goal, self.current_streak, self.due_now, self.avg_retention):
-            w.setStyleSheet("background:#0a4b61; border:1px solid #226b86; border-radius:8px; padding:10px; font-size:16px;")
-            bottom.addWidget(w, 1)
-        root.addLayout(bottom)
+        perf_l.addStretch()
+        mid.addWidget(perf_panel, 1)
+        root.addLayout(mid)
 
         self.sources_table = QTreeWidget()
         self.sources_table.setHeaderLabels(["Source", "Units", "Learned", "Due", "Avg rating", "Avg time", "Last review"])
         _enable_smooth_scroll(self.sources_table)
+        root.addWidget(QLabel("By Source"))
         root.addWidget(self.sources_table, 1)
 
         self.refresh()
@@ -2778,6 +2733,7 @@ class StatisticsPage(QWidget):
 
         seven_days: list[str] = [(now - timedelta(days=i)).date().isoformat() for i in range(6, -1, -1)]
         day_counts = {d: 0 for d in seven_days}
+        day_seconds = {d: 0 for d in seven_days}
         week_seconds = 0
         week_rows: list[dict] = []
         active_days: set[str] = set()
@@ -2789,21 +2745,17 @@ class StatisticsPage(QWidget):
             day_key = ended_dt.date().isoformat()
             if day_key in day_counts:
                 day_counts[day_key] += 1
+                day_seconds[day_key] += int(r["elapsed_seconds"] or 0)
             active_days.add(day_key)
             if ended_dt >= parse_iso_to_utc(since_week):
                 week_seconds += int(r["elapsed_seconds"] or 0)
                 week_rows.append(r)
 
-        points = []
-        for d in seven_days:
-            day_dt = datetime.fromisoformat(d).replace(tzinfo=timezone.utc)
-            points.append((day_dt.strftime("%a"), float(day_counts.get(d, 0))))
-        self.weekly_bars.set_points(points)
-
         hrs = week_seconds // 3600
         mins = (week_seconds % 3600) // 60
-        self.weekly_time.setText(f"Time studied: {hrs}h {mins}m")
-        self.weekly_units.setText(f"Cards/units studied: {sum(self._rating_breakdown(week_rows).values())}")
+        studied_units = sum(self._rating_breakdown(week_rows).values())
+        self.metric_labels["time_studied"].setText(f"{hrs}h {mins}m")
+        self.metric_labels["units_studied"].setText(str(studied_units))
 
         rating_counts = self._rating_breakdown(week_rows)
         total = max(1, sum(rating_counts.values()))
@@ -2816,17 +2768,31 @@ class StatisticsPage(QWidget):
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
         avg_secs = self.review_repo.avg_elapsed_seconds_global() or float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         est_units = max(1, int((daily_minutes * 60) / max(1.0, float(avg_secs))))
-        self.daily_goal.setText(f"Daily Goal: {est_units} units")
-        self.current_streak.setText(f"Current Streak: {self._streak_days(active_days)} day(s)")
-        self.due_now.setText(f"Due now: {due_now} units")
+        self.metric_labels["daily_goal"].setText(f"{est_units} units")
+        self.metric_labels["current_streak"].setText(f"{self._streak_days(active_days)} day(s)")
+        self.metric_labels["due_now"].setText(f"{due_now} units")
 
         unit_rows = conn.execute("SELECT * FROM units").fetchall()
         learned_rows = [u for u in unit_rows if int(u["review_count"] or 0) > 0 and u["last_review_at"]]
         if learned_rows:
             avg_ret = sum(retention_estimate(u, now) for u in learned_rows) / len(learned_rows)
-            self.avg_retention.setText(f"Avg retention (learned): {avg_ret:.0%}")
+            low_ret = sum(1 for u in learned_rows if retention_estimate(u, now) < 0.45)
+            self.metric_labels["avg_retention"].setText(f"{avg_ret:.0%}")
+            self.metric_labels["low_retention"].setText(str(low_ret))
         else:
-            self.avg_retention.setText("Avg retention (learned): n/a")
+            self.metric_labels["avg_retention"].setText("n/a")
+            self.metric_labels["low_retention"].setText("0")
+        self.metric_labels["learned_units"].setText(str(len(learned_rows)))
+
+        self.weekly_trend.clear()
+        for d in seven_days:
+            day_dt = parse_iso_to_utc(f"{d}T00:00:00+00:00")
+            minutes = int(round(day_seconds[d] / 60.0))
+            self.weekly_trend.addTopLevelItem(QTreeWidgetItem([
+                day_dt.strftime("%a"),
+                str(day_counts[d]),
+                str(minutes),
+            ]))
 
         self.sources_table.clear()
         for row in self.review_repo.source_statistics(iso_utc(now)):
