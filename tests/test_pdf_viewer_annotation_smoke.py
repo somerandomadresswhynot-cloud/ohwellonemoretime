@@ -36,6 +36,16 @@ class PdfViewerAnnotationSmokeTests(unittest.TestCase):
         self.assertIn('location', state)
         self.assertGreaterEqual(int(state['page']), 1)
 
+        if getattr(viewer, '_view', None) is not None:
+            original_parent = getattr(viewer, '_viewport_host', viewer._view).parentWidget()
+            viewer.toggle_fullscreen()
+            app.processEvents()
+            self.assertIsNotNone(getattr(viewer, '_fullscreen_host', None))
+            viewer.toggle_fullscreen()
+            app.processEvents()
+            self.assertIsNone(getattr(viewer, '_fullscreen_host', None))
+            self.assertIs(getattr(viewer, '_viewport_host', viewer._view).parentWidget(), original_parent)
+
         viewer.deleteLater()
         app.processEvents()
 
