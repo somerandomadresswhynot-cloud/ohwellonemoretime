@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -1203,9 +1204,17 @@ class SourceWorkspace(QWidget):
         units = self.review_repo.source_units(self.source_id)
         now = now_utc()
         untouched = sum(1 for u in units if not u["last_review_at"])
-        low = sum(1 for u in units if retention_estimate(u, now) < 0.45)
-        avg = sum(retention_estimate(u, now) for u in units) / max(1, len(units))
-        self.insights.setText(f"Total units: {len(units)}\nUntouched: {untouched}\nLow retention: {low}\nAvg retention: {avg:.0%}")
+        learned = [u for u in units if int(u["review_count"] or 0) > 0 and u["last_review_at"]]
+        low = sum(1 for u in learned if retention_estimate(u, now) < 0.45)
+        avg = (sum(retention_estimate(u, now) for u in learned) / len(learned)) if learned else None
+        avg_text = f"{avg:.0%}" if avg is not None else "n/a"
+        self.insights.setText(
+            f"Total units: {len(units)}\n"
+            f"Untouched: {untouched}\n"
+            f"Learned: {len(learned)}\n"
+            f"Low retention (learned): {low}\n"
+            f"Avg retention (learned): {avg_text}"
+        )
 
     def add_highlight_from_clipboard(self):
         cb = QApplication.clipboard()
@@ -2597,6 +2606,207 @@ class SettingsPage(QWidget):
         return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
 
+class StatisticsPage(QWidget):
+    def __init__(self, review_repo: ReviewRepo, settings_repo: SettingsRepo, source_repo: SourceRepo):
+        super().__init__()
+        self.review_repo = review_repo
+        self.settings_repo = settings_repo
+        self.source_repo = source_repo
+
+        root = QVBoxLayout(self)
+        root.setSpacing(8)
+
+        headline = QLabel("Statistics")
+        root.addWidget(headline)
+
+        top_panel = QFrame()
+        top_panel.setObjectName("panel")
+        top_grid = QGridLayout(top_panel)
+        top_grid.setContentsMargins(8, 8, 8, 8)
+        top_grid.setHorizontalSpacing(14)
+        top_grid.setVerticalSpacing(6)
+
+        self.metric_labels: dict[str, QLabel] = {}
+        metric_rows = [
+            ("Time studied (7d)", "time_studied"),
+            ("Cards/units studied (7d)", "units_studied"),
+            ("Daily goal", "daily_goal"),
+            ("Current streak", "current_streak"),
+            ("Due now", "due_now"),
+            ("Avg retention (learned)", "avg_retention"),
+            ("Low retention (learned)", "low_retention"),
+            ("Learned units", "learned_units"),
+        ]
+        for idx, (label, key) in enumerate(metric_rows):
+            row = idx // 4
+            col = (idx % 4) * 2
+            top_grid.addWidget(QLabel(label), row, col)
+            value = QLabel("—")
+            top_grid.addWidget(value, row, col + 1)
+            self.metric_labels[key] = value
+        root.addWidget(top_panel)
+
+        mid = QHBoxLayout()
+
+        trend_panel = QFrame()
+        trend_panel.setObjectName("panel")
+        trend_l = QVBoxLayout(trend_panel)
+        trend_l.setContentsMargins(8, 8, 8, 8)
+        trend_l.addWidget(QLabel("Last 7 days"))
+        self.weekly_trend = QTreeWidget()
+        self.weekly_trend.setHeaderLabels(["Day", "Reviews", "Minutes"])
+        _enable_smooth_scroll(self.weekly_trend)
+        self.weekly_trend.setMaximumHeight(210)
+        trend_l.addWidget(self.weekly_trend)
+        mid.addWidget(trend_panel, 2)
+
+        perf_panel = QFrame()
+        perf_panel.setObjectName("panel")
+        perf_l = QVBoxLayout(perf_panel)
+        perf_l.setContentsMargins(8, 8, 8, 8)
+        perf_l.addWidget(QLabel("Performance (7d)"))
+        self.rating_bars: dict[str, QProgressBar] = {}
+        self.rating_labels: dict[str, QLabel] = {}
+        for key, label in [
+            ("skip", "Skip"),
+            ("hard", "Hard"),
+            ("with_effort", "Partially Recalled"),
+            ("easy", "Easily Recalled"),
+        ]:
+            row = QHBoxLayout()
+            name = QLabel(label)
+            name.setMinimumWidth(110)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            pct = QLabel("0%")
+            pct.setMinimumWidth(38)
+            row.addWidget(name)
+            row.addWidget(bar, 1)
+            row.addWidget(pct)
+            perf_l.addLayout(row)
+            self.rating_bars[key] = bar
+            self.rating_labels[key] = pct
+        perf_l.addStretch()
+        mid.addWidget(perf_panel, 1)
+        root.addLayout(mid)
+
+        self.sources_table = QTreeWidget()
+        self.sources_table.setHeaderLabels(["Source", "Units", "Learned", "Due", "Avg rating", "Avg time", "Last review"])
+        _enable_smooth_scroll(self.sources_table)
+        root.addWidget(QLabel("By Source"))
+        root.addWidget(self.sources_table, 1)
+
+        self.refresh()
+
+    def _rating_breakdown(self, rows: list[dict]) -> dict[str, int]:
+        counts = {"easy": 0, "with_effort": 0, "hard": 0, "skip": 0}
+        for r in rows:
+            rating = str(r["rating"] or "")
+            if rating in counts:
+                counts[rating] += 1
+        return counts
+
+    def _streak_days(self, day_hits: set[str]) -> int:
+        streak = 0
+        cursor = now_utc().date()
+        while True:
+            key = cursor.isoformat()
+            if key in day_hits:
+                streak += 1
+                cursor = cursor - timedelta(days=1)
+                continue
+            break
+        return streak
+
+    def refresh(self) -> None:
+        now = now_utc()
+        conn = self.review_repo.db.conn
+        since_week = iso_utc(now - timedelta(days=6))
+        since_month = iso_utc(now - timedelta(days=31))
+
+        recent_rows = conn.execute(
+            "SELECT ended_at,elapsed_seconds,rating FROM review_events WHERE deleted_at IS NULL AND ended_at>=? ORDER BY ended_at ASC",
+            (since_month,),
+        ).fetchall()
+
+        seven_days: list[str] = [(now - timedelta(days=i)).date().isoformat() for i in range(6, -1, -1)]
+        day_counts = {d: 0 for d in seven_days}
+        day_seconds = {d: 0 for d in seven_days}
+        week_seconds = 0
+        week_rows: list[dict] = []
+        active_days: set[str] = set()
+        for r in recent_rows:
+            try:
+                ended_dt = parse_iso_to_utc(str(r["ended_at"]))
+            except Exception:
+                continue
+            day_key = ended_dt.date().isoformat()
+            if day_key in day_counts:
+                day_counts[day_key] += 1
+                day_seconds[day_key] += int(r["elapsed_seconds"] or 0)
+            active_days.add(day_key)
+            if ended_dt >= parse_iso_to_utc(since_week):
+                week_seconds += int(r["elapsed_seconds"] or 0)
+                week_rows.append(r)
+
+        hrs = week_seconds // 3600
+        mins = (week_seconds % 3600) // 60
+        studied_units = sum(self._rating_breakdown(week_rows).values())
+        self.metric_labels["time_studied"].setText(f"{hrs}h {mins}m")
+        self.metric_labels["units_studied"].setText(str(studied_units))
+
+        rating_counts = self._rating_breakdown(week_rows)
+        total = max(1, sum(rating_counts.values()))
+        for key, cnt in rating_counts.items():
+            pct = int(round((cnt / total) * 100))
+            self.rating_bars[key].setValue(pct)
+            self.rating_labels[key].setText(f"{pct}%")
+
+        due_now = len(self.review_repo.due_units(iso_utc(now)))
+        daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        avg_secs = self.review_repo.avg_elapsed_seconds_global() or float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        est_units = max(1, int((daily_minutes * 60) / max(1.0, float(avg_secs))))
+        self.metric_labels["daily_goal"].setText(f"{est_units} units")
+        self.metric_labels["current_streak"].setText(f"{self._streak_days(active_days)} day(s)")
+        self.metric_labels["due_now"].setText(f"{due_now} units")
+
+        unit_rows = conn.execute("SELECT * FROM units").fetchall()
+        learned_rows = [u for u in unit_rows if int(u["review_count"] or 0) > 0 and u["last_review_at"]]
+        if learned_rows:
+            avg_ret = sum(retention_estimate(u, now) for u in learned_rows) / len(learned_rows)
+            low_ret = sum(1 for u in learned_rows if retention_estimate(u, now) < 0.45)
+            self.metric_labels["avg_retention"].setText(f"{avg_ret:.0%}")
+            self.metric_labels["low_retention"].setText(str(low_ret))
+        else:
+            self.metric_labels["avg_retention"].setText("n/a")
+            self.metric_labels["low_retention"].setText("0")
+        self.metric_labels["learned_units"].setText(str(len(learned_rows)))
+
+        self.weekly_trend.clear()
+        for d in seven_days:
+            day_dt = parse_iso_to_utc(f"{d}T00:00:00+00:00")
+            minutes = int(round(day_seconds[d] / 60.0))
+            self.weekly_trend.addTopLevelItem(QTreeWidgetItem([
+                day_dt.strftime("%a"),
+                str(day_counts[d]),
+                str(minutes),
+            ]))
+
+        self.sources_table.clear()
+        for row in self.review_repo.source_statistics(iso_utc(now)):
+            item = QTreeWidgetItem([
+                str(row["source_title"] or ""),
+                str(int(row["total_units"] or 0)),
+                str(int(row["learned_units"] or 0)),
+                str(int(row["due_units"] or 0)),
+                f"{float(row['avg_rating_learned'] or 0):.2f}",
+                f"{(float(row['avg_elapsed_seconds'] or 0) / 60.0):.1f}m",
+                str(row["last_review_at"] or "—"),
+            ])
+            self.sources_table.addTopLevelItem(item)
+
 class MainWindow(QMainWindow):
     def __init__(self, source_repo: SourceRepo, outline_repo: OutlineRepo, review_repo: ReviewRepo, settings_repo: SettingsRepo, highlight_repo: HighlightRepo, pdf_service: PdfService):
         super().__init__()
@@ -2617,8 +2827,10 @@ class MainWindow(QMainWindow):
         self.queue = StudyQueuePage(source_repo, review_repo, settings_repo, highlight_repo, pdf_service)
         self.sources = SourcesPage(source_repo, outline_repo, review_repo, highlight_repo, settings_repo, pdf_service)
         self.settings = SettingsPage(settings_repo, review_repo)
+        self.stats = StatisticsPage(review_repo, settings_repo, source_repo)
         tabs.addTab(self.queue, "Study Queue")
         tabs.addTab(self.sources, "Sources")
+        tabs.addTab(self.stats, "Statistics")
         tabs.addTab(self.settings, "Settings")
         lay.addWidget(tabs)
 
@@ -2648,14 +2860,17 @@ class MainWindow(QMainWindow):
             self.queue.refresh()
             self._queue_dirty = False
         self.settings.refresh_summary()
+        self.stats.refresh()
 
     def _flush_debounced_updates(self):
         self._flush_now(force_queue=False)
 
     def _on_tab_changed(self, index: int) -> None:
-        if index != 0:
+        if index == 0:
+            if self._queue_sync_timer.isActive():
+                self._queue_sync_timer.stop()
+            if self._queue_dirty:
+                self._flush_now(force_queue=True)
             return
-        if self._queue_sync_timer.isActive():
-            self._queue_sync_timer.stop()
-        if self._queue_dirty:
-            self._flush_now(force_queue=True)
+        if index == 2:
+            self.stats.refresh()

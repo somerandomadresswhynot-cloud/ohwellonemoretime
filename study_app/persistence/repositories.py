@@ -282,6 +282,27 @@ class ReviewRepo:
         )
         self.db.conn.commit()
 
+    def source_statistics(self, now_iso: str):
+        return self.db.conn.execute(
+            """
+            SELECT
+                s.id AS source_id,
+                s.title AS source_title,
+                COUNT(u.id) AS total_units,
+                SUM(CASE WHEN u.review_count > 0 THEN 1 ELSE 0 END) AS learned_units,
+                SUM(CASE WHEN u.queue_enabled = 1 AND (u.next_review_at IS NULL OR u.next_review_at <= ?) THEN 1 ELSE 0 END) AS due_units,
+                COALESCE(AVG(CASE WHEN u.review_count > 0 THEN u.avg_rating END), 0) AS avg_rating_learned,
+                COALESCE(AVG(re.elapsed_seconds), 0) AS avg_elapsed_seconds,
+                MAX(re.ended_at) AS last_review_at
+            FROM sources s
+            LEFT JOIN units u ON u.source_id = s.id
+            LEFT JOIN review_events re ON re.unit_id = u.id AND re.deleted_at IS NULL
+            GROUP BY s.id, s.title
+            ORDER BY due_units DESC, total_units DESC, s.title ASC
+            """,
+            (now_iso,),
+        ).fetchall()
+
 
 class SettingsRepo:
     def __init__(self, db: Database):
