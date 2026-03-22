@@ -122,6 +122,8 @@ def main() -> int:
             "queue_enabled": queue_on,
             "source_active": source_on,
             "next_review_at": str(r["next_review_at"] or ""),
+            "last_review_at": str(r["last_review_at"] or ""),
+            "last_event_at": str(r["last_event_at"] or ""),
             "in_snapshot": in_snapshot,
         }
 
@@ -146,6 +148,8 @@ def main() -> int:
             if "due_in" in item:
                 extra += f" | due_in={item['due_in']}"
             extra += f" | next={item['next_review_at'] or 'NULL'} | q={int(item['queue_enabled'])} src={int(item['source_active'])}"
+            extra += f" | last_review={item['last_review_at'] or 'NULL'}"
+            extra += f" | last_event={item['last_event_at'] or 'NULL'}"
             extra += f" | in_snapshot={item['in_snapshot']}"
             print(f"  {i:02d}. [u#{item['id']}] {item['source']} :: {item['title']}{extra}")
         if len(items) > max_rows:
