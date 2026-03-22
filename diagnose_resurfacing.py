@@ -35,9 +35,22 @@ def fmt_timedelta_days(days: float) -> str:
 
 
 def main() -> int:
-    db_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("study_app.db")
+    if len(sys.argv) > 1:
+        db_path = Path(sys.argv[1]).expanduser().resolve()
+        candidates = [db_path]
+    else:
+        script_dir = Path(__file__).resolve().parent
+        candidates = list(dict.fromkeys([
+            Path.cwd() / "study_app.db",
+            script_dir / "study_app.db",
+        ]))
+        db_path = next((p.resolve() for p in candidates if p.exists()), candidates[0].resolve())
+
     if not db_path.exists():
-        print(f"Database not found: {db_path}")
+        print("Database not found. Tried:")
+        for p in candidates:
+            print(f"  - {p}")
+        print("Tip: pass an explicit path, e.g. `python diagnose_resurfacing.py D:/GitHub/ohwellonemoretime/study_app.db`")
         return 1
 
     conn = sqlite3.connect(db_path)
