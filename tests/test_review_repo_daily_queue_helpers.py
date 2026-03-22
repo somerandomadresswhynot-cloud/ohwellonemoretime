@@ -50,15 +50,11 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
             'rating': 'easy',
             'pre_note': '',
             'post_note': '',
-            'interval_days': 1.0,
-            'next_review_at': now,
         }
         stats = {
             'last_review_at': now,
-            'next_review_at': now,
             'review_count': 1,
             'ease_factor': 2.5,
-            'interval_days': 1.0,
             'avg_rating': 5.0,
         }
         self.review_repo.record_review(unit_id, payload, stats)
@@ -81,13 +77,52 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
 
     def test_missed_due_items_resurface_later(self):
         unit_id = int(self.units[0]['id'])
+        payload = {
+            'started_at': "2026-03-20T10:00:00+00:00",
+            'ended_at': "2026-03-20T10:05:00+00:00",
+            'elapsed_seconds': 30,
+            'rating': 'with_effort',
+            'pre_note': '',
+            'post_note': '',
+        }
+        stats = {
+            'last_review_at': "2026-03-20T10:05:00+00:00",
+            'review_count': 1,
+            'ease_factor': 2.5,
+            'avg_rating': 3.0,
+        }
+        self.review_repo.record_review(unit_id, payload, stats)
         self.db.conn.execute(
             "UPDATE units SET next_review_at=? WHERE id=?",
-            ("2026-03-20T00:00:00+00:00", unit_id),
+            ("2099-01-01T00:00:00+00:00", unit_id),
         )
         self.db.conn.commit()
-        due = self.review_repo.due_units("2026-03-22T00:00:00+00:00")
+        due = self.review_repo.due_units("2026-03-23T12:00:00+00:00")
         self.assertIn(unit_id, {int(u.unit_id) for u in due})
+
+    def test_due_units_excludes_never_reviewed_units(self):
+        due = self.review_repo.due_units("2026-03-23T12:00:00+00:00")
+        self.assertEqual(due, [])
+
+    def test_new_units_returns_only_never_reviewed(self):
+        reviewed_id = int(self.units[0]['id'])
+        payload = {
+            'started_at': "2026-03-20T10:00:00+00:00",
+            'ended_at': "2026-03-20T10:05:00+00:00",
+            'elapsed_seconds': 30,
+            'rating': 'with_effort',
+            'pre_note': '',
+            'post_note': '',
+        }
+        stats = {
+            'last_review_at': "2026-03-20T10:05:00+00:00",
+            'review_count': 1,
+            'ease_factor': 2.5,
+            'avg_rating': 3.0,
+        }
+        self.review_repo.record_review(reviewed_id, payload, stats)
+        new_ids = {int(u.unit_id) for u in self.review_repo.new_units()}
+        self.assertNotIn(reviewed_id, new_ids)
 
 
 if __name__ == '__main__':

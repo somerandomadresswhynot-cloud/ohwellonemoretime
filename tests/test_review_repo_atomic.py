@@ -33,15 +33,11 @@ class ReviewRepoAtomicTests(unittest.TestCase):
             "rating": "with_effort",
             "pre_note": "before",
             "post_note": "after",
-            "interval_days": 2.5,
-            "next_review_at": "2026-01-03T10:05:00",
         }
         stats = {
             "last_review_at": "2026-01-01T10:05:00",
-            "next_review_at": "2026-01-03T10:05:00",
             "review_count": 1,
             "ease_factor": 2.4,
-            "interval_days": 2.5,
             "avg_rating": 3.0,
         }
 
@@ -51,7 +47,8 @@ class ReviewRepoAtomicTests(unittest.TestCase):
         refreshed = db.conn.execute("SELECT * FROM units WHERE id=?", (unit["id"],)).fetchone()
         self.assertIsNotNone(event)
         self.assertEqual(refreshed["review_count"], 1)
-        self.assertEqual(refreshed["next_review_at"], payload["next_review_at"])
+        self.assertEqual(event["interval_days"], 0.0)
+        self.assertEqual(event["next_review_at"], payload["ended_at"])
 
     def test_record_review_rolls_back_when_unit_update_fails(self):
         db, review_repo, unit = self._seed_unit()
@@ -72,15 +69,11 @@ class ReviewRepoAtomicTests(unittest.TestCase):
             "rating": "with_effort",
             "pre_note": "before",
             "post_note": "after",
-            "interval_days": 2.5,
-            "next_review_at": "2026-01-03T10:05:00",
         }
         stats = {
             "last_review_at": "2026-01-01T10:05:00",
-            "next_review_at": "2026-01-03T10:05:00",
             "review_count": 1,
             "ease_factor": 2.4,
-            "interval_days": 2.5,
             "avg_rating": 3.0,
         }
 
