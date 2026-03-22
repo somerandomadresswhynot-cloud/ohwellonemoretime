@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from study_app.domain.models import iso_utc, parse_iso_to_utc
 
@@ -51,8 +51,19 @@ def compute_next(unit_row, rating: str, now: datetime) -> ScheduleResult:
 
     ef = min(3.0, max(1.3, ef + (RATING_SCORE[rating] - 3) * 0.08))
     next_review = now + timedelta(days=interval)
+    next_review = _round_due_to_local_day_start_utc(next_review)
     retention = retention_estimate(unit_row, now)
     return ScheduleResult(interval_days=interval, next_review_at=iso_utc(next_review), ease_factor=ef, retention=retention)
+
+
+def _round_due_to_local_day_start_utc(dt: datetime, tzinfo=None) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if tzinfo is None:
+        tzinfo = datetime.now().astimezone().tzinfo or timezone.utc
+    local_dt = dt.astimezone(tzinfo)
+    local_midnight = datetime(local_dt.year, local_dt.month, local_dt.day, tzinfo=tzinfo)
+    return local_midnight.astimezone(timezone.utc)
 
 
 def retention_estimate(unit_row, now: datetime) -> float:
