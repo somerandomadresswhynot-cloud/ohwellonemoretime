@@ -1,12 +1,35 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from study_app.domain.models import Source, UnitView, utcnow_iso
+from study_app.domain.models import Source, UnitView, parse_iso_to_utc, utcnow_iso
 from study_app.persistence.database import Database
+
+
+def _derive_due_at_iso(last_review_at: str | None, interval_days: float | None) -> str | None:
+    if not last_review_at:
+        return None
+    try:
+        reviewed_at = parse_iso_to_utc(str(last_review_at))
+    except Exception:
+        return None
+    due_dt = reviewed_at + timedelta(days=max(0.0, float(interval_days or 0.0)))
+    return due_dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _is_due_now(last_review_at: str | None, interval_days: float | None, now_iso: str) -> bool:
+    if not last_review_at:
+        return True
+    try:
+        due_at = parse_iso_to_utc(str(last_review_at)) + timedelta(days=max(0.0, float(interval_days or 0.0)))
+        now = parse_iso_to_utc(str(now_iso))
+    except Exception:
+        return False
+    return due_at <= now
+
 
 
 class SourceRepo:
@@ -153,21 +176,43 @@ class ReviewRepo:
                 SELECT c.id, node_path.path || ' › ' || c.title
                 FROM outline_nodes c
                 JOIN node_path ON c.parent_id=node_path.node_id
+            ),
+            latest_events AS (
+                SELECT
+                    re.unit_id,
+                    re.ended_at,
+                    re.interval_days,
+                    ROW_NUMBER() OVER (PARTITION BY re.unit_id ORDER BY re.ended_at DESC, re.id DESC) AS rn
+                FROM review_events re
+                WHERE re.deleted_at IS NULL
             )
-            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path
+            SELECT
+                u.*,
+                s.title AS source_title,
+                COALESCE(node_path.path, u.title) AS hierarchy_path,
+                le.ended_at AS computed_last_review_at,
+                le.interval_days AS computed_interval_days
             FROM units u
             JOIN sources s ON s.id=u.source_id
             LEFT JOIN node_path ON node_path.node_id=u.node_id
-            WHERE s.is_active=1 AND u.queue_enabled=1 AND (u.next_review_at IS NULL OR u.next_review_at<=?)
-            ORDER BY COALESCE(u.next_review_at,'') ASC""",
-            (now_iso,),
+            LEFT JOIN latest_events le ON le.unit_id=u.id AND le.rn=1
+            WHERE s.is_active=1 AND u.queue_enabled=1
+            ORDER BY COALESCE(le.ended_at,'') ASC, u.id ASC""",
         ).fetchall()
-        return [UnitView(
-            unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
-            title=r["title"], hierarchy_path=r["hierarchy_path"],
-            start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
-            next_review_at=r["next_review_at"], last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
-        ) for r in rows]
+        out: list[UnitView] = []
+        for r in rows:
+            last_review_at = r["computed_last_review_at"]
+            interval_days = r["computed_interval_days"]
+            if not _is_due_now(last_review_at, interval_days, now_iso):
+                continue
+            out.append(UnitView(
+                unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
+                title=r["title"], hierarchy_path=r["hierarchy_path"],
+                start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
+                next_review_at=_derive_due_at_iso(last_review_at, interval_days),
+                last_review_at=last_review_at, review_count=r["review_count"], avg_rating=r["avg_rating"]
+            ))
+        return out
 
 
     def unit_views_by_ids(self, unit_ids: list[int]) -> list[UnitView]:
@@ -398,18 +443,38 @@ class ReviewRepo:
     def source_statistics(self, now_iso: str):
         return self.db.conn.execute(
             """
+            WITH latest_events AS (
+                SELECT
+                    re.unit_id,
+                    re.ended_at,
+                    re.interval_days,
+                    ROW_NUMBER() OVER (PARTITION BY re.unit_id ORDER BY re.ended_at DESC, re.id DESC) AS rn
+                FROM review_events re
+                WHERE re.deleted_at IS NULL
+            )
             SELECT
                 s.id AS source_id,
                 s.title AS source_title,
                 COUNT(u.id) AS total_units,
                 SUM(CASE WHEN u.review_count > 0 THEN 1 ELSE 0 END) AS learned_units,
-                SUM(CASE WHEN u.queue_enabled = 1 AND (u.next_review_at IS NULL OR u.next_review_at <= ?) THEN 1 ELSE 0 END) AS due_units,
+                SUM(
+                    CASE
+                        WHEN u.queue_enabled = 1
+                            AND (
+                                le.ended_at IS NULL
+                                OR (julianday(le.ended_at) + COALESCE(le.interval_days, 0.0)) <= julianday(?)
+                            )
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS due_units,
                 COALESCE(AVG(CASE WHEN u.review_count > 0 THEN u.avg_rating END), 0) AS avg_rating_learned,
                 COALESCE(AVG(re.elapsed_seconds), 0) AS avg_elapsed_seconds,
                 MAX(re.ended_at) AS last_review_at
             FROM sources s
             LEFT JOIN units u ON u.source_id = s.id
             LEFT JOIN review_events re ON re.unit_id = u.id AND re.deleted_at IS NULL
+            LEFT JOIN latest_events le ON le.unit_id = u.id AND le.rn = 1
             GROUP BY s.id, s.title
             ORDER BY due_units DESC, total_units DESC, s.title ASC
             """,
