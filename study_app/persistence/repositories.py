@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -144,6 +144,9 @@ class ReviewRepo:
         self.db = db
 
     def due_units(self, now_iso: str) -> list[UnitView]:
+        now_dt = datetime.fromisoformat(now_iso)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
         rows = self.db.conn.execute(
             """WITH RECURSIVE node_path(node_id, path) AS (
                 SELECT n.id, n.title
@@ -153,21 +156,52 @@ class ReviewRepo:
                 SELECT c.id, node_path.path || ' › ' || c.title
                 FROM outline_nodes c
                 JOIN node_path ON c.parent_id=node_path.node_id
+            ),
+            latest_event AS (
+                SELECT re.unit_id, re.next_review_at
+                FROM review_events re
+                JOIN (
+                    SELECT unit_id, MAX(ended_at) AS max_ended_at
+                    FROM review_events
+                    WHERE deleted_at IS NULL
+                    GROUP BY unit_id
+                ) last_re ON last_re.unit_id=re.unit_id AND last_re.max_ended_at=re.ended_at
+                WHERE re.deleted_at IS NULL
             )
-            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path
+            SELECT
+                u.*,
+                s.title AS source_title,
+                COALESCE(node_path.path, u.title) AS hierarchy_path,
+                latest_event.next_review_at AS event_next_review_at
             FROM units u
             JOIN sources s ON s.id=u.source_id
             LEFT JOIN node_path ON node_path.node_id=u.node_id
-            WHERE s.is_active=1 AND u.queue_enabled=1 AND (u.next_review_at IS NULL OR u.next_review_at<=?)
-            ORDER BY COALESCE(u.next_review_at,'') ASC""",
-            (now_iso,),
+            LEFT JOIN latest_event ON latest_event.unit_id=u.id
+            WHERE s.is_active=1 AND u.queue_enabled=1
+            ORDER BY COALESCE(latest_event.next_review_at, u.next_review_at, '') ASC""",
         ).fetchall()
+        due_rows: list = []
+        for r in rows:
+            effective_next_review_at = r["event_next_review_at"] or r["next_review_at"]
+            if not effective_next_review_at:
+                due_rows.append((r, effective_next_review_at))
+                continue
+            try:
+                due_dt = datetime.fromisoformat(effective_next_review_at)
+                if due_dt.tzinfo is None:
+                    due_dt = due_dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if due_dt <= now_dt:
+                due_rows.append((r, effective_next_review_at))
+
         return [UnitView(
             unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
             title=r["title"], hierarchy_path=r["hierarchy_path"],
             start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
-            next_review_at=r["next_review_at"], last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
-        ) for r in rows]
+            next_review_at=effective_next_review_at or r["next_review_at"],
+            last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
+        ) for r, effective_next_review_at in due_rows]
 
 
     def unit_views_by_ids(self, unit_ids: list[int]) -> list[UnitView]:
