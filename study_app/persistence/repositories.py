@@ -1,12 +1,54 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from collections import defaultdict
+from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
-from study_app.domain.models import Source, UnitView, utcnow_iso
+from study_app.domain.models import Source, UnitView, iso_utc, parse_iso_to_utc, utcnow_iso
 from study_app.persistence.database import Database
+from study_app.services.fsrs_scheduler import (
+    DEFAULT_FSRS_PARAMETERS,
+    FSRSGrade,
+    _coarse_unit_policy_interval,
+    _round_due_to_local_day_start_utc,
+    interval_for_target_retention,
+    replay_history_into_state,
+)
+
+
+def _derive_due_at_from_events(events: list[dict]) -> str | None:
+    if not events:
+        return None
+    try:
+        state = replay_history_into_state(events, DEFAULT_FSRS_PARAMETERS)
+    except Exception:
+        return None
+    if state is None:
+        return None
+    try:
+        raw_interval = interval_for_target_retention(state, 0.9, DEFAULT_FSRS_PARAMETERS)
+        prior_review_count = max(0, int(state.review_count) - 1)
+        grade = FSRSGrade(int(state.last_grade))
+        scheduled_interval = _coarse_unit_policy_interval(raw_interval, grade, prior_review_count=prior_review_count)
+        due_dt = state.last_review_at + timedelta(days=scheduled_interval)
+        due_dt = _round_due_to_local_day_start_utc(due_dt, None)
+    except Exception:
+        return None
+    return iso_utc(due_dt)
+
+
+def _is_due_now(due_at_iso: str | None, now_iso: str) -> bool:
+    if not due_at_iso:
+        return True
+    try:
+        due_at = parse_iso_to_utc(str(due_at_iso))
+        now = parse_iso_to_utc(str(now_iso))
+    except Exception:
+        return False
+    return due_at <= now
+
 
 
 class SourceRepo:
@@ -154,20 +196,51 @@ class ReviewRepo:
                 FROM outline_nodes c
                 JOIN node_path ON c.parent_id=node_path.node_id
             )
-            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path
+            SELECT
+                u.*,
+                s.title AS source_title,
+                COALESCE(node_path.path, u.title) AS hierarchy_path
             FROM units u
             JOIN sources s ON s.id=u.source_id
             LEFT JOIN node_path ON node_path.node_id=u.node_id
-            WHERE s.is_active=1 AND u.queue_enabled=1 AND (u.next_review_at IS NULL OR u.next_review_at<=?)
-            ORDER BY COALESCE(u.next_review_at,'') ASC""",
-            (now_iso,),
+            WHERE s.is_active=1 AND u.queue_enabled=1
+            ORDER BY u.id ASC""",
         ).fetchall()
-        return [UnitView(
-            unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
-            title=r["title"], hierarchy_path=r["hierarchy_path"],
-            start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
-            next_review_at=r["next_review_at"], last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
-        ) for r in rows]
+        unit_ids = [int(r["id"]) for r in rows]
+        events_by_unit: dict[int, list[dict]] = defaultdict(list)
+        if unit_ids:
+            placeholders = ",".join("?" for _ in unit_ids)
+            event_rows = self.db.conn.execute(
+                f"""SELECT unit_id, ended_at, rating
+                FROM review_events
+                WHERE deleted_at IS NULL AND unit_id IN ({placeholders})
+                ORDER BY unit_id ASC, ended_at ASC, id ASC""",
+                unit_ids,
+            ).fetchall()
+            for ev in event_rows:
+                events_by_unit[int(ev["unit_id"])].append({
+                    "ended_at": ev["ended_at"],
+                    "rating": ev["rating"],
+                })
+        out: list[UnitView] = []
+        for r in rows:
+            unit_id = int(r["id"])
+            unit_events = events_by_unit.get(unit_id, [])
+            if not unit_events:
+                continue
+            last_review_at = unit_events[-1]["ended_at"] if unit_events else None
+            due_at_iso = _derive_due_at_from_events(unit_events)
+            if not _is_due_now(due_at_iso, now_iso):
+                continue
+            out.append(UnitView(
+                unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
+                title=r["title"], hierarchy_path=r["hierarchy_path"],
+                start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
+                next_review_at=due_at_iso,
+                last_review_at=last_review_at, review_count=r["review_count"], avg_rating=r["avg_rating"]
+            ))
+        out.sort(key=lambda u: (u.next_review_at or "", int(u.unit_id)))
+        return out
 
 
     def unit_views_by_ids(self, unit_ids: list[int]) -> list[UnitView]:
@@ -200,6 +273,36 @@ class ReviewRepo:
         ) for r in rows]
         by_id = {int(u.unit_id): u for u in out}
         return [by_id[uid] for uid in cleaned if uid in by_id]
+
+    def new_units(self) -> list[UnitView]:
+        rows = self.db.conn.execute(
+            """WITH RECURSIVE node_path(node_id, path) AS (
+                SELECT n.id, n.title
+                FROM outline_nodes n
+                WHERE n.parent_id IS NULL
+                UNION ALL
+                SELECT c.id, node_path.path || ' › ' || c.title
+                FROM outline_nodes c
+                JOIN node_path ON c.parent_id=node_path.node_id
+            )
+            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path
+            FROM units u
+            JOIN sources s ON s.id=u.source_id
+            LEFT JOIN node_path ON node_path.node_id=u.node_id
+            WHERE s.is_active=1
+              AND u.queue_enabled=1
+              AND NOT EXISTS (
+                  SELECT 1 FROM review_events re
+                  WHERE re.unit_id=u.id AND re.deleted_at IS NULL
+              )
+            ORDER BY s.title ASC, u.start_page ASC, u.id ASC""",
+        ).fetchall()
+        return [UnitView(
+            unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
+            title=r["title"], hierarchy_path=r["hierarchy_path"],
+            start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
+            next_review_at=None, last_review_at=None, review_count=r["review_count"], avg_rating=r["avg_rating"]
+        ) for r in rows]
 
     def reviewed_unit_ids_on_date(self, day_iso: str) -> set[int]:
         rows = self.db.conn.execute(
@@ -297,7 +400,17 @@ class ReviewRepo:
         cur = self.db.conn.execute(
             """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,pre_note,post_note,interval_days,next_review_at)
             VALUES(?,?,?,?,?,?,?,?,?)""",
-            (unit_id, payload["started_at"], payload["ended_at"], payload["elapsed_seconds"], payload["rating"], payload["pre_note"], payload["post_note"], payload["interval_days"], payload["next_review_at"]),
+            (
+                unit_id,
+                payload["started_at"],
+                payload["ended_at"],
+                payload["elapsed_seconds"],
+                payload["rating"],
+                payload["pre_note"],
+                payload["post_note"],
+                0.0,
+                payload["ended_at"],
+            ),
         )
         self.db.conn.commit()
         return int(cur.lastrowid)
@@ -315,22 +428,20 @@ class ReviewRepo:
                     payload["rating"],
                     payload["pre_note"],
                     payload["post_note"],
-                    payload["interval_days"],
-                    payload["next_review_at"],
+                    0.0,
+                    payload["ended_at"],
                 ),
             )
             update_cur = self.db.conn.execute(
                 """UPDATE units
-                SET last_review_at=?,next_review_at=?,review_count=?,ease_factor=?,interval_days=?,avg_rating=?,
+                SET last_review_at=?,review_count=?,ease_factor=?,avg_rating=?,
                     fsrs_difficulty=?,fsrs_stability=?,fsrs_last_review_at=?,fsrs_last_grade=?,fsrs_review_count=?,fsrs_lapse_count=?,
                     fsrs_state_version=?,fsrs_due_retention_used=?
                 WHERE id=?""",
                 (
                     unit_stats["last_review_at"],
-                    unit_stats["next_review_at"],
                     unit_stats["review_count"],
                     unit_stats["ease_factor"],
-                    unit_stats["interval_days"],
                     unit_stats["avg_rating"],
                     unit_stats.get("fsrs_difficulty"),
                     unit_stats.get("fsrs_stability"),
@@ -350,16 +461,14 @@ class ReviewRepo:
     def update_unit_stats(self, unit_id: int, data: dict) -> None:
         self.db.conn.execute(
             """UPDATE units
-            SET last_review_at=?,next_review_at=?,review_count=?,ease_factor=?,interval_days=?,avg_rating=?,
+            SET last_review_at=?,review_count=?,ease_factor=?,avg_rating=?,
                 fsrs_difficulty=?,fsrs_stability=?,fsrs_last_review_at=?,fsrs_last_grade=?,fsrs_review_count=?,fsrs_lapse_count=?,
                 fsrs_state_version=?,fsrs_due_retention_used=?
             WHERE id=?""",
             (
                 data["last_review_at"],
-                data["next_review_at"],
                 data["review_count"],
                 data["ease_factor"],
-                data["interval_days"],
                 data["avg_rating"],
                 data.get("fsrs_difficulty"),
                 data.get("fsrs_stability"),
@@ -396,14 +505,16 @@ class ReviewRepo:
         self.db.conn.commit()
 
     def source_statistics(self, now_iso: str):
-        return self.db.conn.execute(
+        due_counts: dict[int, int] = defaultdict(int)
+        for u in self.due_units(now_iso):
+            due_counts[int(u.source_id)] += 1
+        rows = self.db.conn.execute(
             """
             SELECT
                 s.id AS source_id,
                 s.title AS source_title,
                 COUNT(u.id) AS total_units,
                 SUM(CASE WHEN u.review_count > 0 THEN 1 ELSE 0 END) AS learned_units,
-                SUM(CASE WHEN u.queue_enabled = 1 AND (u.next_review_at IS NULL OR u.next_review_at <= ?) THEN 1 ELSE 0 END) AS due_units,
                 COALESCE(AVG(CASE WHEN u.review_count > 0 THEN u.avg_rating END), 0) AS avg_rating_learned,
                 COALESCE(AVG(re.elapsed_seconds), 0) AS avg_elapsed_seconds,
                 MAX(re.ended_at) AS last_review_at
@@ -411,10 +522,16 @@ class ReviewRepo:
             LEFT JOIN units u ON u.source_id = s.id
             LEFT JOIN review_events re ON re.unit_id = u.id AND re.deleted_at IS NULL
             GROUP BY s.id, s.title
-            ORDER BY due_units DESC, total_units DESC, s.title ASC
-            """,
-            (now_iso,),
+            ORDER BY total_units DESC, s.title ASC
+            """
         ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["due_units"] = int(due_counts.get(int(row["source_id"]), 0))
+            out.append(item)
+        out.sort(key=lambda r: (-int(r["due_units"] or 0), -int(r["total_units"] or 0), str(r["source_title"] or "")))
+        return out
 
 
 class SettingsRepo:
