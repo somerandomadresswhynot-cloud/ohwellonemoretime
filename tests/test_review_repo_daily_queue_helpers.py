@@ -89,6 +89,34 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         due = self.review_repo.due_units("2026-03-22T00:00:00+00:00")
         self.assertIn(unit_id, {int(u.unit_id) for u in due})
 
+    def test_easy_reviewed_units_from_2026_03_20_are_due_after_2026_03_21_0001(self):
+        reviewed_at = "2026-03-20T10:00:00+00:00"
+        due_at = "2026-03-21T00:00:00+00:00"
+        for row in self.units:
+            unit_id = int(row["id"])
+            payload = {
+                "started_at": reviewed_at,
+                "ended_at": reviewed_at,
+                "elapsed_seconds": 25,
+                "rating": "easy",
+                "pre_note": "",
+                "post_note": "",
+                "interval_days": 1.0,
+                "next_review_at": due_at,
+            }
+            stats = {
+                "last_review_at": reviewed_at,
+                "next_review_at": due_at,
+                "review_count": 1,
+                "ease_factor": 2.5,
+                "interval_days": 1.0,
+                "avg_rating": 5.0,
+            }
+            self.review_repo.record_review(unit_id, payload, stats)
+
+        due = self.review_repo.due_units("2026-03-21T00:01:00+00:00")
+        self.assertEqual({int(u.unit_id) for u in due}, {int(r["id"]) for r in self.units})
+
 
 if __name__ == '__main__':
     unittest.main()

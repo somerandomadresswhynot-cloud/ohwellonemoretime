@@ -1,13 +1,14 @@
 import unittest
 from dataclasses import dataclass
 
-from study_app.services.queue_planner import plan_session_queue
+from study_app.services.queue_planner import merge_missing_due_unit_ids, plan_session_queue
 
 
 @dataclass
 class FakeUnit:
     name: str
     sec: float
+    unit_id: int = 0
     source_id: int = 1
 
 
@@ -57,6 +58,33 @@ class QueuePlannerTests(unittest.TestCase):
         reasons = {s.reason for s in plan.suggested_units}
         self.assertIn("strict_order_progression_gate", reasons)
         self.assertEqual(plan.suggested_units[0].unit.name, "S1-first")
+
+    def test_merge_missing_due_unit_ids_appends_due_units_missing_from_snapshot(self):
+        due = [
+            FakeUnit("Reviewed-on-2026-03-20-A", 60, unit_id=101),
+            FakeUnit("Reviewed-on-2026-03-20-B", 60, unit_id=102),
+            FakeUnit("Reviewed-on-2026-03-20-C", 60, unit_id=103),
+        ]
+        # Simulates a stale persisted queue that does not include currently due units.
+        stale_snapshot_ids = [999]
+
+        merged = merge_missing_due_unit_ids(
+            stale_snapshot_ids,
+            due,
+            unit_id_of=lambda u: u.unit_id,
+        )
+
+        self.assertEqual(merged, [999, 101, 102, 103])
+
+    def test_merge_missing_due_unit_ids_preserves_existing_order_without_duplicates(self):
+        due = [
+            FakeUnit("U1", 60, unit_id=1),
+            FakeUnit("U2", 60, unit_id=2),
+            FakeUnit("U3", 60, unit_id=3),
+        ]
+        snapshot_ids = [2, 1]
+        merged = merge_missing_due_unit_ids(snapshot_ids, due, unit_id_of=lambda u: u.unit_id)
+        self.assertEqual(merged, [2, 1, 3])
 
 
 if __name__ == "__main__":

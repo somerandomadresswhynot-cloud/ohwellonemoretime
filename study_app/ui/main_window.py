@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
-from study_app.services.queue_planner import plan_session_queue
+from study_app.services.queue_planner import merge_missing_due_unit_ids, plan_session_queue
 from study_app.services.scheduler import allocate_new_units, recommend_new_units_with_guardrail, retention_estimate
 from study_app.services.fsrs_scheduler import DEFAULT_FSRS_PARAMETERS, schedule_next_review
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
@@ -1970,6 +1970,7 @@ class StudyQueuePage(QWidget):
         snapshot = self._load_today_queue_snapshot()
         planned_ids = list(snapshot["unit_ids"])
         if planned_ids:
+            planned_ids = merge_missing_due_unit_ids(planned_ids, due_units, unit_id_of=lambda u: int(u.unit_id))
             saved_minutes = snapshot.get("daily_minutes")
             reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
             if saved_minutes is not None and saved_minutes != int(daily_minutes) and reviewed_today == 0:

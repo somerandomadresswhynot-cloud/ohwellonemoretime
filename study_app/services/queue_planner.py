@@ -22,6 +22,27 @@ class QueuePlan(Generic[TUnit]):
     suggested_units: list[QueueSuggestion[TUnit]]
 
 
+def merge_missing_due_unit_ids(
+    planned_unit_ids: list[int],
+    due_units: list[TUnit],
+    unit_id_of: Callable[[TUnit], int],
+) -> list[int]:
+    """Append currently-due units that are missing from a persisted plan.
+
+    This keeps persisted queue order stable while preventing stale queue snapshots
+    from hiding units that are now due.
+    """
+    merged = [int(uid) for uid in planned_unit_ids]
+    seen = set(merged)
+    for unit in due_units:
+        uid = int(unit_id_of(unit))
+        if uid in seen:
+            continue
+        merged.append(uid)
+        seen.add(uid)
+    return merged
+
+
 def plan_session_queue(
     due_units: list[TUnit],
     available_minutes: int,
