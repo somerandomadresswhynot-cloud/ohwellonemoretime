@@ -89,6 +89,15 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         due = self.review_repo.due_units("2026-03-22T00:00:00+00:00")
         self.assertIn(unit_id, {int(u.unit_id) for u in due})
 
+    def test_queue_eligible_unit_ids_respects_unit_and_source_flags(self):
+        first = int(self.units[0]['id'])
+        second = int(self.units[1]['id'])
+        self.db.conn.execute("UPDATE units SET queue_enabled=0 WHERE id=?", (first,))
+        self.db.conn.execute("UPDATE sources SET is_active=0 WHERE id=?", (self.source_id,))
+        self.db.conn.commit()
+        eligible = self.review_repo.queue_eligible_unit_ids([first, second])
+        self.assertEqual(eligible, set())
+
 
 if __name__ == '__main__':
     unittest.main()

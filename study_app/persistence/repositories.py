@@ -201,6 +201,20 @@ class ReviewRepo:
         by_id = {int(u.unit_id): u for u in out}
         return [by_id[uid] for uid in cleaned if uid in by_id]
 
+    def queue_eligible_unit_ids(self, unit_ids: list[int]) -> set[int]:
+        cleaned = [int(uid) for uid in unit_ids if uid is not None]
+        if not cleaned:
+            return set()
+        placeholders = ",".join("?" for _ in cleaned)
+        rows = self.db.conn.execute(
+            f"""SELECT u.id
+            FROM units u
+            JOIN sources s ON s.id=u.source_id
+            WHERE u.id IN ({placeholders}) AND u.queue_enabled=1 AND s.is_active=1""",
+            cleaned,
+        ).fetchall()
+        return {int(r["id"]) for r in rows}
+
     def reviewed_unit_ids_on_date(self, day_iso: str) -> set[int]:
         rows = self.db.conn.execute(
             """SELECT DISTINCT unit_id FROM review_events

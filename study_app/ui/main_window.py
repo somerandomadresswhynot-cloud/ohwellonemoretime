@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -779,7 +780,13 @@ class SourceWorkspace(QWidget):
     def _load_today_queue_snapshot(self) -> dict:
         today = self._today_iso()
         raw = self.settings_repo.get("daily_queue_snapshot_json", "")
-        default = {"date": today, "daily_minutes": int(self.settings_repo.get("daily_minutes", "90")), "unit_ids": [], "manual_unit_ids": []}
+        default = {
+            "date": today,
+            "daily_minutes": int(self.settings_repo.get("daily_minutes", "90")),
+            "unit_ids": [],
+            "manual_unit_ids": [],
+            "planner_signature": "",
+        }
         if not raw:
             return default
         try:
@@ -794,7 +801,13 @@ class SourceWorkspace(QWidget):
             daily_minutes = int(data.get("daily_minutes", self.settings_repo.get("daily_minutes", "90")))
         except Exception:
             daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_ids}
+        return {
+            "date": today,
+            "daily_minutes": daily_minutes,
+            "unit_ids": unit_ids,
+            "manual_unit_ids": manual_ids,
+            "planner_signature": str(data.get("planner_signature") or ""),
+        }
 
     def _store_today_queue_snapshot(self, snapshot: dict) -> None:
         payload = {
@@ -802,6 +815,7 @@ class SourceWorkspace(QWidget):
             "daily_minutes": int(snapshot.get("daily_minutes", self.settings_repo.get("daily_minutes", "90"))),
             "unit_ids": [int(uid) for uid in snapshot.get("unit_ids", [])],
             "manual_unit_ids": [int(uid) for uid in snapshot.get("manual_unit_ids", [])],
+            "planner_signature": str(snapshot.get("planner_signature", "")),
         }
         self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
 
@@ -1934,7 +1948,7 @@ class StudyQueuePage(QWidget):
     def _load_today_queue_snapshot(self) -> dict:
         today = self._today_iso()
         raw = self.settings_repo.get("daily_queue_snapshot_json", "")
-        default = {"date": today, "daily_minutes": None, "unit_ids": [], "manual_unit_ids": []}
+        default = {"date": today, "daily_minutes": None, "unit_ids": [], "manual_unit_ids": [], "planner_signature": ""}
         if not raw:
             return default
         try:
@@ -1954,26 +1968,73 @@ class StudyQueuePage(QWidget):
             except Exception:
                 daily_minutes = None
         manual_unit_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
-        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_unit_ids}
+        planner_signature = str(data.get("planner_signature") or "")
+        return {
+            "date": today,
+            "daily_minutes": daily_minutes,
+            "unit_ids": unit_ids,
+            "manual_unit_ids": manual_unit_ids,
+            "planner_signature": planner_signature,
+        }
 
-    def _store_today_queue_snapshot(self, unit_ids: list[int], daily_minutes: int, manual_unit_ids: list[int] | None = None) -> None:
+    def _store_today_queue_snapshot(
+        self,
+        unit_ids: list[int],
+        daily_minutes: int,
+        manual_unit_ids: list[int] | None = None,
+        planner_signature: str | None = None,
+    ) -> None:
         today = self._today_iso()
         payload = {
             "date": today,
             "daily_minutes": int(daily_minutes),
             "unit_ids": [int(uid) for uid in unit_ids],
             "manual_unit_ids": [int(uid) for uid in (manual_unit_ids or [])],
+            "planner_signature": str(planner_signature or ""),
         }
         self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
 
+    def _planner_signature(self, due_units: list, strict_sources: set[int]) -> str:
+        due_ids = sorted({int(u.unit_id) for u in due_units})
+        strict_ids = sorted(int(sid) for sid in strict_sources)
+        raw = json.dumps({"due": due_ids, "strict": strict_ids}, separators=(",", ":"))
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
         snapshot = self._load_today_queue_snapshot()
+        planner_signature = self._planner_signature(due_units, strict_sources)
         planned_ids = list(snapshot["unit_ids"])
+        manual_unit_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+        manual_unit_id_set = set(manual_unit_ids)
+        due_ids = [int(u.unit_id) for u in due_units]
+        due_id_set = set(due_ids)
+        reviewed_today_ids = self.review_repo.reviewed_unit_ids_on_date(self._today_iso())
+        eligible_manual_ids = self.review_repo.queue_eligible_unit_ids(manual_unit_ids)
         if planned_ids:
             saved_minutes = snapshot.get("daily_minutes")
             reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
             if saved_minutes is not None and saved_minutes != int(daily_minutes) and reviewed_today == 0:
                 planned_ids = []
+            signature_changed = snapshot.get("planner_signature", "") != planner_signature
+            if planned_ids and signature_changed and reviewed_today == 0:
+                planned_ids = []
+            elif planned_ids and signature_changed:
+                planned_ids = [
+                    uid for uid in planned_ids
+                    if uid in due_id_set or uid in eligible_manual_ids
+                ]
+                newly_due = [
+                    uid for uid in due_ids
+                    if uid not in planned_ids and uid not in manual_unit_id_set and uid not in reviewed_today_ids
+                ]
+                planned_ids.extend(newly_due)
+                manual_unit_ids = [uid for uid in manual_unit_ids if uid in eligible_manual_ids]
+                self._store_today_queue_snapshot(
+                    planned_ids,
+                    daily_minutes,
+                    manual_unit_ids=manual_unit_ids,
+                    planner_signature=planner_signature,
+                )
         if not planned_ids:
             plan = plan_session_queue(
                 due_units,
@@ -1983,7 +2044,12 @@ class StudyQueuePage(QWidget):
                 source_id_of=lambda u: int(u.source_id),
             )
             planned_ids = [int(u.unit_id) for u in plan.selected_units]
-            self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=[])
+            self._store_today_queue_snapshot(
+                planned_ids,
+                daily_minutes,
+                manual_unit_ids=[],
+                planner_signature=planner_signature,
+            )
             return planned_ids, True
         return planned_ids, False
 
@@ -2000,7 +2066,12 @@ class StudyQueuePage(QWidget):
         if int(unit.unit_id) not in manual_unit_ids:
             manual_unit_ids.append(int(unit.unit_id))
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_unit_ids)
+        self._store_today_queue_snapshot(
+            unit_ids,
+            daily_minutes,
+            manual_unit_ids=manual_unit_ids,
+            planner_signature=snapshot.get("planner_signature", ""),
+        )
         self.refresh()
         return True
 
@@ -2013,7 +2084,12 @@ class StudyQueuePage(QWidget):
         unit_ids = [uid for uid in unit_ids if uid != int(unit_id)]
         manual_ids = [uid for uid in manual_ids if uid != int(unit_id)]
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_ids)
+        self._store_today_queue_snapshot(
+            unit_ids,
+            daily_minutes,
+            manual_unit_ids=manual_ids,
+            planner_signature=snapshot.get("planner_signature", ""),
+        )
         self.refresh()
         return True
 
@@ -2345,7 +2421,12 @@ class StudyQueuePage(QWidget):
         remaining_ids = [uid for uid in planned_ids if uid not in completed_today]
         if remaining_ids != planned_ids:
             remaining_manual_ids = [uid for uid in manual_unit_ids if uid in remaining_ids]
-            self._store_today_queue_snapshot(remaining_ids, available_minutes, manual_unit_ids=remaining_manual_ids)
+            self._store_today_queue_snapshot(
+                remaining_ids,
+                available_minutes,
+                manual_unit_ids=remaining_manual_ids,
+                planner_signature=snapshot.get("planner_signature", ""),
+            )
             manual_unit_ids = remaining_manual_ids
         self.units = self.review_repo.unit_views_by_ids(remaining_ids)
         self.list.clear()
@@ -3108,17 +3189,15 @@ class MainWindow(QMainWindow):
         self._queue_sync_timer.setSingleShot(True)
         self._queue_sync_timer.timeout.connect(self._flush_debounced_updates)
 
-        self.sources.library_changed.connect(self.sync_queue_views)
+        self.sources.library_changed.connect(self.request_sync_queue_views)
         self.sources.queue_changed.connect(self.request_sync_queue_views)
         self.sources.add_to_today_queue_requested.connect(self._on_add_to_today_queue_requested)
-        self.settings.settings_changed.connect(self.sync_queue_views)
+        self.settings.settings_changed.connect(self.request_sync_queue_views)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def sync_queue_views(self):
-        if self._queue_sync_timer.isActive():
-            self._queue_sync_timer.stop()
-        self._queue_dirty = True
-        self._flush_now(force_queue=True)
+        # Backward-compatible wrapper for any direct callers.
+        self.request_sync_queue_views()
 
     def request_sync_queue_views(self):
         self._queue_dirty = True
