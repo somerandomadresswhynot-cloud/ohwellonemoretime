@@ -169,6 +169,84 @@ class ReviewRepo:
             next_review_at=r["next_review_at"], last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
         ) for r in rows]
 
+
+    def unit_views_by_ids(self, unit_ids: list[int]) -> list[UnitView]:
+        cleaned = [int(uid) for uid in unit_ids if uid is not None]
+        if not cleaned:
+            return []
+        placeholders = ",".join("?" for _ in cleaned)
+        rows = self.db.conn.execute(
+            f"""WITH RECURSIVE node_path(node_id, path) AS (
+                SELECT n.id, n.title
+                FROM outline_nodes n
+                WHERE n.parent_id IS NULL
+                UNION ALL
+                SELECT c.id, node_path.path || ' › ' || c.title
+                FROM outline_nodes c
+                JOIN node_path ON c.parent_id=node_path.node_id
+            )
+            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path
+            FROM units u
+            JOIN sources s ON s.id=u.source_id
+            LEFT JOIN node_path ON node_path.node_id=u.node_id
+            WHERE s.is_active=1 AND u.queue_enabled=1 AND u.id IN ({placeholders})""",
+            cleaned,
+        ).fetchall()
+        out = [UnitView(
+            unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
+            title=r["title"], hierarchy_path=r["hierarchy_path"],
+            start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
+            next_review_at=r["next_review_at"], last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
+        ) for r in rows]
+        by_id = {int(u.unit_id): u for u in out}
+        return [by_id[uid] for uid in cleaned if uid in by_id]
+
+    def reviewed_unit_ids_on_date(self, day_iso: str) -> set[int]:
+        rows = self.db.conn.execute(
+            """SELECT DISTINCT unit_id FROM review_events
+            WHERE deleted_at IS NULL AND substr(ended_at, 1, 10)=?""",
+            (day_iso,),
+        ).fetchall()
+        return {int(r["unit_id"]) for r in rows}
+
+    def review_count_on_date(self, day_iso: str) -> int:
+        row = self.db.conn.execute(
+            """SELECT COUNT(*) AS c FROM review_events
+            WHERE deleted_at IS NULL AND substr(ended_at, 1, 10)=?""",
+            (day_iso,),
+        ).fetchone()
+        return int(row["c"] or 0) if row else 0
+
+    def first_unit_for_source_page(self, source_id: int, page: int) -> UnitView | None:
+        row = self.db.conn.execute(
+            """WITH RECURSIVE node_path(node_id, path) AS (
+                SELECT n.id, n.title
+                FROM outline_nodes n
+                WHERE n.parent_id IS NULL
+                UNION ALL
+                SELECT c.id, node_path.path || ' › ' || c.title
+                FROM outline_nodes c
+                JOIN node_path ON c.parent_id=node_path.node_id
+            )
+            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path, n.depth AS node_depth
+            FROM units u
+            JOIN sources s ON s.id=u.source_id
+            LEFT JOIN outline_nodes n ON n.id=u.node_id
+            LEFT JOIN node_path ON node_path.node_id=u.node_id
+            WHERE u.source_id=? AND s.is_active=1 AND u.queue_enabled=1
+              AND u.start_page<=? AND u.end_page>=?
+            ORDER BY COALESCE(n.depth, 0) DESC, (u.end_page-u.start_page) ASC, u.id ASC
+            LIMIT 1""",
+            (source_id, int(page), int(page)),
+        ).fetchone()
+        if not row:
+            return None
+        return UnitView(
+            unit_id=row["id"], node_id=row["node_id"], source_id=row["source_id"], source_title=row["source_title"],
+            title=row["title"], hierarchy_path=row["hierarchy_path"],
+            start_page=row["start_page"], end_page=row["end_page"], queue_enabled=bool(row["queue_enabled"]),
+            next_review_at=row["next_review_at"], last_review_at=row["last_review_at"], review_count=row["review_count"], avg_rating=row["avg_rating"],
+        )
     def avg_elapsed_seconds_for_unit(self, unit_id: int) -> float | None:
         row = self.db.conn.execute(
             """SELECT AVG(elapsed_seconds) AS avg_elapsed
