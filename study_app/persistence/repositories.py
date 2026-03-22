@@ -189,7 +189,7 @@ class ReviewRepo:
             FROM units u
             JOIN sources s ON s.id=u.source_id
             LEFT JOIN node_path ON node_path.node_id=u.node_id
-            WHERE s.is_active=1 AND u.queue_enabled=1 AND u.id IN ({placeholders})""",
+            WHERE u.id IN ({placeholders})""",
             cleaned,
         ).fetchall()
         out = [UnitView(
@@ -233,7 +233,7 @@ class ReviewRepo:
             JOIN sources s ON s.id=u.source_id
             LEFT JOIN outline_nodes n ON n.id=u.node_id
             LEFT JOIN node_path ON node_path.node_id=u.node_id
-            WHERE u.source_id=? AND s.is_active=1 AND u.queue_enabled=1
+            WHERE u.source_id=?
               AND u.start_page<=? AND u.end_page>=?
             ORDER BY COALESCE(n.depth, 0) DESC, (u.end_page-u.start_page) ASC, u.id ASC
             LIMIT 1""",

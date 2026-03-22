@@ -33,6 +33,13 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         rows = self.review_repo.unit_views_by_ids([second, first])
         self.assertEqual([int(r.unit_id) for r in rows], [second, first])
 
+    def test_unit_views_by_ids_includes_disabled_queue_units(self):
+        first = int(self.units[0]['id'])
+        self.db.conn.execute("UPDATE units SET queue_enabled=0 WHERE id=?", (first,))
+        self.db.conn.commit()
+        rows = self.review_repo.unit_views_by_ids([first])
+        self.assertEqual([int(r.unit_id) for r in rows], [first])
+
     def test_reviewed_unit_ids_on_date_returns_distinct_ids(self):
         unit_id = int(self.units[0]['id'])
         now = utcnow_iso()
@@ -63,6 +70,14 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         unit = self.review_repo.first_unit_for_source_page(self.source_id, 7)
         self.assertIsNotNone(unit)
         self.assertEqual(unit.title, 'U2')
+
+    def test_first_unit_for_source_page_ignores_queue_enabled_for_manual_add(self):
+        unit_id = int(self.units[1]['id'])
+        self.db.conn.execute("UPDATE units SET queue_enabled=0 WHERE id=?", (unit_id,))
+        self.db.conn.commit()
+        unit = self.review_repo.first_unit_for_source_page(self.source_id, 7)
+        self.assertIsNotNone(unit)
+        self.assertEqual(int(unit.unit_id), unit_id)
 
     def test_missed_due_items_resurface_later(self):
         unit_id = int(self.units[0]['id'])
