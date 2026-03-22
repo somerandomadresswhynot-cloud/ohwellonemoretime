@@ -1991,13 +1991,19 @@ class StudyQueuePage(QWidget):
                 planned_ids = []
             else:
                 due_set = set(due_ids_in_order)
-                extra_ids = [int(uid) for uid in planned_ids if int(uid) not in due_set]
-                reordered_ids = due_ids_in_order + [uid for uid in extra_ids if uid not in due_set]
-                if reordered_ids != planned_ids:
-                    planned_ids = reordered_ids
-                    manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", []) if int(uid) in planned_ids]
-                    self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=manual_ids)
-                    return planned_ids, True
+                manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+                manual_set = set(manual_ids)
+                stale_auto_ids = [int(uid) for uid in planned_ids if int(uid) not in due_set and int(uid) not in manual_set]
+                if stale_auto_ids:
+                    planned_ids = []
+                else:
+                    extra_ids = [int(uid) for uid in manual_ids if int(uid) not in due_set]
+                    reordered_ids = due_ids_in_order + [uid for uid in extra_ids if uid not in due_set]
+                    if reordered_ids != planned_ids:
+                        planned_ids = reordered_ids
+                        manual_ids = [int(uid) for uid in manual_ids if int(uid) in planned_ids]
+                        self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=manual_ids)
+                        return planned_ids, True
         if not planned_ids:
             planned_ids = self._build_planned_queue_ids(due_units, daily_minutes, strict_sources)
             self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=[])
