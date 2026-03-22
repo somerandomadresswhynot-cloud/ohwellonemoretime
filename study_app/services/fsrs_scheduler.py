@@ -213,10 +213,8 @@ def _coarse_unit_policy_interval(raw_interval_days: float, grade: FSRSGrade, pri
     # Coarse chapter/section units benefit from a quick early reinforcement pass.
     # Keep FSRS as the core interval engine, but cap the first successful jump so
     # resurfacing doesn't disappear for multiple days right after first exposure.
-    if prior_review_count <= 0:
+    if prior_review_count <= 1:
         return min(max(1.0, raw_interval_days), 1.0)
-    if prior_review_count == 1:
-        return min(max(1.0, raw_interval_days), 2.0)
     return max(1.0, raw_interval_days)
 
 

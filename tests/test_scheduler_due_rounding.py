@@ -124,3 +124,20 @@ def test_first_successful_review_resurfaces_next_day_for_coarse_units():
     )
     assert out.scheduled_interval_days == 1.0
     assert out.next_review_at == "2026-03-11T00:00:00+00:00"
+
+
+def test_second_successful_review_also_resurfaces_next_day_for_coarse_units():
+    now = datetime(2026, 3, 20, 8, 30, tzinfo=timezone.utc)
+    history = [
+        {"ended_at": "2026-03-19T08:30:00+00:00", "rating": "with_effort"},
+    ]
+    out = schedule_next_review(
+        unit_row=_unit_row_without_fsrs(),
+        review_events=history,
+        now=now,
+        feedback="easy",
+        timezone_info=timezone.utc,
+        desired_retention=0.9,
+    )
+    assert out.scheduled_interval_days == 1.0
+    assert out.next_review_at == "2026-03-21T00:00:00+00:00"
