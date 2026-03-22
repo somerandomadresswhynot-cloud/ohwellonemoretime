@@ -48,6 +48,26 @@ from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHi
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 
 
+_SESSION_QUEUE_SNAPSHOT = {"date": "", "daily_minutes": None, "unit_ids": [], "manual_unit_ids": []}
+
+
+def _load_session_queue_snapshot(today: str, daily_minutes: int) -> dict:
+    data = _SESSION_QUEUE_SNAPSHOT
+    if str(data.get("date") or "") != today:
+        return {"date": today, "daily_minutes": int(daily_minutes), "unit_ids": [], "manual_unit_ids": []}
+    unit_ids = [int(uid) for uid in data.get("unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+    manual_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+    return {"date": today, "daily_minutes": int(data.get("daily_minutes") or daily_minutes), "unit_ids": unit_ids, "manual_unit_ids": manual_ids}
+
+
+def _store_session_queue_snapshot(today: str, daily_minutes: int, unit_ids: list[int], manual_unit_ids: list[int]) -> None:
+    _SESSION_QUEUE_SNAPSHOT["date"] = today
+    _SESSION_QUEUE_SNAPSHOT["daily_minutes"] = int(daily_minutes)
+    _SESSION_QUEUE_SNAPSHOT["unit_ids"] = [int(uid) for uid in unit_ids]
+    _SESSION_QUEUE_SNAPSHOT["manual_unit_ids"] = [int(uid) for uid in manual_unit_ids]
+
+
+
 def _enable_smooth_scroll(view: QAbstractItemView) -> None:
     view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
     view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -778,32 +798,18 @@ class SourceWorkspace(QWidget):
 
     def _load_today_queue_snapshot(self) -> dict:
         today = self._today_iso()
-        raw = self.settings_repo.get("daily_queue_snapshot_json", "")
-        default = {"date": today, "daily_minutes": int(self.settings_repo.get("daily_minutes", "90")), "unit_ids": [], "manual_unit_ids": []}
-        if not raw:
-            return default
-        try:
-            data = json.loads(raw)
-        except Exception:
-            return default
-        if not isinstance(data, dict) or str(data.get("date") or "") != today:
-            return default
-        unit_ids = [int(uid) for uid in data.get("unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
-        manual_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
-        try:
-            daily_minutes = int(data.get("daily_minutes", self.settings_repo.get("daily_minutes", "90")))
-        except Exception:
-            daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_ids}
+        default_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        return _load_session_queue_snapshot(today, default_minutes)
 
     def _store_today_queue_snapshot(self, snapshot: dict) -> None:
-        payload = {
-            "date": self._today_iso(),
-            "daily_minutes": int(snapshot.get("daily_minutes", self.settings_repo.get("daily_minutes", "90"))),
-            "unit_ids": [int(uid) for uid in snapshot.get("unit_ids", [])],
-            "manual_unit_ids": [int(uid) for uid in snapshot.get("manual_unit_ids", [])],
-        }
-        self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
+        today = self._today_iso()
+        daily_minutes = int(snapshot.get("daily_minutes", self.settings_repo.get("daily_minutes", "90")))
+        _store_session_queue_snapshot(
+            today,
+            daily_minutes,
+            [int(uid) for uid in snapshot.get("unit_ids", [])],
+            [int(uid) for uid in snapshot.get("manual_unit_ids", [])],
+        )
 
     def _selected_unit_for_today_queue(self):
         items = self.tree.selectedItems()
@@ -1933,56 +1939,73 @@ class StudyQueuePage(QWidget):
 
     def _load_today_queue_snapshot(self) -> dict:
         today = self._today_iso()
-        raw = self.settings_repo.get("daily_queue_snapshot_json", "")
-        default = {"date": today, "daily_minutes": None, "unit_ids": [], "manual_unit_ids": []}
-        if not raw:
-            return default
-        try:
-            data = json.loads(raw)
-        except Exception:
-            return default
-        if not isinstance(data, dict):
-            return default
-        data_date = str(data.get("date") or "")
-        if data_date != today:
-            return default
-        unit_ids = [int(uid) for uid in data.get("unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
-        daily_minutes = data.get("daily_minutes")
-        if daily_minutes is not None:
-            try:
-                daily_minutes = int(daily_minutes)
-            except Exception:
-                daily_minutes = None
-        manual_unit_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
-        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_unit_ids}
+        default_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        return _load_session_queue_snapshot(today, default_minutes)
 
     def _store_today_queue_snapshot(self, unit_ids: list[int], daily_minutes: int, manual_unit_ids: list[int] | None = None) -> None:
         today = self._today_iso()
-        payload = {
-            "date": today,
-            "daily_minutes": int(daily_minutes),
-            "unit_ids": [int(uid) for uid in unit_ids],
-            "manual_unit_ids": [int(uid) for uid in (manual_unit_ids or [])],
-        }
-        self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
+        _store_session_queue_snapshot(
+            today,
+            int(daily_minutes),
+            [int(uid) for uid in unit_ids],
+            [int(uid) for uid in (manual_unit_ids or [])],
+        )
+
+    def _build_planned_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> list[int]:
+        due_plan = plan_session_queue(
+            due_units,
+            daily_minutes,
+            self._estimate_review_seconds,
+            strict_progression_sources=strict_sources,
+            source_id_of=lambda u: int(u.source_id),
+        )
+        planned_ids = [int(u.unit_id) for u in due_plan.selected_units]
+        used_seconds = sum(max(1.0, float(self._estimate_review_seconds(u))) for u in due_plan.selected_units)
+        remaining_seconds = max(0.0, (float(daily_minutes) * 60.0) - used_seconds)
+        if remaining_seconds <= 0.0:
+            return planned_ids
+
+        selected = set(planned_ids)
+        for unit in self.review_repo.new_units():
+            uid = int(unit.unit_id)
+            if uid in selected:
+                continue
+            estimated = max(1.0, float(self._estimate_review_seconds(unit)))
+            if estimated > remaining_seconds:
+                continue
+            planned_ids.append(uid)
+            selected.add(uid)
+            remaining_seconds -= estimated
+            if remaining_seconds <= 0.0:
+                break
+        return planned_ids
 
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
         snapshot = self._load_today_queue_snapshot()
         planned_ids = list(snapshot["unit_ids"])
+        due_ids_in_order = [int(u.unit_id) for u in due_units]
         if planned_ids:
             saved_minutes = snapshot.get("daily_minutes")
             reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
             if saved_minutes is not None and saved_minutes != int(daily_minutes) and reviewed_today == 0:
                 planned_ids = []
+            else:
+                due_set = set(due_ids_in_order)
+                manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+                manual_set = set(manual_ids)
+                stale_auto_ids = [int(uid) for uid in planned_ids if int(uid) not in due_set and int(uid) not in manual_set]
+                if stale_auto_ids:
+                    planned_ids = []
+                else:
+                    extra_ids = [int(uid) for uid in manual_ids if int(uid) not in due_set]
+                    reordered_ids = due_ids_in_order + [uid for uid in extra_ids if uid not in due_set]
+                    if reordered_ids != planned_ids:
+                        planned_ids = reordered_ids
+                        manual_ids = [int(uid) for uid in manual_ids if int(uid) in planned_ids]
+                        self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=manual_ids)
+                        return planned_ids, True
         if not planned_ids:
-            plan = plan_session_queue(
-                due_units,
-                daily_minutes,
-                self._estimate_review_seconds,
-                strict_progression_sources=strict_sources,
-                source_id_of=lambda u: int(u.source_id),
-            )
-            planned_ids = [int(u.unit_id) for u in plan.selected_units]
+            planned_ids = self._build_planned_queue_ids(due_units, daily_minutes, strict_sources)
             self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=[])
             return planned_ids, True
         return planned_ids, False
@@ -2354,10 +2377,14 @@ class StudyQueuePage(QWidget):
         self._queue_last_pdf_page = 1
         total_planned = len(planned_ids)
         completed_count = max(0, total_planned - len(remaining_ids))
+        due_count = sum(1 for u in self.units if int(u.review_count or 0) > 0)
+        new_count = max(0, len(self.units) - due_count)
         regenerated_text = " · rebuilt for today" if regenerated else ""
         self.queue_banner.setText(
             f"Today's fixed queue: {len(self.units)} remaining / {total_planned} planned"
             + (f" · {completed_count} done" if completed_count else "")
+            + (f" · {due_count} review" if due_count else "")
+            + (f" · {new_count} new" if new_count else "")
             + (f" · {len(manual_unit_ids)} manual" if manual_unit_ids else "")
             + regenerated_text
         )
@@ -2719,17 +2746,13 @@ class StudyQueuePage(QWidget):
             "rating": rating,
             "pre_note": self.pre_note_text,
             "post_note": self.post_note_text,
-            "interval_days": fsrs_result.scheduled_interval_days,
-            "next_review_at": fsrs_result.next_review_at,
         }
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
         unit_stats = {
             "last_review_at": iso_utc(now),
-            "next_review_at": fsrs_result.next_review_at,
             "review_count": count,
             "ease_factor": unit_row["ease_factor"],
-            "interval_days": fsrs_result.scheduled_interval_days,
             "avg_rating": avg,
             "fsrs_difficulty": fsrs_result.state.difficulty,
             "fsrs_stability": fsrs_result.state.stability,
