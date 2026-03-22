@@ -274,6 +274,36 @@ class ReviewRepo:
         by_id = {int(u.unit_id): u for u in out}
         return [by_id[uid] for uid in cleaned if uid in by_id]
 
+    def new_units(self) -> list[UnitView]:
+        rows = self.db.conn.execute(
+            """WITH RECURSIVE node_path(node_id, path) AS (
+                SELECT n.id, n.title
+                FROM outline_nodes n
+                WHERE n.parent_id IS NULL
+                UNION ALL
+                SELECT c.id, node_path.path || ' › ' || c.title
+                FROM outline_nodes c
+                JOIN node_path ON c.parent_id=node_path.node_id
+            )
+            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path
+            FROM units u
+            JOIN sources s ON s.id=u.source_id
+            LEFT JOIN node_path ON node_path.node_id=u.node_id
+            WHERE s.is_active=1
+              AND u.queue_enabled=1
+              AND NOT EXISTS (
+                  SELECT 1 FROM review_events re
+                  WHERE re.unit_id=u.id AND re.deleted_at IS NULL
+              )
+            ORDER BY s.title ASC, u.start_page ASC, u.id ASC""",
+        ).fetchall()
+        return [UnitView(
+            unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
+            title=r["title"], hierarchy_path=r["hierarchy_path"],
+            start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
+            next_review_at=None, last_review_at=None, review_count=r["review_count"], avg_rating=r["avg_rating"]
+        ) for r in rows]
+
     def reviewed_unit_ids_on_date(self, day_iso: str) -> set[int]:
         rows = self.db.conn.execute(
             """SELECT DISTINCT unit_id FROM review_events

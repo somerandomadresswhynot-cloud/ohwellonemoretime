@@ -1951,6 +1951,35 @@ class StudyQueuePage(QWidget):
             [int(uid) for uid in (manual_unit_ids or [])],
         )
 
+    def _build_planned_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> list[int]:
+        due_plan = plan_session_queue(
+            due_units,
+            daily_minutes,
+            self._estimate_review_seconds,
+            strict_progression_sources=strict_sources,
+            source_id_of=lambda u: int(u.source_id),
+        )
+        planned_ids = [int(u.unit_id) for u in due_plan.selected_units]
+        used_seconds = sum(max(1.0, float(self._estimate_review_seconds(u))) for u in due_plan.selected_units)
+        remaining_seconds = max(0.0, (float(daily_minutes) * 60.0) - used_seconds)
+        if remaining_seconds <= 0.0:
+            return planned_ids
+
+        selected = set(planned_ids)
+        for unit in self.review_repo.new_units():
+            uid = int(unit.unit_id)
+            if uid in selected:
+                continue
+            estimated = max(1.0, float(self._estimate_review_seconds(unit)))
+            if estimated > remaining_seconds:
+                continue
+            planned_ids.append(uid)
+            selected.add(uid)
+            remaining_seconds -= estimated
+            if remaining_seconds <= 0.0:
+                break
+        return planned_ids
+
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
         snapshot = self._load_today_queue_snapshot()
         planned_ids = list(snapshot["unit_ids"])
@@ -1970,14 +1999,7 @@ class StudyQueuePage(QWidget):
                     self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=manual_ids)
                     return planned_ids, True
         if not planned_ids:
-            plan = plan_session_queue(
-                due_units,
-                daily_minutes,
-                self._estimate_review_seconds,
-                strict_progression_sources=strict_sources,
-                source_id_of=lambda u: int(u.source_id),
-            )
-            planned_ids = [int(u.unit_id) for u in plan.selected_units]
+            planned_ids = self._build_planned_queue_ids(due_units, daily_minutes, strict_sources)
             self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=[])
             return planned_ids, True
         return planned_ids, False
@@ -2349,10 +2371,14 @@ class StudyQueuePage(QWidget):
         self._queue_last_pdf_page = 1
         total_planned = len(planned_ids)
         completed_count = max(0, total_planned - len(remaining_ids))
+        due_count = sum(1 for u in self.units if int(u.review_count or 0) > 0)
+        new_count = max(0, len(self.units) - due_count)
         regenerated_text = " · rebuilt for today" if regenerated else ""
         self.queue_banner.setText(
             f"Today's fixed queue: {len(self.units)} remaining / {total_planned} planned"
             + (f" · {completed_count} done" if completed_count else "")
+            + (f" · {due_count} review" if due_count else "")
+            + (f" · {new_count} new" if new_count else "")
             + (f" · {len(manual_unit_ids)} manual" if manual_unit_ids else "")
             + regenerated_text
         )

@@ -104,6 +104,26 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         due = self.review_repo.due_units("2026-03-23T12:00:00+00:00")
         self.assertEqual(due, [])
 
+    def test_new_units_returns_only_never_reviewed(self):
+        reviewed_id = int(self.units[0]['id'])
+        payload = {
+            'started_at': "2026-03-20T10:00:00+00:00",
+            'ended_at': "2026-03-20T10:05:00+00:00",
+            'elapsed_seconds': 30,
+            'rating': 'with_effort',
+            'pre_note': '',
+            'post_note': '',
+        }
+        stats = {
+            'last_review_at': "2026-03-20T10:05:00+00:00",
+            'review_count': 1,
+            'ease_factor': 2.5,
+            'avg_rating': 3.0,
+        }
+        self.review_repo.record_review(reviewed_id, payload, stats)
+        new_ids = {int(u.unit_id) for u in self.review_repo.new_units()}
+        self.assertNotIn(reviewed_id, new_ids)
+
 
 if __name__ == '__main__':
     unittest.main()
