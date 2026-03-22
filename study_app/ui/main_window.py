@@ -1683,6 +1683,8 @@ class QueueTimerTile(QFrame):
 
 
 class StudyQueuePage(QWidget):
+    _PLANNER_SIGNATURE_VERSION = 2
+
     def __init__(
         self,
         source_repo: SourceRepo,
@@ -1995,9 +1997,18 @@ class StudyQueuePage(QWidget):
         self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
 
     def _planner_signature(self, due_units: list, strict_sources: set[int]) -> str:
-        due_ids = sorted({int(u.unit_id) for u in due_units})
+        # Keep due ids in scheduling order so priority/order changes can invalidate
+        # a stale snapshot even when the due set itself is unchanged.
+        due_ids = [int(u.unit_id) for u in due_units]
         strict_ids = sorted(int(sid) for sid in strict_sources)
-        raw = json.dumps({"due": due_ids, "strict": strict_ids}, separators=(",", ":"))
+        raw = json.dumps(
+            {
+                "v": int(self._PLANNER_SIGNATURE_VERSION),
+                "due": due_ids,
+                "strict": strict_ids,
+            },
+            separators=(",", ":"),
+        )
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
@@ -2023,11 +2034,17 @@ class StudyQueuePage(QWidget):
                     uid for uid in planned_ids
                     if uid in due_id_set or uid in eligible_manual_ids
                 ]
+                due_rank = {uid: idx for idx, uid in enumerate(due_ids)}
+                planned_due_ids = sorted(
+                    [uid for uid in planned_ids if uid in due_id_set and uid not in manual_unit_id_set],
+                    key=lambda uid: due_rank.get(uid, 10**9),
+                )
+                planned_manual_ids = [uid for uid in planned_ids if uid in eligible_manual_ids]
                 newly_due = [
                     uid for uid in due_ids
-                    if uid not in planned_ids and uid not in manual_unit_id_set and uid not in reviewed_today_ids
+                    if uid not in planned_due_ids and uid not in manual_unit_id_set and uid not in reviewed_today_ids
                 ]
-                planned_ids.extend(newly_due)
+                planned_ids = planned_due_ids + newly_due + planned_manual_ids
                 manual_unit_ids = [uid for uid in manual_unit_ids if uid in eligible_manual_ids]
                 self._store_today_queue_snapshot(
                     planned_ids,
