@@ -110,3 +110,17 @@ def test_old_row_without_fsrs_still_schedules():
 def test_retrievability_bounds():
     r = compute_retrievability(10.0, 0.0)
     assert 0.99 <= r <= 1.0
+
+
+def test_first_successful_review_resurfaces_next_day_for_coarse_units():
+    now = datetime(2026, 3, 10, 15, 45, tzinfo=timezone.utc)
+    out = schedule_next_review(
+        unit_row=_unit_row_without_fsrs(),
+        review_events=[],
+        now=now,
+        feedback="with_effort",
+        timezone_info=timezone.utc,
+        desired_retention=0.9,
+    )
+    assert out.scheduled_interval_days == 1.0
+    assert out.next_review_at == "2026-03-11T00:00:00+00:00"

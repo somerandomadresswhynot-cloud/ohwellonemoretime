@@ -207,9 +207,16 @@ def replay_history_into_state(review_events: Iterable, params: FSRSParameters = 
     return state
 
 
-def _coarse_unit_policy_interval(raw_interval_days: float, grade: FSRSGrade) -> float:
+def _coarse_unit_policy_interval(raw_interval_days: float, grade: FSRSGrade, prior_review_count: int) -> float:
     if grade == FSRSGrade.AGAIN:
         return max(0.03, raw_interval_days)
+    # Coarse chapter/section units benefit from a quick early reinforcement pass.
+    # Keep FSRS as the core interval engine, but cap the first successful jump so
+    # resurfacing doesn't disappear for multiple days right after first exposure.
+    if prior_review_count <= 0:
+        return min(max(1.0, raw_interval_days), 1.0)
+    if prior_review_count == 1:
+        return min(max(1.0, raw_interval_days), 2.0)
     return max(1.0, raw_interval_days)
 
 
@@ -249,9 +256,10 @@ def schedule_next_review(
     if prior_state is not None:
         elapsed = max(0.0, (now - prior_state.last_review_at).total_seconds() / 86400.0)
 
+    prior_review_count = int(prior_state.review_count) if prior_state is not None else 0
     new_state, review_retrievability = next_state_from_review(prior_state, elapsed, grade, params, reviewed_at=now)
     raw_interval = interval_for_target_retention(new_state, desired_retention, params)
-    scheduled_interval = _coarse_unit_policy_interval(raw_interval, grade)
+    scheduled_interval = _coarse_unit_policy_interval(raw_interval, grade, prior_review_count=prior_review_count)
     due_dt = now + timedelta(days=scheduled_interval)
     due_dt = _round_due_to_local_day_start_utc(due_dt, timezone_info)
 
