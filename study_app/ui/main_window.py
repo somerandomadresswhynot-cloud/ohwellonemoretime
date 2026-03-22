@@ -468,9 +468,10 @@ class SourceWorkspace(QWidget):
         split = QSplitter()
 
         self.search = QLineEdit(); self.search.setPlaceholderText("Filter outline")
-        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Outline", "Queue"])
+        self.tree = QTreeWidget(); self.tree.setHeaderLabels(["Today", "Outline", "Queue"])
         self.tree.setIndentation(14)
-        self.tree.setColumnWidth(0, 250)
+        self.tree.setColumnWidth(0, 76)
+        self.tree.setColumnWidth(1, 250)
         _enable_smooth_scroll(self.tree)
         self.tree.itemSelectionChanged.connect(self.on_item_select)
         self.tree.itemChanged.connect(self.on_item_changed)
@@ -605,6 +606,8 @@ class SourceWorkspace(QWidget):
         self._child_ids: dict[int, list[int]] = {}
         self._parent_id: dict[int, int | None] = {}
         self._state_cache: dict[int, Qt.CheckState] = {}
+        self._manual_state_cache: dict[int, Qt.CheckState] = {}
+        self._node_desc_unit_ids: dict[int, list[int]] = {}
         self._id_to_item: dict[int, QTreeWidgetItem] = {}
         self._active_filter = ""
         self._last_pdf_page = 1
@@ -761,6 +764,41 @@ class SourceWorkspace(QWidget):
         if self.source:
             self.context_changed.emit(self.source.title, "")
 
+    def _today_iso(self) -> str:
+        return now_utc().date().isoformat()
+
+    def _load_today_queue_snapshot(self) -> dict:
+        today = self._today_iso()
+        raw = self.settings_repo.get("daily_queue_snapshot_json", "")
+        default = {"date": today, "daily_minutes": None, "unit_ids": [], "manual_unit_ids": []}
+        if not raw:
+            return default
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return default
+        if not isinstance(data, dict) or str(data.get("date") or "") != today:
+            return default
+        unit_ids = [int(uid) for uid in data.get("unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        manual_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        daily_minutes = data.get("daily_minutes")
+        try:
+            daily_minutes = int(daily_minutes) if daily_minutes is not None else None
+        except Exception:
+            daily_minutes = None
+        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_ids}
+
+    def _store_today_queue_snapshot(self, unit_ids: list[int], manual_unit_ids: list[int], daily_minutes: int | None = None) -> None:
+        if daily_minutes is None:
+            daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        payload = {
+            "date": self._today_iso(),
+            "daily_minutes": int(daily_minutes),
+            "unit_ids": [int(uid) for uid in unit_ids],
+            "manual_unit_ids": [int(uid) for uid in manual_unit_ids],
+        }
+        self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
+
     def _refresh_text_layer_hint(self) -> None:
         if not getattr(self, "source", None) or not self.source or not self.source.file_path:
             self.text_layer_hint.setText("Text layer: unknown")
@@ -802,6 +840,13 @@ class SourceWorkspace(QWidget):
                 self._child_ids.setdefault(pid, []).append(rid)
 
         self._state_cache = {}
+        self._manual_state_cache = {}
+        self._node_desc_unit_ids = {}
+        unit_id_by_node: dict[int, int] = {}
+        for u in self.review_repo.source_units(self.source_id):
+            unit_id_by_node[int(u["node_id"])] = int(u["id"])
+        snapshot = self._load_today_queue_snapshot()
+        manual_today_units = {int(uid) for uid in snapshot.get("manual_unit_ids", [])}
 
         def _state(node_id: int):
             if node_id in self._state_cache:
@@ -821,6 +866,33 @@ class SourceWorkspace(QWidget):
 
         for rid in self._rows_by_id:
             _state(rid)
+
+        def _desc_units(node_id: int) -> list[int]:
+            if node_id in self._node_desc_unit_ids:
+                return self._node_desc_unit_ids[node_id]
+            own = [unit_id_by_node[node_id]] if node_id in unit_id_by_node else []
+            children = []
+            for kid in self._child_ids.get(node_id, []):
+                children.extend(_desc_units(kid))
+            out = own + children
+            self._node_desc_unit_ids[node_id] = out
+            return out
+
+        for rid in self._rows_by_id:
+            _desc_units(rid)
+
+        for rid in self._rows_by_id:
+            desc = self._node_desc_unit_ids.get(rid, [])
+            if not desc:
+                self._manual_state_cache[rid] = Qt.Unchecked
+                continue
+            hits = sum(1 for uid in desc if uid in manual_today_units)
+            if hits == 0:
+                self._manual_state_cache[rid] = Qt.Unchecked
+            elif hits == len(desc):
+                self._manual_state_cache[rid] = Qt.Checked
+            else:
+                self._manual_state_cache[rid] = Qt.PartiallyChecked
 
         self._tree_syncing = True
         self.tree.blockSignals(True)
@@ -853,21 +925,22 @@ class SourceWorkspace(QWidget):
             txt += f" [{r['start_page']}-{r['end_page']}]"
         if is_unit:
             txt += " · unit"
-        item = QTreeWidgetItem([txt, "off"])
+        item = QTreeWidgetItem(["", txt, "off"])
         item.setData(0, 256, r["id"])
         item.setData(0, 257, r["start_page"])
         item.setData(0, 258, "unit" if is_unit else "container")
         item.setData(0, 259, False)
         item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
-        item.setCheckState(1, self._state_cache.get(node_id, Qt.Unchecked))
+        item.setCheckState(0, self._manual_state_cache.get(node_id, Qt.Unchecked))
+        item.setCheckState(2, self._state_cache.get(node_id, Qt.Unchecked))
         if is_unit:
-            font = item.font(0)
+            font = item.font(1)
             font.setBold(True)
-            item.setFont(0, font)
+            item.setFont(1, font)
         else:
-            item.setForeground(0, QBrush(QColor("#9aa7b2")))
-        cstate = item.checkState(1)
-        item.setText(1, "on" if cstate == Qt.Checked else "off" if cstate == Qt.Unchecked else "mixed")
+            item.setForeground(1, QBrush(QColor("#9aa7b2")))
+        cstate = item.checkState(2)
+        item.setText(2, "on" if cstate == Qt.Checked else "off" if cstate == Qt.Unchecked else "mixed")
         if parent_item is None:
             self.tree.addTopLevelItem(item)
         else:
@@ -985,7 +1058,7 @@ class SourceWorkspace(QWidget):
         it = items[0]
         self._selected_node = it.data(0, 256)
         page = it.data(0, 257)
-        selected_label = it.text(0).split(" [", 1)[0]
+        selected_label = it.text(1).split(" [", 1)[0]
         selected_label = selected_label.replace(" · unit", "")
         if page:
             self.page_label.setText(f"Page: {page}")
@@ -1068,9 +1141,14 @@ class SourceWorkspace(QWidget):
         return " > ".join(parts)
 
     def on_item_changed(self, item, col):
-        if col != 1 or self._tree_syncing:
+        if self._tree_syncing:
             return
-        state = item.checkState(1)
+        if col == 0:
+            self._handle_manual_today_toggle(item)
+            return
+        if col != 2:
+            return
+        state = item.checkState(2)
         if state == Qt.PartiallyChecked:
             return
         node_id = int(item.data(0, 256))
@@ -1078,6 +1156,31 @@ class SourceWorkspace(QWidget):
         self.outline_repo.set_queue_enabled(node_id, enabled)
         self._sync_state_cache_after_toggle(node_id, enabled)
         self._apply_loaded_visual_states(item, enabled)
+        self.queue_changed.emit()
+
+    def _handle_manual_today_toggle(self, item: QTreeWidgetItem) -> None:
+        state = item.checkState(0)
+        if state == Qt.PartiallyChecked:
+            return
+        node_id = int(item.data(0, 256))
+        add = state == Qt.Checked
+        target_unit_ids = self._node_desc_unit_ids.get(node_id, [])
+        snapshot = self._load_today_queue_snapshot()
+        unit_ids = set(int(uid) for uid in snapshot.get("unit_ids", []))
+        manual_ids = set(int(uid) for uid in snapshot.get("manual_unit_ids", []))
+        if add:
+            unit_ids.update(target_unit_ids)
+            manual_ids.update(target_unit_ids)
+        else:
+            for uid in target_unit_ids:
+                manual_ids.discard(uid)
+                unit_ids.discard(uid)
+        self._store_today_queue_snapshot(
+            sorted(unit_ids),
+            sorted(manual_ids),
+            daily_minutes=snapshot.get("daily_minutes"),
+        )
+        self.refresh_tree()
         self.queue_changed.emit()
 
     def _state_text(self, state: Qt.CheckState) -> str:
@@ -1110,8 +1213,8 @@ class SourceWorkspace(QWidget):
         target_state = Qt.Checked if enabled else Qt.Unchecked
 
         def apply_subtree(node_item: QTreeWidgetItem) -> None:
-            node_item.setCheckState(1, target_state)
-            node_item.setText(1, self._state_text(target_state))
+            node_item.setCheckState(2, target_state)
+            node_item.setText(2, self._state_text(target_state))
             for idx in range(node_item.childCount()):
                 apply_subtree(node_item.child(idx))
 
@@ -1121,15 +1224,15 @@ class SourceWorkspace(QWidget):
 
         parent = item.parent()
         while parent is not None:
-            child_states = [parent.child(i).checkState(1) for i in range(parent.childCount())]
+            child_states = [parent.child(i).checkState(2) for i in range(parent.childCount())]
             if child_states and all(s == Qt.Checked for s in child_states):
                 pstate = Qt.Checked
             elif child_states and all(s == Qt.Unchecked for s in child_states):
                 pstate = Qt.Unchecked
             else:
                 pstate = Qt.PartiallyChecked
-            parent.setCheckState(1, pstate)
-            parent.setText(1, self._state_text(pstate))
+            parent.setCheckState(2, pstate)
+            parent.setText(2, self._state_text(pstate))
             parent = parent.parent()
 
         self.tree.blockSignals(False)
@@ -1797,7 +1900,7 @@ class StudyQueuePage(QWidget):
     def _load_today_queue_snapshot(self) -> dict:
         today = self._today_iso()
         raw = self.settings_repo.get("daily_queue_snapshot_json", "")
-        default = {"date": today, "daily_minutes": None, "unit_ids": []}
+        default = {"date": today, "daily_minutes": None, "unit_ids": [], "manual_unit_ids": []}
         if not raw:
             return default
         try:
@@ -1816,11 +1919,17 @@ class StudyQueuePage(QWidget):
                 daily_minutes = int(daily_minutes)
             except Exception:
                 daily_minutes = None
-        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids}
+        manual_unit_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_unit_ids}
 
-    def _store_today_queue_snapshot(self, unit_ids: list[int], daily_minutes: int) -> None:
+    def _store_today_queue_snapshot(self, unit_ids: list[int], daily_minutes: int, manual_unit_ids: list[int] | None = None) -> None:
         today = self._today_iso()
-        payload = {"date": today, "daily_minutes": int(daily_minutes), "unit_ids": [int(uid) for uid in unit_ids]}
+        payload = {
+            "date": today,
+            "daily_minutes": int(daily_minutes),
+            "unit_ids": [int(uid) for uid in unit_ids],
+            "manual_unit_ids": [int(uid) for uid in (manual_unit_ids or [])],
+        }
         self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
 
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
@@ -1840,7 +1949,7 @@ class StudyQueuePage(QWidget):
                 source_id_of=lambda u: int(u.source_id),
             )
             planned_ids = [int(u.unit_id) for u in plan.selected_units]
-            self._store_today_queue_snapshot(planned_ids, daily_minutes)
+            self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=[])
             return planned_ids, True
         return planned_ids, False
 
@@ -1850,11 +1959,14 @@ class StudyQueuePage(QWidget):
             return False
         snapshot = self._load_today_queue_snapshot()
         unit_ids = list(snapshot["unit_ids"])
+        manual_unit_ids = list(snapshot.get("manual_unit_ids", []))
         if int(unit.unit_id) in unit_ids:
             return False
         unit_ids.append(int(unit.unit_id))
+        if int(unit.unit_id) not in manual_unit_ids:
+            manual_unit_ids.append(int(unit.unit_id))
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        self._store_today_queue_snapshot(unit_ids, daily_minutes)
+        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_unit_ids)
         self.refresh()
         return True
 
@@ -2162,10 +2274,14 @@ class StudyQueuePage(QWidget):
         strict_sources = {sid for sid, mode in source_modes.items() if mode == "strict"}
         available_minutes = int(self.settings_repo.get("daily_minutes", "90"))
         planned_ids, regenerated = self._resolve_today_queue_ids(due_units, available_minutes, strict_sources)
+        snapshot = self._load_today_queue_snapshot()
+        manual_unit_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
         completed_today = self.review_repo.reviewed_unit_ids_on_date(self._today_iso())
         remaining_ids = [uid for uid in planned_ids if uid not in completed_today]
         if remaining_ids != planned_ids:
-            self._store_today_queue_snapshot(remaining_ids, available_minutes)
+            remaining_manual_ids = [uid for uid in manual_unit_ids if uid in remaining_ids]
+            self._store_today_queue_snapshot(remaining_ids, available_minutes, manual_unit_ids=remaining_manual_ids)
+            manual_unit_ids = remaining_manual_ids
         self.units = self.review_repo.unit_views_by_ids(remaining_ids)
         self.list.clear()
         self.source_path_cache = {}
@@ -2177,17 +2293,19 @@ class StudyQueuePage(QWidget):
         self.queue_banner.setText(
             f"Today's fixed queue: {len(self.units)} remaining / {total_planned} planned"
             + (f" · {completed_count} done" if completed_count else "")
+            + (f" · {len(manual_unit_ids)} manual" if manual_unit_ids else "")
             + regenerated_text
         )
 
         for u in self.units:
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
-            tile = self._build_queue_tile(u, est_seconds, retention)
+            reason = "manual" if int(u.unit_id) in manual_unit_ids else None
+            tile = self._build_queue_tile(u, est_seconds, retention, progression_reason=reason)
             item = QListWidgetItem()
             self.list.addItem(item)
             self.list.setItemWidget(item, tile)
-            self.display_units.append((u, None))
+            self.display_units.append((u, reason))
             if u.source_id not in self.source_path_cache:
                 s = self.source_repo.get(u.source_id)
                 if s:
@@ -2241,10 +2359,12 @@ class StudyQueuePage(QWidget):
         return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
     def _estimate_retention(self, unit) -> float | None:
-        if int(unit.review_count or 0) == 0:
-            return None
         row = self.review_repo.unit_by_id(unit.unit_id)
         if not row:
+            return None
+        review_count = int(row["review_count"] or 0)
+        fsrs_count = int(row["fsrs_review_count"] or 0) if "fsrs_review_count" in row.keys() else 0
+        if review_count == 0 and fsrs_count == 0 and not row["last_review_at"]:
             return None
         return retention_estimate(row, now_utc())
 
@@ -2308,8 +2428,11 @@ class StudyQueuePage(QWidget):
         for w in [pages, mins, retention_lbl]:
             badge_row.addWidget(w)
         if progression_reason:
-            progress_badge = QLabel("needed for progression")
+            progress_text = "manual" if progression_reason == "manual" else "needed for progression"
+            progress_badge = QLabel(progress_text)
             progress_badge.setObjectName("progressBadge")
+            if progression_reason == "manual":
+                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #eef2ff; background: #3b2f6b;")
             badge_row.addWidget(progress_badge)
         badge_row.addStretch()
 

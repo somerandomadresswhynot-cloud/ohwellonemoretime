@@ -64,6 +64,16 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         self.assertIsNotNone(unit)
         self.assertEqual(unit.title, 'U2')
 
+    def test_missed_due_items_resurface_later(self):
+        unit_id = int(self.units[0]['id'])
+        self.db.conn.execute(
+            "UPDATE units SET next_review_at=? WHERE id=?",
+            ("2026-03-20T00:00:00+00:00", unit_id),
+        )
+        self.db.conn.commit()
+        due = self.review_repo.due_units("2026-03-22T00:00:00+00:00")
+        self.assertIn(unit_id, {int(u.unit_id) for u in due})
+
 
 if __name__ == '__main__':
     unittest.main()
