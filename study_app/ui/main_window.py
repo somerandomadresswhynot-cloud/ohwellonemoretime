@@ -2019,7 +2019,6 @@ class StudyQueuePage(QWidget):
         manual_unit_id_set = set(manual_unit_ids)
         due_ids = [int(u.unit_id) for u in due_units]
         due_id_set = set(due_ids)
-        reviewed_today_ids = self.review_repo.reviewed_unit_ids_on_date(self._today_iso())
         eligible_manual_ids = self.review_repo.queue_eligible_unit_ids(manual_unit_ids)
         if planned_ids:
             saved_minutes = snapshot.get("daily_minutes")
@@ -2042,7 +2041,7 @@ class StudyQueuePage(QWidget):
                 planned_manual_ids = [uid for uid in planned_ids if uid in eligible_manual_ids]
                 newly_due = [
                     uid for uid in due_ids
-                    if uid not in planned_due_ids and uid not in manual_unit_id_set and uid not in reviewed_today_ids
+                    if uid not in planned_due_ids and uid not in manual_unit_id_set
                 ]
                 planned_ids = planned_due_ids + newly_due + planned_manual_ids
                 manual_unit_ids = [uid for uid in manual_unit_ids if uid in eligible_manual_ids]
@@ -2434,10 +2433,11 @@ class StudyQueuePage(QWidget):
         planned_ids, regenerated = self._resolve_today_queue_ids(due_units, available_minutes, strict_sources)
         snapshot = self._load_today_queue_snapshot()
         manual_unit_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
-        completed_today = self.review_repo.reviewed_unit_ids_on_date(self._today_iso())
-        remaining_ids = [uid for uid in planned_ids if uid not in completed_today]
+        due_id_set = {int(u.unit_id) for u in due_units}
+        eligible_manual_ids = self.review_repo.queue_eligible_unit_ids(manual_unit_ids)
+        remaining_ids = [uid for uid in planned_ids if uid in due_id_set or uid in eligible_manual_ids]
         if remaining_ids != planned_ids:
-            remaining_manual_ids = [uid for uid in manual_unit_ids if uid in remaining_ids]
+            remaining_manual_ids = [uid for uid in manual_unit_ids if uid in eligible_manual_ids and uid in remaining_ids]
             self._store_today_queue_snapshot(
                 remaining_ids,
                 available_minutes,
