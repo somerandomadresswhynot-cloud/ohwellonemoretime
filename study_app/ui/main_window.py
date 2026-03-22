@@ -2704,17 +2704,13 @@ class StudyQueuePage(QWidget):
             "rating": rating,
             "pre_note": self.pre_note_text,
             "post_note": self.post_note_text,
-            "interval_days": fsrs_result.scheduled_interval_days,
-            "next_review_at": fsrs_result.next_review_at,
         }
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
         unit_stats = {
             "last_review_at": iso_utc(now),
-            "next_review_at": fsrs_result.next_review_at,
             "review_count": count,
             "ease_factor": unit_row["ease_factor"],
-            "interval_days": fsrs_result.scheduled_interval_days,
             "avg_rating": avg,
             "fsrs_difficulty": fsrs_result.state.difficulty,
             "fsrs_stability": fsrs_result.state.stability,

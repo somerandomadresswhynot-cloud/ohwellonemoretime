@@ -50,15 +50,11 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
             'rating': 'easy',
             'pre_note': '',
             'post_note': '',
-            'interval_days': 1.0,
-            'next_review_at': now,
         }
         stats = {
             'last_review_at': now,
-            'next_review_at': now,
             'review_count': 1,
             'ease_factor': 2.5,
-            'interval_days': 1.0,
             'avg_rating': 5.0,
         }
         self.review_repo.record_review(unit_id, payload, stats)
@@ -88,15 +84,11 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
             'rating': 'with_effort',
             'pre_note': '',
             'post_note': '',
-            'interval_days': 1.0,
-            'next_review_at': "2099-01-01T00:00:00+00:00",
         }
         stats = {
             'last_review_at': "2026-03-20T10:05:00+00:00",
-            'next_review_at': "2099-01-01T00:00:00+00:00",
             'review_count': 1,
             'ease_factor': 2.5,
-            'interval_days': 1.0,
             'avg_rating': 3.0,
         }
         self.review_repo.record_review(unit_id, payload, stats)
@@ -105,7 +97,7 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
             ("2099-01-01T00:00:00+00:00", unit_id),
         )
         self.db.conn.commit()
-        due = self.review_repo.due_units("2026-03-22T00:00:00+00:00")
+        due = self.review_repo.due_units("2026-03-23T12:00:00+00:00")
         self.assertIn(unit_id, {int(u.unit_id) for u in due})
 
 
