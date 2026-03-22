@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush, QCursor, QPainter, QPen, QLinearGradient
@@ -41,7 +41,8 @@ from study_app.persistence.repositories import HighlightRepo, OutlineRepo, Revie
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
-from study_app.services.scheduler import allocate_new_units, compute_next, recommend_new_units_with_guardrail, retention_estimate
+from study_app.services.scheduler import allocate_new_units, recommend_new_units_with_guardrail, retention_estimate
+from study_app.services.fsrs_scheduler import DEFAULT_FSRS_PARAMETERS, schedule_next_review
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
@@ -2508,7 +2509,21 @@ class StudyQueuePage(QWidget):
             return
         now = now_utc()
         unit_row = self.review_repo.unit_by_id(self.active_unit.unit_id)
-        res = compute_next(unit_row, rating, now)
+        history = self.review_repo.events_for_unit_chronological(self.active_unit.unit_id)
+        tzinfo = datetime.now().astimezone().tzinfo
+        try:
+            desired_retention = float(self.settings_repo.get("desired_retention", "0.90"))
+        except Exception:
+            desired_retention = 0.9
+        fsrs_result = schedule_next_review(
+            unit_row=unit_row,
+            review_events=history,
+            now=now,
+            feedback=rating,
+            timezone_info=tzinfo,
+            desired_retention=desired_retention,
+            params=DEFAULT_FSRS_PARAMETERS,
+        )
         payload = {
             "started_at": iso_utc(self.started_at or now),
             "ended_at": iso_utc(now),
@@ -2516,18 +2531,26 @@ class StudyQueuePage(QWidget):
             "rating": rating,
             "pre_note": self.pre_note_text,
             "post_note": self.post_note_text,
-            "interval_days": res.interval_days,
-            "next_review_at": res.next_review_at,
+            "interval_days": fsrs_result.scheduled_interval_days,
+            "next_review_at": fsrs_result.next_review_at,
         }
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
         unit_stats = {
             "last_review_at": iso_utc(now),
-            "next_review_at": res.next_review_at,
+            "next_review_at": fsrs_result.next_review_at,
             "review_count": count,
-            "ease_factor": res.ease_factor,
-            "interval_days": res.interval_days,
+            "ease_factor": unit_row["ease_factor"],
+            "interval_days": fsrs_result.scheduled_interval_days,
             "avg_rating": avg,
+            "fsrs_difficulty": fsrs_result.state.difficulty,
+            "fsrs_stability": fsrs_result.state.stability,
+            "fsrs_last_review_at": iso_utc(fsrs_result.state.last_review_at),
+            "fsrs_last_grade": int(fsrs_result.state.last_grade),
+            "fsrs_review_count": int(fsrs_result.state.review_count),
+            "fsrs_lapse_count": int(fsrs_result.state.lapse_count),
+            "fsrs_state_version": int(fsrs_result.state.state_version),
+            "fsrs_due_retention_used": fsrs_result.due_retention_used,
         }
         self.review_repo.record_review(self.active_unit.unit_id, payload, unit_stats)
         self.unit_drafts.pop(self.active_unit.unit_id, None)

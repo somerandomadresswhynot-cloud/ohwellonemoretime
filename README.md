@@ -73,3 +73,16 @@ Annotation toolbar state is persisted in `ui_state`:
 - `QPdfView` does not reliably expose text glyph quad geometry across Qt versions, so text highlight rendering uses a **fallback cue overlay** on the current page rather than exact text-shape painting.
 - Area highlight rectangles are currently normalized to the visible viewport and intended as a foundation for richer page-geometry anchoring in future updates.
 - UI interactions (drag, erase, context menu) are interactive behaviors; automated UI smoke coverage is best-effort and skipped when GUI dependencies are unavailable.
+
+## FSRS scheduler notes
+
+- Scheduling now uses an FSRS-style DSR model (`difficulty`, `stability`, `retrievability`) in `study_app/services/fsrs_scheduler.py`.
+- Existing review history is replayed on demand to bootstrap FSRS state for old units that do not yet have FSRS fields populated.
+- App feedback mapping:
+  - `skip` -> Again (fail)
+  - `hard` -> Hard (successful but difficult)
+  - `with_effort` -> Good
+  - `easy` -> Easy
+- The raw interval is computed from desired retention (default `0.90`), then a policy layer clamps successful recalls to at least the next day for coarse-grained chapter/section review.
+- Due timestamps are finally rounded to local day start for storage consistency.
+- Parameter optimization is intentionally not included yet; the insertion point is `DEFAULT_FSRS_PARAMETERS` / injected `FSRSParameters` in `fsrs_scheduler.py`.

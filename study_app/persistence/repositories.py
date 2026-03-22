@@ -288,6 +288,11 @@ class ReviewRepo:
             "SELECT * FROM review_events WHERE unit_id=? AND deleted_at IS NULL ORDER BY ended_at DESC", (unit_id,)
         ).fetchall()
 
+    def events_for_unit_chronological(self, unit_id: int):
+        return self.db.conn.execute(
+            "SELECT * FROM review_events WHERE unit_id=? AND deleted_at IS NULL ORDER BY ended_at ASC", (unit_id,)
+        ).fetchall()
+
     def add_event(self, unit_id: int, payload: dict) -> int:
         cur = self.db.conn.execute(
             """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,pre_note,post_note,interval_days,next_review_at)
@@ -316,7 +321,9 @@ class ReviewRepo:
             )
             update_cur = self.db.conn.execute(
                 """UPDATE units
-                SET last_review_at=?,next_review_at=?,review_count=?,ease_factor=?,interval_days=?,avg_rating=?
+                SET last_review_at=?,next_review_at=?,review_count=?,ease_factor=?,interval_days=?,avg_rating=?,
+                    fsrs_difficulty=?,fsrs_stability=?,fsrs_last_review_at=?,fsrs_last_grade=?,fsrs_review_count=?,fsrs_lapse_count=?,
+                    fsrs_state_version=?,fsrs_due_retention_used=?
                 WHERE id=?""",
                 (
                     unit_stats["last_review_at"],
@@ -325,6 +332,14 @@ class ReviewRepo:
                     unit_stats["ease_factor"],
                     unit_stats["interval_days"],
                     unit_stats["avg_rating"],
+                    unit_stats.get("fsrs_difficulty"),
+                    unit_stats.get("fsrs_stability"),
+                    unit_stats.get("fsrs_last_review_at"),
+                    unit_stats.get("fsrs_last_grade"),
+                    unit_stats.get("fsrs_review_count"),
+                    unit_stats.get("fsrs_lapse_count"),
+                    unit_stats.get("fsrs_state_version"),
+                    unit_stats.get("fsrs_due_retention_used"),
                     unit_id,
                 ),
             )
@@ -334,8 +349,28 @@ class ReviewRepo:
 
     def update_unit_stats(self, unit_id: int, data: dict) -> None:
         self.db.conn.execute(
-            """UPDATE units SET last_review_at=?,next_review_at=?,review_count=?,ease_factor=?,interval_days=?,avg_rating=? WHERE id=?""",
-            (data["last_review_at"], data["next_review_at"], data["review_count"], data["ease_factor"], data["interval_days"], data["avg_rating"], unit_id),
+            """UPDATE units
+            SET last_review_at=?,next_review_at=?,review_count=?,ease_factor=?,interval_days=?,avg_rating=?,
+                fsrs_difficulty=?,fsrs_stability=?,fsrs_last_review_at=?,fsrs_last_grade=?,fsrs_review_count=?,fsrs_lapse_count=?,
+                fsrs_state_version=?,fsrs_due_retention_used=?
+            WHERE id=?""",
+            (
+                data["last_review_at"],
+                data["next_review_at"],
+                data["review_count"],
+                data["ease_factor"],
+                data["interval_days"],
+                data["avg_rating"],
+                data.get("fsrs_difficulty"),
+                data.get("fsrs_stability"),
+                data.get("fsrs_last_review_at"),
+                data.get("fsrs_last_grade"),
+                data.get("fsrs_review_count"),
+                data.get("fsrs_lapse_count"),
+                data.get("fsrs_state_version"),
+                data.get("fsrs_due_retention_used"),
+                unit_id,
+            ),
         )
         self.db.conn.commit()
 
