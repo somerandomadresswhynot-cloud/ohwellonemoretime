@@ -89,6 +89,44 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         due = self.review_repo.due_units("2026-03-22T00:00:00+00:00")
         self.assertIn(unit_id, {int(u.unit_id) for u in due})
 
+    def test_due_units_prioritizes_review_items_before_new_items(self):
+        reviewed_unit_id = int(self.units[0]['id'])
+        new_unit_id = int(self.units[1]['id'])
+        now = "2026-03-22T00:00:00+00:00"
+        payload = {
+            'started_at': now,
+            'ended_at': now,
+            'elapsed_seconds': 45,
+            'rating': 'with_effort',
+            'pre_note': '',
+            'post_note': '',
+            'interval_days': 1.0,
+            'next_review_at': now,
+        }
+        stats = {
+            'last_review_at': now,
+            'next_review_at': now,
+            'review_count': 1,
+            'ease_factor': 2.5,
+            'interval_days': 1.0,
+            'avg_rating': 4.0,
+        }
+        self.review_repo.record_review(reviewed_unit_id, payload, stats)
+        due = self.review_repo.due_units("2026-03-23T00:00:00+00:00")
+        ordered_ids = [int(u.unit_id) for u in due]
+        self.assertIn(reviewed_unit_id, ordered_ids)
+        self.assertIn(new_unit_id, ordered_ids)
+        self.assertLess(ordered_ids.index(reviewed_unit_id), ordered_ids.index(new_unit_id))
+
+    def test_queue_eligible_unit_ids_respects_unit_and_source_flags(self):
+        first = int(self.units[0]['id'])
+        second = int(self.units[1]['id'])
+        self.db.conn.execute("UPDATE units SET queue_enabled=0 WHERE id=?", (first,))
+        self.db.conn.execute("UPDATE sources SET is_active=0 WHERE id=?", (self.source_id,))
+        self.db.conn.commit()
+        eligible = self.review_repo.queue_eligible_unit_ids([first, second])
+        self.assertEqual(eligible, set())
+
 
 if __name__ == '__main__':
     unittest.main()
