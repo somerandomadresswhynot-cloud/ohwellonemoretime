@@ -513,6 +513,11 @@ class SourceWorkspace(QWidget):
         btn_add_today = QPushButton("Add for Today's Queue")
         btn_add_today.setObjectName("accent")
         btn_add_today.clicked.connect(self.add_selected_for_today_queue)
+        btn_add_today.setStyleSheet(
+            "QPushButton { background:#1f4f3d; border:1px solid #2e7d60; color:#e8fff3; border-radius:6px; padding:6px 10px; }"
+            "QPushButton:hover { background:#25664d; }"
+        )
+        self.btn_add_today = btn_add_today
         self.page_label = QLabel("Page: -")
 
         self.doc_progress = DocumentProgressBar()
@@ -615,6 +620,9 @@ class SourceWorkspace(QWidget):
         self._pdf_page_poll.timeout.connect(self._on_pdf_page_polled)
         self._pdf_page_poll.start(450)
         self._apply_annotation_ui_state()
+        self._btn_today_feedback_timer = QTimer(self)
+        self._btn_today_feedback_timer.setSingleShot(True)
+        self._btn_today_feedback_timer.timeout.connect(self._update_add_today_button_state)
         self.load_source()
 
     def _mk_tool_btn(self, label: str, key: str) -> QPushButton:
@@ -763,6 +771,117 @@ class SourceWorkspace(QWidget):
         self._sync_pdf_overlay_highlights()
         if self.source:
             self.context_changed.emit(self.source.title, "")
+        self._update_add_today_button_state()
+
+    def _today_iso(self) -> str:
+        return now_utc().date().isoformat()
+
+    def _load_today_queue_snapshot(self) -> dict:
+        today = self._today_iso()
+        raw = self.settings_repo.get("daily_queue_snapshot_json", "")
+        default = {"date": today, "daily_minutes": int(self.settings_repo.get("daily_minutes", "90")), "unit_ids": [], "manual_unit_ids": []}
+        if not raw:
+            return default
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return default
+        if not isinstance(data, dict) or str(data.get("date") or "") != today:
+            return default
+        unit_ids = [int(uid) for uid in data.get("unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        manual_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        try:
+            daily_minutes = int(data.get("daily_minutes", self.settings_repo.get("daily_minutes", "90")))
+        except Exception:
+            daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_ids}
+
+    def _store_today_queue_snapshot(self, snapshot: dict) -> None:
+        payload = {
+            "date": self._today_iso(),
+            "daily_minutes": int(snapshot.get("daily_minutes", self.settings_repo.get("daily_minutes", "90"))),
+            "unit_ids": [int(uid) for uid in snapshot.get("unit_ids", [])],
+            "manual_unit_ids": [int(uid) for uid in snapshot.get("manual_unit_ids", [])],
+        }
+        self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
+
+    def _selected_unit_for_today_queue(self):
+        items = self.tree.selectedItems()
+        if not items:
+            return None
+        page = int(items[0].data(0, 257) or 0)
+        if page < 1:
+            return None
+        return self.review_repo.first_unit_for_source_page(int(self.source_id), page)
+
+    def _update_add_today_button_state(self) -> None:
+        unit = self._selected_unit_for_today_queue()
+        if not unit:
+            self.btn_add_today.setText("Add for Today's Queue")
+            self.btn_add_today.setToolTip("Select a unit or section with page range.")
+            return
+        snapshot = self._load_today_queue_snapshot()
+        in_queue = int(unit.unit_id) in {int(uid) for uid in snapshot.get("unit_ids", [])}
+        if in_queue:
+            self.btn_add_today.setText("In Queue")
+            self.btn_add_today.setStyleSheet(
+                "QPushButton { background:#2f3f66; border:1px solid #4b628f; color:#ecf2ff; border-radius:6px; padding:6px 10px; }"
+                "QPushButton:hover { background:#3a4f7f; }"
+            )
+            self.btn_add_today.setToolTip("Click to remove from today's queue.")
+        else:
+            self.btn_add_today.setText("Add for Today's Queue")
+            self.btn_add_today.setStyleSheet(
+                "QPushButton { background:#1f4f3d; border:1px solid #2e7d60; color:#e8fff3; border-radius:6px; padding:6px 10px; }"
+                "QPushButton:hover { background:#25664d; }"
+            )
+            self.btn_add_today.setToolTip("Click to add selected unit to today's queue.")
+
+    def _toggle_page_in_today_queue(self, page: int, with_feedback: bool = True) -> bool:
+        unit = self.review_repo.first_unit_for_source_page(int(self.source_id), int(page))
+        if not unit:
+            return False
+        snapshot = self._load_today_queue_snapshot()
+        unit_ids = [int(uid) for uid in snapshot.get("unit_ids", [])]
+        manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+        uid = int(unit.unit_id)
+        added = uid not in unit_ids
+        if added:
+            unit_ids.append(uid)
+            if uid not in manual_ids:
+                manual_ids.append(uid)
+        else:
+            unit_ids = [i for i in unit_ids if i != uid]
+            manual_ids = [i for i in manual_ids if i != uid]
+        snapshot["unit_ids"] = unit_ids
+        snapshot["manual_unit_ids"] = manual_ids
+        self._store_today_queue_snapshot(snapshot)
+        self.queue_changed.emit()
+        if with_feedback:
+            self.btn_add_today.setText("Added ✓" if added else "Removed ✓")
+            self._btn_today_feedback_timer.start(1300)
+        else:
+            self._update_add_today_button_state()
+        return True
+
+    def _add_page_to_today_queue(self, page: int) -> bool:
+        unit = self.review_repo.first_unit_for_source_page(int(self.source_id), int(page))
+        if not unit:
+            return False
+        snapshot = self._load_today_queue_snapshot()
+        uid = int(unit.unit_id)
+        if uid in {int(i) for i in snapshot.get("unit_ids", [])}:
+            self._update_add_today_button_state()
+            return True
+        snapshot["unit_ids"] = [int(i) for i in snapshot.get("unit_ids", [])] + [uid]
+        manual_ids = [int(i) for i in snapshot.get("manual_unit_ids", [])]
+        if uid not in manual_ids:
+            manual_ids.append(uid)
+        snapshot["manual_unit_ids"] = manual_ids
+        self._store_today_queue_snapshot(snapshot)
+        self.queue_changed.emit()
+        self._update_add_today_button_state()
+        return True
 
     def _refresh_text_layer_hint(self) -> None:
         if not getattr(self, "source", None) or not self.source or not self.source.file_path:
@@ -996,6 +1115,7 @@ class SourceWorkspace(QWidget):
             self.context_changed.emit(self.source.title, selected_label)
         self.refresh_insights()
         self.refresh_highlights()
+        self._update_add_today_button_state()
 
     def _on_pdf_page_polled(self) -> None:
         page = int(self.pdf.view_state().get("page", 1))
@@ -1179,7 +1299,8 @@ class SourceWorkspace(QWidget):
         if page < 1:
             QMessageBox.information(self, "No page", "Selected node has no page range to map into queue.")
             return
-        self.add_to_today_queue_requested.emit(int(self.source_id), int(page))
+        if not self._toggle_page_in_today_queue(page, with_feedback=True):
+            QMessageBox.information(self, "Not added", "Couldn't map this selection to a unit.")
 
     def edit_outline(self):
         nodes = self.outline_repo.nodes_for_source(self.source_id)
@@ -1269,7 +1390,7 @@ class SourceWorkspace(QWidget):
             return
         menu = QMenu(self)
         add_today_queue = menu.addAction("Add to today's queue")
-        add_today_queue.triggered.connect(lambda: self.add_to_today_queue_requested.emit(int(self.source_id), int(page)))
+        add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(int(page)))
         menu.addSeparator()
         quick_add = menu.addAction(f"Add highlight ({self._annotation_color})")
         quick_add.triggered.connect(lambda: self._create_highlight(page, quote, self._annotation_color))
@@ -1593,6 +1714,8 @@ class StudyQueuePage(QWidget):
         self.list.viewport().installEventFilter(self)
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self.open_queue_item_context_menu)
 
         self.queue_banner = QLabel("")
         self.queue_banner.setWordWrap(True)
@@ -1880,6 +2003,37 @@ class StudyQueuePage(QWidget):
         self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_unit_ids)
         self.refresh()
         return True
+
+    def remove_unit_from_today_queue(self, unit_id: int) -> bool:
+        snapshot = self._load_today_queue_snapshot()
+        unit_ids = [int(uid) for uid in snapshot.get("unit_ids", [])]
+        if int(unit_id) not in unit_ids:
+            return False
+        manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+        unit_ids = [uid for uid in unit_ids if uid != int(unit_id)]
+        manual_ids = [uid for uid in manual_ids if uid != int(unit_id)]
+        daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_ids)
+        self.refresh()
+        return True
+
+    def open_queue_item_context_menu(self, pos) -> None:
+        item = self.list.itemAt(pos)
+        if not item:
+            return
+        idx = self.list.row(item)
+        if idx < 0 or idx >= len(self.display_units):
+            return
+        unit, _reason = self.display_units[idx]
+        menu = QMenu(self)
+        jump = menu.addAction("Open in Reader")
+        remove = menu.addAction("Remove from Today's Queue")
+        chosen = menu.exec(self.list.viewport().mapToGlobal(pos))
+        if chosen == jump:
+            self.list.setCurrentRow(idx)
+            self.jump_to_active_unit()
+        elif chosen == remove:
+            self.remove_unit_from_today_queue(int(unit.unit_id))
 
     def _resize_pdf_by_delta(self, delta: int):
         current = self.pdf.minimumHeight()
