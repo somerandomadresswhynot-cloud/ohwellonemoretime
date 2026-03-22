@@ -82,8 +82,8 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
     def test_missed_due_items_resurface_later(self):
         unit_id = int(self.units[0]['id'])
         self.db.conn.execute(
-            "UPDATE units SET next_review_at=? WHERE id=?",
-            ("2026-03-20T00:00:00+00:00", unit_id),
+            "UPDATE units SET last_review_at=?, interval_days=? WHERE id=?",
+            ("2026-03-20T00:00:00+00:00", 1.0, unit_id),
         )
         self.db.conn.commit()
         due = self.review_repo.due_units("2026-03-22T00:00:00+00:00")
@@ -117,29 +117,13 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         due = self.review_repo.due_units("2026-03-21T00:01:00+00:00")
         self.assertEqual({int(u.unit_id) for u in due}, {int(r["id"]) for r in self.units})
 
-    def test_due_units_uses_latest_review_event_schedule_over_stale_unit_schedule(self):
+    def test_due_units_does_not_depend_on_units_next_review_at(self):
         unit_id = int(self.units[0]["id"])
-        # Simulate stale denormalized unit schedule still in the future.
         self.db.conn.execute(
-            "UPDATE units SET next_review_at=? WHERE id=?",
-            ("2026-03-25T00:00:00+00:00", unit_id),
+            "UPDATE units SET next_review_at=?, last_review_at=?, interval_days=? WHERE id=?",
+            ("2099-01-01T00:00:00+00:00", "2026-03-20T09:05:00+00:00", 1.0, unit_id),
         )
         self.db.conn.commit()
-
-        # Latest review event says this unit is already due.
-        self.review_repo.add_event(
-            unit_id,
-            {
-                "started_at": "2026-03-20T09:00:00+00:00",
-                "ended_at": "2026-03-20T09:05:00+00:00",
-                "elapsed_seconds": 300,
-                "rating": "easy",
-                "pre_note": "",
-                "post_note": "",
-                "interval_days": 1.0,
-                "next_review_at": "2026-03-21T00:00:00+00:00",
-            },
-        )
 
         due = self.review_repo.due_units("2026-03-21T00:01:00+00:00")
         due_ids = {int(u.unit_id) for u in due}

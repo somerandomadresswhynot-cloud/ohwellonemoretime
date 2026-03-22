@@ -1152,10 +1152,10 @@ class SourceWorkspace(QWidget):
             if u["review_count"] > 0:
                 state = "learning"
                 ret = retention_estimate(u, now)
-                nr = u["next_review_at"]
-                if nr:
+                last_review = u["last_review_at"]
+                if last_review:
                     try:
-                        next_dt = parse_iso_to_utc(nr)
+                        next_dt = parse_iso_to_utc(last_review) + timedelta(days=max(0.0, float(u["interval_days"] or 0.0)))
                         if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
                             state = "mastered"
                     except Exception:
@@ -2590,10 +2590,10 @@ class StudyQueuePage(QWidget):
             if u["review_count"] > 0:
                 state = "learning"
                 ret = retention_estimate(u, now)
-                nr = u["next_review_at"]
-                if nr:
+                last_review = u["last_review_at"]
+                if last_review:
                     try:
-                        next_dt = parse_iso_to_utc(nr)
+                        next_dt = parse_iso_to_utc(last_review) + timedelta(days=max(0.0, float(u["interval_days"] or 0.0)))
                         if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
                             state = "mastered"
                     except Exception:
@@ -2721,13 +2721,13 @@ class StudyQueuePage(QWidget):
             "pre_note": self.pre_note_text,
             "post_note": self.post_note_text,
             "interval_days": fsrs_result.scheduled_interval_days,
-            "next_review_at": fsrs_result.next_review_at,
+            "next_review_at": "",
         }
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
         unit_stats = {
             "last_review_at": iso_utc(now),
-            "next_review_at": fsrs_result.next_review_at,
+            "next_review_at": None,
             "review_count": count,
             "ease_factor": unit_row["ease_factor"],
             "interval_days": fsrs_result.scheduled_interval_days,
