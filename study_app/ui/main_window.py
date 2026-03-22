@@ -1954,11 +1954,20 @@ class StudyQueuePage(QWidget):
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
         snapshot = self._load_today_queue_snapshot()
         planned_ids = list(snapshot["unit_ids"])
+        due_ids_in_order = [int(u.unit_id) for u in due_units]
         if planned_ids:
             saved_minutes = snapshot.get("daily_minutes")
             reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
             if saved_minutes is not None and saved_minutes != int(daily_minutes) and reviewed_today == 0:
                 planned_ids = []
+            else:
+                planned_set = {int(uid) for uid in planned_ids}
+                newly_due_ids = [uid for uid in due_ids_in_order if uid not in planned_set]
+                if newly_due_ids:
+                    planned_ids = planned_ids + newly_due_ids
+                    manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", []) if int(uid) in planned_ids]
+                    self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=manual_ids)
+                    return planned_ids, True
         if not planned_ids:
             plan = plan_session_queue(
                 due_units,
