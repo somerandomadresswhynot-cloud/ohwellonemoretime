@@ -1,13 +1,14 @@
 import unittest
 from dataclasses import dataclass
 
-from study_app.services.queue_planner import plan_session_queue
+from study_app.services.queue_planner import plan_session_queue, resolve_today_queue_ids
 
 
 @dataclass
 class FakeUnit:
     name: str
     sec: float
+    unit_id: int = 0
     source_id: int = 1
 
 
@@ -57,6 +58,62 @@ class QueuePlannerTests(unittest.TestCase):
         reasons = {s.reason for s in plan.suggested_units}
         self.assertIn("strict_order_progression_gate", reasons)
         self.assertEqual(plan.suggested_units[0].unit.name, "S1-first")
+
+    def test_resolve_today_queue_ids_rebuilds_from_due_before_any_reviews_today(self):
+        due = [
+            FakeUnit("Due-1", 60, unit_id=101),
+            FakeUnit("Due-2", 60, unit_id=102),
+            FakeUnit("Due-3", 60, unit_id=103),
+        ]
+        planned_ids, rebuilt = resolve_today_queue_ids(
+            snapshot_unit_ids=[999],  # stale snapshot
+            snapshot_manual_unit_ids=[],
+            due_units=due,
+            daily_minutes=2,  # cap to 2 items
+            reviewed_today=0,
+            estimate_seconds=lambda u: u.sec,
+            unit_id_of=lambda u: u.unit_id,
+            strict_progression_sources=set(),
+            source_id_of=lambda u: u.source_id,
+        )
+        self.assertTrue(rebuilt)
+        self.assertEqual(planned_ids, [101, 102])
+
+    def test_resolve_today_queue_ids_keeps_snapshot_stable_after_reviews_start(self):
+        due = [
+            FakeUnit("U1", 60, unit_id=1),
+            FakeUnit("U2", 60, unit_id=2),
+            FakeUnit("U3", 60, unit_id=3),
+        ]
+        planned_ids, rebuilt = resolve_today_queue_ids(
+            snapshot_unit_ids=[2, 1],
+            snapshot_manual_unit_ids=[],
+            due_units=due,
+            daily_minutes=1,
+            reviewed_today=1,
+            estimate_seconds=lambda u: u.sec,
+            unit_id_of=lambda u: u.unit_id,
+            strict_progression_sources=set(),
+            source_id_of=lambda u: u.source_id,
+        )
+        self.assertFalse(rebuilt)
+        self.assertEqual(planned_ids, [2, 1])
+
+    def test_resolve_today_queue_ids_preserves_manual_items_across_rebuild(self):
+        due = [FakeUnit("U1", 60, unit_id=1)]
+        planned_ids, rebuilt = resolve_today_queue_ids(
+            snapshot_unit_ids=[999],
+            snapshot_manual_unit_ids=[42],
+            due_units=due,
+            daily_minutes=1,
+            reviewed_today=0,
+            estimate_seconds=lambda u: u.sec,
+            unit_id_of=lambda u: u.unit_id,
+            strict_progression_sources=set(),
+            source_id_of=lambda u: u.source_id,
+        )
+        self.assertTrue(rebuilt)
+        self.assertEqual(planned_ids, [1, 42])
 
 
 if __name__ == "__main__":

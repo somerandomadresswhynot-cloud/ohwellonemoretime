@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
-from study_app.services.queue_planner import plan_session_queue
+from study_app.services.queue_planner import resolve_today_queue_ids
 from study_app.services.scheduler import allocate_new_units, recommend_new_units_with_guardrail, retention_estimate
 from study_app.services.fsrs_scheduler import DEFAULT_FSRS_PARAMETERS, schedule_next_review
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
@@ -1152,10 +1152,10 @@ class SourceWorkspace(QWidget):
             if u["review_count"] > 0:
                 state = "learning"
                 ret = retention_estimate(u, now)
-                nr = u["next_review_at"]
-                if nr:
+                last_review = u["last_review_at"]
+                if last_review:
                     try:
-                        next_dt = parse_iso_to_utc(nr)
+                        next_dt = parse_iso_to_utc(last_review) + timedelta(days=max(0.0, float(u["interval_days"] or 0.0)))
                         if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
                             state = "mastered"
                     except Exception:
@@ -1968,24 +1968,25 @@ class StudyQueuePage(QWidget):
 
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
         snapshot = self._load_today_queue_snapshot()
-        planned_ids = list(snapshot["unit_ids"])
-        if planned_ids:
-            saved_minutes = snapshot.get("daily_minutes")
-            reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
-            if saved_minutes is not None and saved_minutes != int(daily_minutes) and reviewed_today == 0:
-                planned_ids = []
-        if not planned_ids:
-            plan = plan_session_queue(
-                due_units,
+        reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
+        planned_ids, rebuilt = resolve_today_queue_ids(
+            snapshot_unit_ids=list(snapshot.get("unit_ids", [])),
+            snapshot_manual_unit_ids=list(snapshot.get("manual_unit_ids", [])),
+            due_units=due_units,
+            daily_minutes=daily_minutes,
+            reviewed_today=reviewed_today,
+            estimate_seconds=self._estimate_review_seconds,
+            unit_id_of=lambda u: int(u.unit_id),
+            strict_progression_sources=strict_sources,
+            source_id_of=lambda u: int(u.source_id),
+        )
+        if rebuilt:
+            self._store_today_queue_snapshot(
+                planned_ids,
                 daily_minutes,
-                self._estimate_review_seconds,
-                strict_progression_sources=strict_sources,
-                source_id_of=lambda u: int(u.source_id),
+                manual_unit_ids=list(snapshot.get("manual_unit_ids", [])),
             )
-            planned_ids = [int(u.unit_id) for u in plan.selected_units]
-            self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=[])
-            return planned_ids, True
-        return planned_ids, False
+        return planned_ids, rebuilt
 
     def add_unit_to_today_queue(self, source_id: int, page: int) -> bool:
         unit = self.review_repo.first_unit_for_source_page(int(source_id), int(page))
@@ -2589,10 +2590,10 @@ class StudyQueuePage(QWidget):
             if u["review_count"] > 0:
                 state = "learning"
                 ret = retention_estimate(u, now)
-                nr = u["next_review_at"]
-                if nr:
+                last_review = u["last_review_at"]
+                if last_review:
                     try:
-                        next_dt = parse_iso_to_utc(nr)
+                        next_dt = parse_iso_to_utc(last_review) + timedelta(days=max(0.0, float(u["interval_days"] or 0.0)))
                         if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
                             state = "mastered"
                     except Exception:
@@ -2720,13 +2721,13 @@ class StudyQueuePage(QWidget):
             "pre_note": self.pre_note_text,
             "post_note": self.post_note_text,
             "interval_days": fsrs_result.scheduled_interval_days,
-            "next_review_at": fsrs_result.next_review_at,
+            "next_review_at": "",
         }
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
         unit_stats = {
             "last_review_at": iso_utc(now),
-            "next_review_at": fsrs_result.next_review_at,
+            "next_review_at": None,
             "review_count": count,
             "ease_factor": unit_row["ease_factor"],
             "interval_days": fsrs_result.scheduled_interval_days,

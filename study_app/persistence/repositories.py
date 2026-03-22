@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -144,6 +144,10 @@ class ReviewRepo:
         self.db = db
 
     def due_units(self, now_iso: str) -> list[UnitView]:
+        now_dt = datetime.fromisoformat(now_iso)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
         rows = self.db.conn.execute(
             """WITH RECURSIVE node_path(node_id, path) AS (
                 SELECT n.id, n.title
@@ -154,20 +158,43 @@ class ReviewRepo:
                 FROM outline_nodes c
                 JOIN node_path ON c.parent_id=node_path.node_id
             )
-            SELECT u.*, s.title AS source_title, COALESCE(node_path.path, u.title) AS hierarchy_path
+            SELECT
+                u.*,
+                s.title AS source_title,
+                COALESCE(node_path.path, u.title) AS hierarchy_path
             FROM units u
             JOIN sources s ON s.id=u.source_id
             LEFT JOIN node_path ON node_path.node_id=u.node_id
-            WHERE s.is_active=1 AND u.queue_enabled=1 AND (u.next_review_at IS NULL OR u.next_review_at<=?)
-            ORDER BY COALESCE(u.next_review_at,'') ASC""",
-            (now_iso,),
+            WHERE s.is_active=1 AND u.queue_enabled=1
+            ORDER BY COALESCE(u.last_review_at, '') ASC, u.id ASC""",
         ).fetchall()
+        due_rows: list[tuple[object, str | None]] = []
+        for r in rows:
+            last_review_at = r["last_review_at"]
+            interval_days = float(r["interval_days"] or 0.0)
+            if not last_review_at:
+                due_rows.append((r, None))
+                continue
+            try:
+                reviewed_dt = datetime.fromisoformat(last_review_at)
+                if reviewed_dt.tzinfo is None:
+                    reviewed_dt = reviewed_dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            due_dt = reviewed_dt + timedelta(days=max(0.0, interval_days))
+            local_due = due_dt.astimezone(local_tz)
+            local_midnight = datetime(local_due.year, local_due.month, local_due.day, tzinfo=local_tz)
+            due_dt = local_midnight.astimezone(timezone.utc)
+            if due_dt <= now_dt:
+                due_rows.append((r, due_dt.isoformat(timespec="seconds")))
+
         return [UnitView(
             unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
             title=r["title"], hierarchy_path=r["hierarchy_path"],
             start_page=r["start_page"], end_page=r["end_page"], queue_enabled=bool(r["queue_enabled"]),
-            next_review_at=r["next_review_at"], last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
-        ) for r in rows]
+            next_review_at=effective_due_at,
+            last_review_at=r["last_review_at"], review_count=r["review_count"], avg_rating=r["avg_rating"]
+        ) for r, effective_due_at in due_rows]
 
 
     def unit_views_by_ids(self, unit_ids: list[int]) -> list[UnitView]:
@@ -294,15 +321,17 @@ class ReviewRepo:
         ).fetchall()
 
     def add_event(self, unit_id: int, payload: dict) -> int:
+        compat_next_review_at = str(payload.get("next_review_at") or "")
         cur = self.db.conn.execute(
             """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,pre_note,post_note,interval_days,next_review_at)
             VALUES(?,?,?,?,?,?,?,?,?)""",
-            (unit_id, payload["started_at"], payload["ended_at"], payload["elapsed_seconds"], payload["rating"], payload["pre_note"], payload["post_note"], payload["interval_days"], payload["next_review_at"]),
+            (unit_id, payload["started_at"], payload["ended_at"], payload["elapsed_seconds"], payload["rating"], payload["pre_note"], payload["post_note"], payload["interval_days"], compat_next_review_at),
         )
         self.db.conn.commit()
         return int(cur.lastrowid)
 
     def record_review(self, unit_id: int, payload: dict, unit_stats: dict) -> int:
+        compat_next_review_at = str(payload.get("next_review_at") or "")
         with self.db.conn:
             cur = self.db.conn.execute(
                 """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,pre_note,post_note,interval_days,next_review_at)
@@ -316,7 +345,7 @@ class ReviewRepo:
                     payload["pre_note"],
                     payload["post_note"],
                     payload["interval_days"],
-                    payload["next_review_at"],
+                    compat_next_review_at,
                 ),
             )
             update_cur = self.db.conn.execute(
@@ -327,7 +356,7 @@ class ReviewRepo:
                 WHERE id=?""",
                 (
                     unit_stats["last_review_at"],
-                    unit_stats["next_review_at"],
+                    unit_stats.get("next_review_at"),
                     unit_stats["review_count"],
                     unit_stats["ease_factor"],
                     unit_stats["interval_days"],
@@ -356,7 +385,7 @@ class ReviewRepo:
             WHERE id=?""",
             (
                 data["last_review_at"],
-                data["next_review_at"],
+                data.get("next_review_at"),
                 data["review_count"],
                 data["ease_factor"],
                 data["interval_days"],
@@ -396,14 +425,14 @@ class ReviewRepo:
         self.db.conn.commit()
 
     def source_statistics(self, now_iso: str):
-        return self.db.conn.execute(
+        rows = self.db.conn.execute(
             """
             SELECT
                 s.id AS source_id,
                 s.title AS source_title,
                 COUNT(u.id) AS total_units,
                 SUM(CASE WHEN u.review_count > 0 THEN 1 ELSE 0 END) AS learned_units,
-                SUM(CASE WHEN u.queue_enabled = 1 AND (u.next_review_at IS NULL OR u.next_review_at <= ?) THEN 1 ELSE 0 END) AS due_units,
+                0 AS due_units,
                 COALESCE(AVG(CASE WHEN u.review_count > 0 THEN u.avg_rating END), 0) AS avg_rating_learned,
                 COALESCE(AVG(re.elapsed_seconds), 0) AS avg_elapsed_seconds,
                 MAX(re.ended_at) AS last_review_at
@@ -413,8 +442,16 @@ class ReviewRepo:
             GROUP BY s.id, s.title
             ORDER BY due_units DESC, total_units DESC, s.title ASC
             """,
-            (now_iso,),
         ).fetchall()
+        due_by_source: dict[int, int] = {}
+        for u in self.due_units(now_iso):
+            due_by_source[int(u.source_id)] = due_by_source.get(int(u.source_id), 0) + 1
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["due_units"] = int(due_by_source.get(int(row["source_id"]), 0))
+            out.append(item)
+        return out
 
 
 class SettingsRepo:
