@@ -1,7 +1,7 @@
 import unittest
 from dataclasses import dataclass
 
-from study_app.services.queue_planner import merge_missing_due_unit_ids, plan_session_queue
+from study_app.services.queue_planner import plan_session_queue, resolve_today_queue_ids
 
 
 @dataclass
@@ -59,32 +59,61 @@ class QueuePlannerTests(unittest.TestCase):
         self.assertIn("strict_order_progression_gate", reasons)
         self.assertEqual(plan.suggested_units[0].unit.name, "S1-first")
 
-    def test_merge_missing_due_unit_ids_appends_due_units_missing_from_snapshot(self):
+    def test_resolve_today_queue_ids_rebuilds_from_due_before_any_reviews_today(self):
         due = [
-            FakeUnit("Reviewed-on-2026-03-20-A", 60, unit_id=101),
-            FakeUnit("Reviewed-on-2026-03-20-B", 60, unit_id=102),
-            FakeUnit("Reviewed-on-2026-03-20-C", 60, unit_id=103),
+            FakeUnit("Due-1", 60, unit_id=101),
+            FakeUnit("Due-2", 60, unit_id=102),
+            FakeUnit("Due-3", 60, unit_id=103),
         ]
-        # Simulates a stale persisted queue that does not include currently due units.
-        stale_snapshot_ids = [999]
-
-        merged = merge_missing_due_unit_ids(
-            stale_snapshot_ids,
-            due,
+        planned_ids, rebuilt = resolve_today_queue_ids(
+            snapshot_unit_ids=[999],  # stale snapshot
+            snapshot_manual_unit_ids=[],
+            due_units=due,
+            daily_minutes=2,  # cap to 2 items
+            reviewed_today=0,
+            estimate_seconds=lambda u: u.sec,
             unit_id_of=lambda u: u.unit_id,
+            strict_progression_sources=set(),
+            source_id_of=lambda u: u.source_id,
         )
+        self.assertTrue(rebuilt)
+        self.assertEqual(planned_ids, [101, 102])
 
-        self.assertEqual(merged, [999, 101, 102, 103])
-
-    def test_merge_missing_due_unit_ids_preserves_existing_order_without_duplicates(self):
+    def test_resolve_today_queue_ids_keeps_snapshot_stable_after_reviews_start(self):
         due = [
             FakeUnit("U1", 60, unit_id=1),
             FakeUnit("U2", 60, unit_id=2),
             FakeUnit("U3", 60, unit_id=3),
         ]
-        snapshot_ids = [2, 1]
-        merged = merge_missing_due_unit_ids(snapshot_ids, due, unit_id_of=lambda u: u.unit_id)
-        self.assertEqual(merged, [2, 1, 3])
+        planned_ids, rebuilt = resolve_today_queue_ids(
+            snapshot_unit_ids=[2, 1],
+            snapshot_manual_unit_ids=[],
+            due_units=due,
+            daily_minutes=1,
+            reviewed_today=1,
+            estimate_seconds=lambda u: u.sec,
+            unit_id_of=lambda u: u.unit_id,
+            strict_progression_sources=set(),
+            source_id_of=lambda u: u.source_id,
+        )
+        self.assertFalse(rebuilt)
+        self.assertEqual(planned_ids, [2, 1])
+
+    def test_resolve_today_queue_ids_preserves_manual_items_across_rebuild(self):
+        due = [FakeUnit("U1", 60, unit_id=1)]
+        planned_ids, rebuilt = resolve_today_queue_ids(
+            snapshot_unit_ids=[999],
+            snapshot_manual_unit_ids=[42],
+            due_units=due,
+            daily_minutes=1,
+            reviewed_today=0,
+            estimate_seconds=lambda u: u.sec,
+            unit_id_of=lambda u: u.unit_id,
+            strict_progression_sources=set(),
+            source_id_of=lambda u: u.source_id,
+        )
+        self.assertTrue(rebuilt)
+        self.assertEqual(planned_ids, [1, 42])
 
 
 if __name__ == "__main__":

@@ -22,25 +22,48 @@ class QueuePlan(Generic[TUnit]):
     suggested_units: list[QueueSuggestion[TUnit]]
 
 
-def merge_missing_due_unit_ids(
-    planned_unit_ids: list[int],
+def resolve_today_queue_ids(
+    *,
+    snapshot_unit_ids: list[int],
+    snapshot_manual_unit_ids: list[int],
     due_units: list[TUnit],
+    daily_minutes: int,
+    reviewed_today: int,
+    estimate_seconds: Callable[[TUnit], float],
     unit_id_of: Callable[[TUnit], int],
-) -> list[int]:
-    """Append currently-due units that are missing from a persisted plan.
+    strict_progression_sources: set[int] | None = None,
+    source_id_of: Callable[[TUnit], int] | None = None,
+) -> tuple[list[int], bool]:
+    """Resolve today's queue ids from live due state and persisted snapshot.
 
-    This keeps persisted queue order stable while preventing stale queue snapshots
-    from hiding units that are now due.
+    Policy:
+    - Before any reviews are completed today, rebuild from current due rows so
+      daily budget caps are always honored.
+    - After reviews begin, keep the fixed snapshot order stable.
+    - Preserve manually-added ids across rebuilds.
     """
-    merged = [int(uid) for uid in planned_unit_ids]
-    seen = set(merged)
-    for unit in due_units:
-        uid = int(unit_id_of(unit))
+    planned_ids = [int(uid) for uid in snapshot_unit_ids]
+    manual_ids = [int(uid) for uid in snapshot_manual_unit_ids]
+
+    rebuild = (not planned_ids) or int(reviewed_today) == 0
+    if not rebuild:
+        return planned_ids, False
+
+    plan = plan_session_queue(
+        due_units,
+        daily_minutes,
+        estimate_seconds,
+        strict_progression_sources=strict_progression_sources,
+        source_id_of=source_id_of,
+    )
+    planned_ids = [int(unit_id_of(u)) for u in plan.selected_units]
+    seen = set(planned_ids)
+    for uid in manual_ids:
         if uid in seen:
             continue
-        merged.append(uid)
+        planned_ids.append(uid)
         seen.add(uid)
-    return merged
+    return planned_ids, True
 
 
 def plan_session_queue(
