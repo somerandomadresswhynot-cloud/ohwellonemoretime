@@ -1961,10 +1961,11 @@ class StudyQueuePage(QWidget):
             if saved_minutes is not None and saved_minutes != int(daily_minutes) and reviewed_today == 0:
                 planned_ids = []
             else:
-                planned_set = {int(uid) for uid in planned_ids}
-                newly_due_ids = [uid for uid in due_ids_in_order if uid not in planned_set]
-                if newly_due_ids:
-                    planned_ids = planned_ids + newly_due_ids
+                due_set = set(due_ids_in_order)
+                extra_ids = [int(uid) for uid in planned_ids if int(uid) not in due_set]
+                reordered_ids = due_ids_in_order + [uid for uid in extra_ids if uid not in due_set]
+                if reordered_ids != planned_ids:
+                    planned_ids = reordered_ids
                     manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", []) if int(uid) in planned_ids]
                     self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=manual_ids)
                     return planned_ids, True
