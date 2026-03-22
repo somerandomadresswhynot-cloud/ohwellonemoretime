@@ -100,6 +100,10 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         due = self.review_repo.due_units("2026-03-23T12:00:00+00:00")
         self.assertIn(unit_id, {int(u.unit_id) for u in due})
 
+    def test_due_units_excludes_never_reviewed_units(self):
+        due = self.review_repo.due_units("2026-03-23T12:00:00+00:00")
+        self.assertEqual(due, [])
+
 
 if __name__ == '__main__':
     unittest.main()

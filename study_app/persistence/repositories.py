@@ -226,6 +226,8 @@ class ReviewRepo:
         for r in rows:
             unit_id = int(r["id"])
             unit_events = events_by_unit.get(unit_id, [])
+            if not unit_events:
+                continue
             last_review_at = unit_events[-1]["ended_at"] if unit_events else None
             due_at_iso = _derive_due_at_from_events(unit_events)
             if not _is_due_now(due_at_iso, now_iso):
