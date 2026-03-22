@@ -1,18 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from study_app.domain.models import iso_utc, parse_iso_to_utc
-
-RATING_FACTORS = {
-    "easy": 1.8,
-    "with_effort": 1.25,
-    "hard": 0.8,
-    "skip": 0.35,
-}
-
-RATING_SCORE = {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}
+from study_app.domain.models import parse_iso_to_utc
+from study_app.services.fsrs_scheduler import DEFAULT_FSRS_PARAMETERS, schedule_next_review
 
 
 @dataclass
@@ -40,21 +32,23 @@ class GuardrailRecommendation:
 
 
 def compute_next(unit_row, rating: str, now: datetime) -> ScheduleResult:
-    prev_interval = float(unit_row["interval_days"] or 0)
-    ef = float(unit_row["ease_factor"] or 2.5)
-    review_count = int(unit_row["review_count"] or 0)
-
-    if review_count == 0:
-        interval = {"easy": 3, "with_effort": 1, "hard": 0.5, "skip": 0.2}[rating]
-    else:
-        interval = max(0.2, prev_interval * RATING_FACTORS[rating] * (ef / 2.5))
-
-    ef = min(3.0, max(1.3, ef + (RATING_SCORE[rating] - 3) * 0.08))
-    next_review = now + timedelta(days=interval)
+    tzinfo = datetime.now().astimezone().tzinfo
+    out = schedule_next_review(
+        unit_row=unit_row,
+        review_events=[],
+        now=now,
+        feedback=rating,
+        timezone_info=tzinfo,
+        desired_retention=0.9,
+        params=DEFAULT_FSRS_PARAMETERS,
+    )
     retention = retention_estimate(unit_row, now)
-    return ScheduleResult(interval_days=interval, next_review_at=iso_utc(next_review), ease_factor=ef, retention=retention)
-
-
+    return ScheduleResult(
+        interval_days=float(out.scheduled_interval_days),
+        next_review_at=out.next_review_at,
+        ease_factor=float(unit_row["ease_factor"] or 2.5),
+        retention=retention,
+    )
 def retention_estimate(unit_row, now: datetime) -> float:
     last = unit_row["last_review_at"]
     if not last:

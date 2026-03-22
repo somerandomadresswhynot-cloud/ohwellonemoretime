@@ -50,6 +50,15 @@ CREATE TABLE IF NOT EXISTS units (
     ease_factor REAL NOT NULL DEFAULT 2.5,
     interval_days REAL NOT NULL DEFAULT 0,
     avg_rating REAL NOT NULL DEFAULT 0,
+    fsrs_difficulty REAL,
+    fsrs_stability REAL,
+    fsrs_last_review_at TEXT,
+    fsrs_last_grade INTEGER,
+    fsrs_review_count INTEGER,
+    fsrs_lapse_count INTEGER,
+    fsrs_state_version INTEGER,
+    fsrs_due_retention_used REAL,
+    fsrs_parameters_json TEXT,
     CHECK (start_page >= 1),
     CHECK (end_page >= start_page),
     FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
@@ -176,9 +185,31 @@ class Database:
         if "updated_at" not in highlight_cols:
             self.conn.execute("ALTER TABLE highlights ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
         self._backfill_highlight_annotation_fields()
+        self._ensure_fsrs_columns()
         self.conn.commit()
         self._ensure_scheduling_constraints()
         self._ensure_indexes()
+
+    def _ensure_fsrs_columns(self) -> None:
+        unit_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(units)").fetchall()}
+        if "fsrs_difficulty" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_difficulty REAL")
+        if "fsrs_stability" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_stability REAL")
+        if "fsrs_last_review_at" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_last_review_at TEXT")
+        if "fsrs_last_grade" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_last_grade INTEGER")
+        if "fsrs_review_count" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_review_count INTEGER")
+        if "fsrs_lapse_count" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_lapse_count INTEGER")
+        if "fsrs_state_version" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_state_version INTEGER")
+        if "fsrs_due_retention_used" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_due_retention_used REAL")
+        if "fsrs_parameters_json" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_parameters_json TEXT")
 
     def _backfill_highlight_annotation_fields(self) -> None:
         self.conn.execute(
@@ -305,6 +336,15 @@ class Database:
                 ease_factor REAL NOT NULL DEFAULT 2.5,
                 interval_days REAL NOT NULL DEFAULT 0,
                 avg_rating REAL NOT NULL DEFAULT 0,
+                fsrs_difficulty REAL,
+                fsrs_stability REAL,
+                fsrs_last_review_at TEXT,
+                fsrs_last_grade INTEGER,
+                fsrs_review_count INTEGER,
+                fsrs_lapse_count INTEGER,
+                fsrs_state_version INTEGER,
+                fsrs_due_retention_used REAL,
+                fsrs_parameters_json TEXT,
                 CHECK (start_page >= 1),
                 CHECK (end_page >= start_page),
                 FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
@@ -316,11 +356,15 @@ class Database:
             """
             INSERT INTO units_new (
                 id, source_id, node_id, title, start_page, end_page, queue_enabled,
-                last_review_at, next_review_at, review_count, ease_factor, interval_days, avg_rating
+                last_review_at, next_review_at, review_count, ease_factor, interval_days, avg_rating,
+                fsrs_difficulty, fsrs_stability, fsrs_last_review_at, fsrs_last_grade, fsrs_review_count, fsrs_lapse_count,
+                fsrs_state_version, fsrs_due_retention_used, fsrs_parameters_json
             )
             SELECT
                 id, source_id, node_id, title, start_page, end_page, queue_enabled,
-                last_review_at, next_review_at, review_count, ease_factor, interval_days, avg_rating
+                last_review_at, next_review_at, review_count, ease_factor, interval_days, avg_rating,
+                fsrs_difficulty, fsrs_stability, fsrs_last_review_at, fsrs_last_grade, fsrs_review_count, fsrs_lapse_count,
+                fsrs_state_version, fsrs_due_retention_used, fsrs_parameters_json
             FROM units
             """
         )

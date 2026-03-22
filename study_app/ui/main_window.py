@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QBrush, QCursor, QPainter, QPen, QLinearGradient
@@ -41,7 +41,8 @@ from study_app.persistence.repositories import HighlightRepo, OutlineRepo, Revie
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
-from study_app.services.scheduler import allocate_new_units, compute_next, recommend_new_units_with_guardrail, retention_estimate
+from study_app.services.scheduler import allocate_new_units, recommend_new_units_with_guardrail, retention_estimate
+from study_app.services.fsrs_scheduler import DEFAULT_FSRS_PARAMETERS, schedule_next_review
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
@@ -198,6 +199,7 @@ class DocumentProgressBar(QWidget):
 class SourcesPage(QWidget):
     queue_changed = Signal()
     library_changed = Signal()
+    add_to_today_queue_requested = Signal(int, int)
 
     def __init__(
         self,
@@ -308,6 +310,7 @@ class SourcesPage(QWidget):
             )
             self.current_workspace.queue_changed.connect(self.queue_changed.emit)
             self.current_workspace.context_changed.connect(self.on_workspace_context_changed)
+            self.current_workspace.add_to_today_queue_requested.connect(self.add_to_today_queue_requested.emit)
             self.workspace_host_layout.addWidget(self.current_workspace)
         else:
             self.current_workspace.set_source(source_id)
@@ -428,6 +431,7 @@ class SourcesPage(QWidget):
 class SourceWorkspace(QWidget):
     queue_changed = Signal()
     context_changed = Signal(str, str)
+    add_to_today_queue_requested = Signal(int, int)
     def __init__(
         self,
         source_id: int,
@@ -506,6 +510,14 @@ class SourceWorkspace(QWidget):
         btn_jump.clicked.connect(self.jump_to_selected)
         btn_unit_actions = QPushButton("Unit Actions ▾")
         btn_unit_actions.clicked.connect(self.open_unit_actions_menu)
+        btn_add_today = QPushButton("Add for Today's Queue")
+        btn_add_today.setObjectName("accent")
+        btn_add_today.clicked.connect(self.add_selected_for_today_queue)
+        btn_add_today.setStyleSheet(
+            "QPushButton { background:#1f4f3d; border:1px solid #2e7d60; color:#e8fff3; border-radius:6px; padding:6px 10px; }"
+            "QPushButton:hover { background:#25664d; }"
+        )
+        self.btn_add_today = btn_add_today
         self.page_label = QLabel("Page: -")
 
         self.doc_progress = DocumentProgressBar()
@@ -584,7 +596,7 @@ class SourceWorkspace(QWidget):
         tabs.addTab(tab_ins, "Insights")
         tabs.addTab(tab_unit, "Unit Highlights")
         tabs.addTab(tab_src, "Source Highlights")
-        right_l = QVBoxLayout(); right_l.addWidget(tabs); right_l.addStretch()
+        right_l = QVBoxLayout(); right_l.addWidget(btn_add_today); right_l.addWidget(tabs); right_l.addStretch()
 
         lw = QWidget(); lw.setLayout(left_l)
         cw = QWidget(); cw.setLayout(c_l)
@@ -608,6 +620,9 @@ class SourceWorkspace(QWidget):
         self._pdf_page_poll.timeout.connect(self._on_pdf_page_polled)
         self._pdf_page_poll.start(450)
         self._apply_annotation_ui_state()
+        self._btn_today_feedback_timer = QTimer(self)
+        self._btn_today_feedback_timer.setSingleShot(True)
+        self._btn_today_feedback_timer.timeout.connect(self._update_add_today_button_state)
         self.load_source()
 
     def _mk_tool_btn(self, label: str, key: str) -> QPushButton:
@@ -756,6 +771,117 @@ class SourceWorkspace(QWidget):
         self._sync_pdf_overlay_highlights()
         if self.source:
             self.context_changed.emit(self.source.title, "")
+        self._update_add_today_button_state()
+
+    def _today_iso(self) -> str:
+        return now_utc().date().isoformat()
+
+    def _load_today_queue_snapshot(self) -> dict:
+        today = self._today_iso()
+        raw = self.settings_repo.get("daily_queue_snapshot_json", "")
+        default = {"date": today, "daily_minutes": int(self.settings_repo.get("daily_minutes", "90")), "unit_ids": [], "manual_unit_ids": []}
+        if not raw:
+            return default
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return default
+        if not isinstance(data, dict) or str(data.get("date") or "") != today:
+            return default
+        unit_ids = [int(uid) for uid in data.get("unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        manual_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        try:
+            daily_minutes = int(data.get("daily_minutes", self.settings_repo.get("daily_minutes", "90")))
+        except Exception:
+            daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_ids}
+
+    def _store_today_queue_snapshot(self, snapshot: dict) -> None:
+        payload = {
+            "date": self._today_iso(),
+            "daily_minutes": int(snapshot.get("daily_minutes", self.settings_repo.get("daily_minutes", "90"))),
+            "unit_ids": [int(uid) for uid in snapshot.get("unit_ids", [])],
+            "manual_unit_ids": [int(uid) for uid in snapshot.get("manual_unit_ids", [])],
+        }
+        self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
+
+    def _selected_unit_for_today_queue(self):
+        items = self.tree.selectedItems()
+        if not items:
+            return None
+        page = int(items[0].data(0, 257) or 0)
+        if page < 1:
+            return None
+        return self.review_repo.first_unit_for_source_page(int(self.source_id), page)
+
+    def _update_add_today_button_state(self) -> None:
+        unit = self._selected_unit_for_today_queue()
+        if not unit:
+            self.btn_add_today.setText("Add for Today's Queue")
+            self.btn_add_today.setToolTip("Select a unit or section with page range.")
+            return
+        snapshot = self._load_today_queue_snapshot()
+        in_queue = int(unit.unit_id) in {int(uid) for uid in snapshot.get("unit_ids", [])}
+        if in_queue:
+            self.btn_add_today.setText("In Queue")
+            self.btn_add_today.setStyleSheet(
+                "QPushButton { background:#2f3f66; border:1px solid #4b628f; color:#ecf2ff; border-radius:6px; padding:6px 10px; }"
+                "QPushButton:hover { background:#3a4f7f; }"
+            )
+            self.btn_add_today.setToolTip("Click to remove from today's queue.")
+        else:
+            self.btn_add_today.setText("Add for Today's Queue")
+            self.btn_add_today.setStyleSheet(
+                "QPushButton { background:#1f4f3d; border:1px solid #2e7d60; color:#e8fff3; border-radius:6px; padding:6px 10px; }"
+                "QPushButton:hover { background:#25664d; }"
+            )
+            self.btn_add_today.setToolTip("Click to add selected unit to today's queue.")
+
+    def _toggle_page_in_today_queue(self, page: int, with_feedback: bool = True) -> bool:
+        unit = self.review_repo.first_unit_for_source_page(int(self.source_id), int(page))
+        if not unit:
+            return False
+        snapshot = self._load_today_queue_snapshot()
+        unit_ids = [int(uid) for uid in snapshot.get("unit_ids", [])]
+        manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+        uid = int(unit.unit_id)
+        added = uid not in unit_ids
+        if added:
+            unit_ids.append(uid)
+            if uid not in manual_ids:
+                manual_ids.append(uid)
+        else:
+            unit_ids = [i for i in unit_ids if i != uid]
+            manual_ids = [i for i in manual_ids if i != uid]
+        snapshot["unit_ids"] = unit_ids
+        snapshot["manual_unit_ids"] = manual_ids
+        self._store_today_queue_snapshot(snapshot)
+        self.queue_changed.emit()
+        if with_feedback:
+            self.btn_add_today.setText("Added ✓" if added else "Removed ✓")
+            self._btn_today_feedback_timer.start(1300)
+        else:
+            self._update_add_today_button_state()
+        return True
+
+    def _add_page_to_today_queue(self, page: int) -> bool:
+        unit = self.review_repo.first_unit_for_source_page(int(self.source_id), int(page))
+        if not unit:
+            return False
+        snapshot = self._load_today_queue_snapshot()
+        uid = int(unit.unit_id)
+        if uid in {int(i) for i in snapshot.get("unit_ids", [])}:
+            self._update_add_today_button_state()
+            return True
+        snapshot["unit_ids"] = [int(i) for i in snapshot.get("unit_ids", [])] + [uid]
+        manual_ids = [int(i) for i in snapshot.get("manual_unit_ids", [])]
+        if uid not in manual_ids:
+            manual_ids.append(uid)
+        snapshot["manual_unit_ids"] = manual_ids
+        self._store_today_queue_snapshot(snapshot)
+        self.queue_changed.emit()
+        self._update_add_today_button_state()
+        return True
 
     def _refresh_text_layer_hint(self) -> None:
         if not getattr(self, "source", None) or not self.source or not self.source.file_path:
@@ -989,6 +1115,7 @@ class SourceWorkspace(QWidget):
             self.context_changed.emit(self.source.title, selected_label)
         self.refresh_insights()
         self.refresh_highlights()
+        self._update_add_today_button_state()
 
     def _on_pdf_page_polled(self) -> None:
         page = int(self.pdf.view_state().get("page", 1))
@@ -1163,6 +1290,18 @@ class SourceWorkspace(QWidget):
         if page:
             self.pdf.set_page(page)
 
+    def add_selected_for_today_queue(self) -> None:
+        items = self.tree.selectedItems()
+        if not items:
+            QMessageBox.information(self, "No selection", "Select a unit or section first.")
+            return
+        page = int(items[0].data(0, 257) or 0)
+        if page < 1:
+            QMessageBox.information(self, "No page", "Selected node has no page range to map into queue.")
+            return
+        if not self._toggle_page_in_today_queue(page, with_feedback=True):
+            QMessageBox.information(self, "Not added", "Couldn't map this selection to a unit.")
+
     def edit_outline(self):
         nodes = self.outline_repo.nodes_for_source(self.source_id)
         entries = [{
@@ -1250,6 +1389,9 @@ class SourceWorkspace(QWidget):
         if not quote:
             return
         menu = QMenu(self)
+        add_today_queue = menu.addAction("Add to today's queue")
+        add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(int(page)))
+        menu.addSeparator()
         quick_add = menu.addAction(f"Add highlight ({self._annotation_color})")
         quick_add.triggered.connect(lambda: self._create_highlight(page, quote, self._annotation_color))
         add_menu = menu.addMenu("Highlight selection")
@@ -1548,6 +1690,7 @@ class StudyQueuePage(QWidget):
         self.unit_drafts: dict[int, dict] = {}
         self.source_path_cache: dict[int, str] = {}
         self.display_units = []
+        self.units = []
         self._queue_last_pdf_page = 1
         self._annotation_palette = [
             ("Blue", "#2d9cdb"),
@@ -1571,6 +1714,8 @@ class StudyQueuePage(QWidget):
         self.list.viewport().installEventFilter(self)
         self.list.currentRowChanged.connect(self.pick_unit)
         self.list.itemDoubleClicked.connect(lambda *_: self.jump_to_active_unit())
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self.open_queue_item_context_menu)
 
         self.queue_banner = QLabel("")
         self.queue_banner.setWordWrap(True)
@@ -1782,6 +1927,113 @@ class StudyQueuePage(QWidget):
         self.qt_timer.start(1000)
         self._apply_queue_annotation_ui_state()
         self.refresh()
+
+    def _today_iso(self) -> str:
+        return now_utc().date().isoformat()
+
+    def _load_today_queue_snapshot(self) -> dict:
+        today = self._today_iso()
+        raw = self.settings_repo.get("daily_queue_snapshot_json", "")
+        default = {"date": today, "daily_minutes": None, "unit_ids": [], "manual_unit_ids": []}
+        if not raw:
+            return default
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return default
+        if not isinstance(data, dict):
+            return default
+        data_date = str(data.get("date") or "")
+        if data_date != today:
+            return default
+        unit_ids = [int(uid) for uid in data.get("unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        daily_minutes = data.get("daily_minutes")
+        if daily_minutes is not None:
+            try:
+                daily_minutes = int(daily_minutes)
+            except Exception:
+                daily_minutes = None
+        manual_unit_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
+        return {"date": today, "daily_minutes": daily_minutes, "unit_ids": unit_ids, "manual_unit_ids": manual_unit_ids}
+
+    def _store_today_queue_snapshot(self, unit_ids: list[int], daily_minutes: int, manual_unit_ids: list[int] | None = None) -> None:
+        today = self._today_iso()
+        payload = {
+            "date": today,
+            "daily_minutes": int(daily_minutes),
+            "unit_ids": [int(uid) for uid in unit_ids],
+            "manual_unit_ids": [int(uid) for uid in (manual_unit_ids or [])],
+        }
+        self.settings_repo.set("daily_queue_snapshot_json", json.dumps(payload))
+
+    def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
+        snapshot = self._load_today_queue_snapshot()
+        planned_ids = list(snapshot["unit_ids"])
+        if planned_ids:
+            saved_minutes = snapshot.get("daily_minutes")
+            reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
+            if saved_minutes is not None and saved_minutes != int(daily_minutes) and reviewed_today == 0:
+                planned_ids = []
+        if not planned_ids:
+            plan = plan_session_queue(
+                due_units,
+                daily_minutes,
+                self._estimate_review_seconds,
+                strict_progression_sources=strict_sources,
+                source_id_of=lambda u: int(u.source_id),
+            )
+            planned_ids = [int(u.unit_id) for u in plan.selected_units]
+            self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=[])
+            return planned_ids, True
+        return planned_ids, False
+
+    def add_unit_to_today_queue(self, source_id: int, page: int) -> bool:
+        unit = self.review_repo.first_unit_for_source_page(int(source_id), int(page))
+        if not unit:
+            return False
+        snapshot = self._load_today_queue_snapshot()
+        unit_ids = list(snapshot["unit_ids"])
+        manual_unit_ids = list(snapshot.get("manual_unit_ids", []))
+        if int(unit.unit_id) in unit_ids:
+            return False
+        unit_ids.append(int(unit.unit_id))
+        if int(unit.unit_id) not in manual_unit_ids:
+            manual_unit_ids.append(int(unit.unit_id))
+        daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_unit_ids)
+        self.refresh()
+        return True
+
+    def remove_unit_from_today_queue(self, unit_id: int) -> bool:
+        snapshot = self._load_today_queue_snapshot()
+        unit_ids = [int(uid) for uid in snapshot.get("unit_ids", [])]
+        if int(unit_id) not in unit_ids:
+            return False
+        manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+        unit_ids = [uid for uid in unit_ids if uid != int(unit_id)]
+        manual_ids = [uid for uid in manual_ids if uid != int(unit_id)]
+        daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_ids)
+        self.refresh()
+        return True
+
+    def open_queue_item_context_menu(self, pos) -> None:
+        item = self.list.itemAt(pos)
+        if not item:
+            return
+        idx = self.list.row(item)
+        if idx < 0 or idx >= len(self.display_units):
+            return
+        unit, _reason = self.display_units[idx]
+        menu = QMenu(self)
+        jump = menu.addAction("Open in Reader")
+        remove = menu.addAction("Remove from Today's Queue")
+        chosen = menu.exec(self.list.viewport().mapToGlobal(pos))
+        if chosen == jump:
+            self.list.setCurrentRow(idx)
+            self.jump_to_active_unit()
+        elif chosen == remove:
+            self.remove_unit_from_today_queue(int(unit.unit_id))
 
     def _resize_pdf_by_delta(self, delta: int):
         current = self.pdf.minimumHeight()
@@ -2086,55 +2338,44 @@ class StudyQueuePage(QWidget):
         source_modes = {s.id: s.learning_mode for s in self.source_repo.list_sources()}
         strict_sources = {sid for sid, mode in source_modes.items() if mode == "strict"}
         available_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        plan = plan_session_queue(
-            due_units,
-            available_minutes,
-            self._estimate_review_seconds,
-            strict_progression_sources=strict_sources,
-            source_id_of=lambda u: int(u.source_id),
-        )
-        self.units = plan.selected_units
+        planned_ids, regenerated = self._resolve_today_queue_ids(due_units, available_minutes, strict_sources)
+        snapshot = self._load_today_queue_snapshot()
+        manual_unit_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+        completed_today = self.review_repo.reviewed_unit_ids_on_date(self._today_iso())
+        remaining_ids = [uid for uid in planned_ids if uid not in completed_today]
+        if remaining_ids != planned_ids:
+            remaining_manual_ids = [uid for uid in manual_unit_ids if uid in remaining_ids]
+            self._store_today_queue_snapshot(remaining_ids, available_minutes, manual_unit_ids=remaining_manual_ids)
+            manual_unit_ids = remaining_manual_ids
+        self.units = self.review_repo.unit_views_by_ids(remaining_ids)
         self.list.clear()
         self.source_path_cache = {}
         self.display_units = []
         self._queue_last_pdf_page = 1
-        suggestion_extra = f" · {len(plan.suggested_units)} progression suggestion(s)" if plan.suggested_units else ""
+        total_planned = len(planned_ids)
+        completed_count = max(0, total_planned - len(remaining_ids))
+        regenerated_text = " · rebuilt for today" if regenerated else ""
         self.queue_banner.setText(
-            f"Showing {len(self.units)}/{len(due_units)} due units · "
-            f"Projected {plan.projected_minutes:.1f} min"
-            + (f" · {plan.overflow_count} deferred" if plan.overflow_count else "")
-            + suggestion_extra
+            f"Today's fixed queue: {len(self.units)} remaining / {total_planned} planned"
+            + (f" · {completed_count} done" if completed_count else "")
+            + (f" · {len(manual_unit_ids)} manual" if manual_unit_ids else "")
+            + regenerated_text
         )
-        existing_ids = set()
+
         for u in self.units:
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
-            tile = self._build_queue_tile(u, est_seconds, retention)
+            reason = "manual" if int(u.unit_id) in manual_unit_ids else None
+            tile = self._build_queue_tile(u, est_seconds, retention, progression_reason=reason)
             item = QListWidgetItem()
             self.list.addItem(item)
             self.list.setItemWidget(item, tile)
-            self.display_units.append((u, None))
-            existing_ids.add(int(u.unit_id))
+            self.display_units.append((u, reason))
             if u.source_id not in self.source_path_cache:
                 s = self.source_repo.get(u.source_id)
                 if s:
                     self.source_path_cache[u.source_id] = s.file_path
                     self.pdf.prime_path(s.file_path)
-
-        for sug in plan.suggested_units:
-            if int(sug.unit.unit_id) in existing_ids:
-                continue
-            est_seconds = max(1.0, sug.estimated_minutes * 60.0)
-            tile = self._build_queue_tile(
-                sug.unit,
-                est_seconds,
-                self._estimate_retention(sug.unit),
-                progression_reason=sug.reason,
-            )
-            item = QListWidgetItem()
-            self.list.addItem(item)
-            self.list.setItemWidget(item, tile)
-            self.display_units.append((sug.unit, sug.reason))
 
         self._relayout_queue_tiles()
         if self.list.count() > 0:
@@ -2183,10 +2424,12 @@ class StudyQueuePage(QWidget):
         return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
     def _estimate_retention(self, unit) -> float | None:
-        if int(unit.review_count or 0) == 0:
-            return None
         row = self.review_repo.unit_by_id(unit.unit_id)
         if not row:
+            return None
+        review_count = int(row["review_count"] or 0)
+        fsrs_count = int(row["fsrs_review_count"] or 0) if "fsrs_review_count" in row.keys() else 0
+        if review_count == 0 and fsrs_count == 0 and not row["last_review_at"]:
             return None
         return retention_estimate(row, now_utc())
 
@@ -2250,8 +2493,11 @@ class StudyQueuePage(QWidget):
         for w in [pages, mins, retention_lbl]:
             badge_row.addWidget(w)
         if progression_reason:
-            progress_badge = QLabel("needed for progression")
+            progress_text = "manual" if progression_reason == "manual" else "needed for progression"
+            progress_badge = QLabel(progress_text)
             progress_badge.setObjectName("progressBadge")
+            if progression_reason == "manual":
+                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #eef2ff; background: #3b2f6b;")
             badge_row.addWidget(progress_badge)
         badge_row.addStretch()
 
@@ -2451,7 +2697,21 @@ class StudyQueuePage(QWidget):
             return
         now = now_utc()
         unit_row = self.review_repo.unit_by_id(self.active_unit.unit_id)
-        res = compute_next(unit_row, rating, now)
+        history = self.review_repo.events_for_unit_chronological(self.active_unit.unit_id)
+        tzinfo = datetime.now().astimezone().tzinfo
+        try:
+            desired_retention = float(self.settings_repo.get("desired_retention", "0.90"))
+        except Exception:
+            desired_retention = 0.9
+        fsrs_result = schedule_next_review(
+            unit_row=unit_row,
+            review_events=history,
+            now=now,
+            feedback=rating,
+            timezone_info=tzinfo,
+            desired_retention=desired_retention,
+            params=DEFAULT_FSRS_PARAMETERS,
+        )
         payload = {
             "started_at": iso_utc(self.started_at or now),
             "ended_at": iso_utc(now),
@@ -2459,18 +2719,26 @@ class StudyQueuePage(QWidget):
             "rating": rating,
             "pre_note": self.pre_note_text,
             "post_note": self.post_note_text,
-            "interval_days": res.interval_days,
-            "next_review_at": res.next_review_at,
+            "interval_days": fsrs_result.scheduled_interval_days,
+            "next_review_at": fsrs_result.next_review_at,
         }
         count = unit_row["review_count"] + 1
         avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
         unit_stats = {
             "last_review_at": iso_utc(now),
-            "next_review_at": res.next_review_at,
+            "next_review_at": fsrs_result.next_review_at,
             "review_count": count,
-            "ease_factor": res.ease_factor,
-            "interval_days": res.interval_days,
+            "ease_factor": unit_row["ease_factor"],
+            "interval_days": fsrs_result.scheduled_interval_days,
             "avg_rating": avg,
+            "fsrs_difficulty": fsrs_result.state.difficulty,
+            "fsrs_stability": fsrs_result.state.stability,
+            "fsrs_last_review_at": iso_utc(fsrs_result.state.last_review_at),
+            "fsrs_last_grade": int(fsrs_result.state.last_grade),
+            "fsrs_review_count": int(fsrs_result.state.review_count),
+            "fsrs_lapse_count": int(fsrs_result.state.lapse_count),
+            "fsrs_state_version": int(fsrs_result.state.state_version),
+            "fsrs_due_retention_used": fsrs_result.due_retention_used,
         }
         self.review_repo.record_review(self.active_unit.unit_id, payload, unit_stats)
         self.unit_drafts.pop(self.active_unit.unit_id, None)
@@ -2842,6 +3110,7 @@ class MainWindow(QMainWindow):
 
         self.sources.library_changed.connect(self.sync_queue_views)
         self.sources.queue_changed.connect(self.request_sync_queue_views)
+        self.sources.add_to_today_queue_requested.connect(self._on_add_to_today_queue_requested)
         self.settings.settings_changed.connect(self.sync_queue_views)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -2874,3 +3143,7 @@ class MainWindow(QMainWindow):
             return
         if index == 2:
             self.stats.refresh()
+
+    def _on_add_to_today_queue_requested(self, source_id: int, page: int) -> None:
+        self.queue.add_unit_to_today_queue(int(source_id), int(page))
+        self.request_sync_queue_views()
