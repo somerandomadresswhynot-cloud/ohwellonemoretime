@@ -43,6 +43,7 @@ from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
 from study_app.services.scheduler import allocate_new_units, recommend_new_units_with_guardrail, retention_estimate
 from study_app.services.fsrs_scheduler import DEFAULT_FSRS_PARAMETERS, schedule_next_review
+from study_app.services.runtime_estimator import RuntimeEstimationModel, build_runtime_estimation_model
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
@@ -65,6 +66,14 @@ def _store_session_queue_snapshot(today: str, daily_minutes: int, unit_ids: list
     _SESSION_QUEUE_SNAPSHOT["daily_minutes"] = int(daily_minutes)
     _SESSION_QUEUE_SNAPSHOT["unit_ids"] = [int(uid) for uid in unit_ids]
     _SESSION_QUEUE_SNAPSHOT["manual_unit_ids"] = [int(uid) for uid in manual_unit_ids]
+
+
+def _build_runtime_model_for_request(review_repo: ReviewRepo, settings_repo: SettingsRepo) -> RuntimeEstimationModel:
+    return build_runtime_estimation_model(
+        observations=review_repo.runtime_estimation_observations(),
+        fallback_seconds_per_page=float(settings_repo.get("fallback_review_seconds_per_page", "60")),
+        fallback_seconds_per_unit=float(settings_repo.get("fallback_review_seconds_per_unit", "90")),
+    )
 
 
 
@@ -2384,6 +2393,7 @@ class StudyQueuePage(QWidget):
 
     def refresh(self):
         self._queue_recalculation_pending = False
+        self._runtime_estimation_model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
         due_units = self.review_repo.due_units(iso_utc(now_utc()))
         source_modes = {s.id: s.learning_mode for s in self.source_repo.list_sources()}
         strict_sources = {sid for sid, mode in source_modes.items() if mode == "strict"}
@@ -2458,24 +2468,11 @@ class StudyQueuePage(QWidget):
             item.setSizeHint(self._queue_tile_size_hint(tile, tile_w))
 
     def _estimate_review_seconds(self, unit) -> float:
-        pages = max(1, (unit.end_page - unit.start_page) + 1)
-        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
-        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
-        if int(unit.review_count or 0) == 0:
-            return max(1.0, pages * fallback_per_page, fallback_per_unit)
-
-        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit.unit_id)
-        if unit_avg is not None:
-            return unit_avg
-
-        source_avg = self.review_repo.avg_elapsed_seconds_for_source(unit.source_id)
-        if source_avg is not None:
-            return source_avg
-
-        global_avg = self.review_repo.avg_elapsed_seconds_global()
-        if global_avg is not None:
-            return global_avg
-        return max(1.0, pages * fallback_per_page, fallback_per_unit)
+        model = getattr(self, "_runtime_estimation_model", None)
+        if model is None:
+            model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
+            self._runtime_estimation_model = model
+        return model.estimate_unit_seconds(unit, now_utc())
 
     def _estimate_retention(self, unit) -> float | None:
         row = self.review_repo.unit_by_id(unit.unit_id)
@@ -2871,9 +2868,14 @@ class SettingsPage(QWidget):
         self.settings_changed.emit()
 
     def refresh_summary(self):
+        self._runtime_estimation_model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
         due_units = self.review_repo.due_units(iso_utc(now_utc()))
         due_review_minutes = sum(self._estimate_review_seconds(u) for u in due_units) / 60.0
-        avg_new_unit_seconds = self.review_repo.avg_elapsed_seconds_global() or float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        new_units = self.review_repo.new_units()
+        if new_units:
+            avg_new_unit_seconds = sum(self._estimate_review_seconds(u) for u in new_units) / max(1, len(new_units))
+        else:
+            avg_new_unit_seconds = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         allocation = allocate_new_units(
             due_review_minutes=due_review_minutes,
             daily_minutes=self.daily.value(),
@@ -2904,24 +2906,11 @@ class SettingsPage(QWidget):
         )
 
     def _estimate_review_seconds(self, unit) -> float:
-        pages = max(1, (unit.end_page - unit.start_page) + 1)
-        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
-        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
-        if int(unit.review_count or 0) == 0:
-            return max(1.0, pages * fallback_per_page, fallback_per_unit)
-
-        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit.unit_id)
-        if unit_avg is not None:
-            return unit_avg
-
-        source_avg = self.review_repo.avg_elapsed_seconds_for_source(unit.source_id)
-        if source_avg is not None:
-            return source_avg
-
-        global_avg = self.review_repo.avg_elapsed_seconds_global()
-        if global_avg is not None:
-            return global_avg
-        return max(1.0, pages * fallback_per_page, fallback_per_unit)
+        model = getattr(self, "_runtime_estimation_model", None)
+        if model is None:
+            model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
+            self._runtime_estimation_model = model
+        return model.estimate_unit_seconds(unit, now_utc())
 
 
 class StatisticsPage(QWidget):
@@ -3084,7 +3073,14 @@ class StatisticsPage(QWidget):
 
         due_now = len(self.review_repo.due_units(iso_utc(now)))
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        avg_secs = self.review_repo.avg_elapsed_seconds_global() or float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
+        sample_units = self.review_repo.due_units(iso_utc(now))
+        if not sample_units:
+            sample_units = self.review_repo.new_units()
+        if sample_units:
+            avg_secs = sum(model.estimate_unit_seconds(u, now) for u in sample_units) / max(1, len(sample_units))
+        else:
+            avg_secs = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         est_units = max(1, int((daily_minutes * 60) / max(1.0, float(avg_secs))))
         self.metric_labels["daily_goal"].setText(f"{est_units} units")
         self.metric_labels["current_streak"].setText(f"{self._streak_days(active_days)} day(s)")
