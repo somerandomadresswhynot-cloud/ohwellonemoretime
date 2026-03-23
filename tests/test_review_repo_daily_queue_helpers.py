@@ -181,6 +181,36 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         due_ids = {int(u.unit_id) for u in self.review_repo.source_due_units(source2, "2026-03-23T12:00:00+00:00")}
         self.assertEqual(due_ids, {unit2})
 
+    def test_reviewed_unit_page_summary_between_distinct_units(self):
+        unit_a = int(self.units[0]["id"])
+        unit_b = int(self.units[1]["id"])
+        events = [
+            (unit_a, "2026-03-23T01:00:00+00:00"),
+            (unit_a, "2026-03-23T02:00:00+00:00"),
+            (unit_b, "2026-03-23T03:00:00+00:00"),
+            (unit_b, "2026-03-24T00:00:00+00:00"),
+        ]
+        for uid, ended_at in events:
+            payload = {
+                "started_at": ended_at,
+                "ended_at": ended_at,
+                "elapsed_seconds": 10,
+                "rating": "easy",
+                "pre_note": "",
+                "post_note": "",
+            }
+            stats = {
+                "last_review_at": ended_at,
+                "review_count": 1,
+                "ease_factor": 2.5,
+                "avg_rating": 5.0,
+            }
+            self.review_repo.record_review(uid, payload, stats)
+        summary = self.review_repo.reviewed_unit_page_summary_between("2026-03-23T00:00:00+00:00", "2026-03-24T00:00:00+00:00")
+        self.assertEqual(summary["reviewed_unit_count"], 2)
+        # U1 (pages 1-5) + U2 (pages 6-10) => 5 + 5 pages
+        self.assertEqual(summary["reviewed_pages_sum"], 10)
+
 
 if __name__ == '__main__':
     unittest.main()

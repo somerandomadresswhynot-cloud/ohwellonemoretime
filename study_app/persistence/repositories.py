@@ -369,6 +369,27 @@ class ReviewRepo:
             "last_review_at": row["last_review_at"],
         }
 
+    def reviewed_unit_page_summary_between(self, start_iso_utc: str, end_iso_utc: str) -> dict:
+        row = self.db.conn.execute(
+            """WITH reviewed_units AS (
+                SELECT DISTINCT re.unit_id
+                FROM review_events re
+                WHERE re.deleted_at IS NULL
+                  AND re.ended_at >= ?
+                  AND re.ended_at < ?
+            )
+            SELECT
+                COUNT(ru.unit_id) AS reviewed_unit_count,
+                COALESCE(SUM((u.end_page - u.start_page) + 1), 0) AS reviewed_pages_sum
+            FROM reviewed_units ru
+            JOIN units u ON u.id=ru.unit_id""",
+            (start_iso_utc, end_iso_utc),
+        ).fetchone()
+        return {
+            "reviewed_unit_count": int(row["reviewed_unit_count"] or 0) if row else 0,
+            "reviewed_pages_sum": int(row["reviewed_pages_sum"] or 0) if row else 0,
+        }
+
     def source_last_review_at(self, source_id: int) -> str | None:
         row = self.db.conn.execute(
             """SELECT MAX(re.ended_at) AS last_review_at

@@ -47,7 +47,7 @@ from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 from study_app.services.day_window import day_window_for_offset, is_valid_gmt_offset, normalized_gmt_offset, parse_gmt_offset
-from study_app.services.time_format import format_elapsed_seconds
+from study_app.services.time_format import format_minutes_whole
 
 
 _SESSION_QUEUE_SNAPSHOT = {"date": "", "daily_minutes": None, "unit_ids": [], "manual_unit_ids": []}
@@ -2552,7 +2552,7 @@ class StudyQueuePage(QWidget):
         )
         self._refresh_today_strip(
             total_planned=total_planned,
-            remaining_ids=remaining_ids,
+            planned_ids=planned_ids,
             queue_signature="-".join(str(uid) for uid in planned_ids[:120]),
         )
 
@@ -2630,8 +2630,6 @@ class StudyQueuePage(QWidget):
     def _queue_reason_for_unit(self, unit, retention: float | None, is_manual: bool) -> str:
         if is_manual:
             return "manual"
-        if int(unit.review_count or 0) == 0:
-            return "new_fill"
         if unit.next_review_at:
             return "due_now"
         threshold = float(self.settings_repo.get("min_retention_percent", "45")) / 100.0
@@ -2701,7 +2699,6 @@ class StudyQueuePage(QWidget):
         if progression_reason:
             label_map = {
                 "manual": "Manually added",
-                "new_fill": "New unit fill",
                 "due_now": "Due now",
                 "low_retention": "Low retention",
                 "catch_up": "Catch-up / overflow",
@@ -2742,7 +2739,7 @@ class StudyQueuePage(QWidget):
         mins = seconds / 60.0
         return f"~{mins:.1f} min"
 
-    def _refresh_today_strip(self, total_planned: int, remaining_ids: list[int], queue_signature: str) -> None:
+    def _refresh_today_strip(self, total_planned: int, planned_ids: list[int], queue_signature: str) -> None:
         window = self._today_window()
         settings_minutes = int(self.settings_repo.get("daily_minutes", "90"))
         fallback_unit_seconds = self.settings_repo.get("fallback_review_seconds_per_unit", "90")
@@ -2757,35 +2754,34 @@ class StudyQueuePage(QWidget):
         if cached is None:
             reviewed = int(latest["review_count"])
             total_seconds = float(latest["total_seconds"])
-            avg_seconds = float(latest["avg_seconds"]) if reviewed > 0 else 0.0
-            remaining_units = len(remaining_ids)
-            remaining_seconds = sum(float(self._estimate_review_seconds(u)) for u in self.units)
-            progress_pct = 100.0 if total_planned <= 0 else (max(0, total_planned - remaining_units) / max(1, total_planned) * 100.0)
-            eta_text = "—"
-            if remaining_seconds > 0:
-                eta_dt = now_utc() + timedelta(seconds=int(round(remaining_seconds)))
-                eta_text = eta_dt.strftime("%H:%M UTC")
+            page_summary = self.review_repo.reviewed_unit_page_summary_between(
+                window["start_utc_iso"],
+                window["next_start_utc_iso"],
+            )
+            reviewed_pages = int(page_summary["reviewed_pages_sum"])
+            planned_units = self.review_repo.unit_views_by_ids(planned_ids)
+            total_pages = sum(max(1, (int(u.end_page) - int(u.start_page)) + 1) for u in planned_units)
+            planned_estimated_seconds = sum(float(self._estimate_review_seconds(u)) for u in planned_units)
+            mins_per_page = 0.0 if reviewed_pages <= 0 else (total_seconds / 60.0) / float(reviewed_pages)
             cached = self._cache_set(
                 cache_key,
                 {
                     "reviewed": reviewed,
+                    "total_planned": int(total_planned),
+                    "reviewed_pages": reviewed_pages,
+                    "total_pages": int(total_pages),
+                    "mins_per_page": mins_per_page,
                     "total_seconds": total_seconds,
-                    "avg_seconds": avg_seconds,
-                    "progress_pct": progress_pct,
-                    "remaining_units": remaining_units,
-                    "remaining_seconds": remaining_seconds,
-                    "eta_text": eta_text,
+                    "planned_estimated_seconds": planned_estimated_seconds,
                 },
             )
         no_reviews_hint = " · No reviews yet today" if int(cached["reviewed"]) == 0 else ""
         self.today_strip.setText(
             "Today so far  |  "
-            f"Reviewed: {cached['reviewed']}  |  "
-            f"Time: {format_elapsed_seconds(cached['total_seconds'])}  |  "
-            f"Avg sec/review: {int(round(cached['avg_seconds'])) if cached['avg_seconds'] else 0}s  |  "
-            f"Queue progress: {cached['progress_pct']:.0f}%  |  "
-            f"Remaining: {cached['remaining_units']} ({self._format_estimated_time(cached['remaining_seconds'])})  |  "
-            f"ETA: {cached['eta_text']}"
+            f"Units reviewed: {cached['reviewed']}/{cached['total_planned']}  |  "
+            f"Pages reviewed: {cached['reviewed_pages']}/{cached['total_pages']}  |  "
+            f"Minutes per page: {cached['mins_per_page']:.1f}  |  "
+            f"Minutes learned today: {format_minutes_whole(cached['total_seconds'])}/{format_minutes_whole(cached['planned_estimated_seconds'])}"
             f"{no_reviews_hint}"
         )
 
