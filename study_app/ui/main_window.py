@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -43,29 +44,82 @@ from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
 from study_app.services.scheduler import allocate_new_units, recommend_new_units_with_guardrail, retention_estimate
 from study_app.services.fsrs_scheduler import DEFAULT_FSRS_PARAMETERS, schedule_next_review
+from study_app.services.queue_drift import should_rebuild_for_estimate_drift
 from study_app.services.runtime_estimator import RuntimeEstimationModel, build_runtime_estimation_model
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 
 
-_SESSION_QUEUE_SNAPSHOT = {"date": "", "daily_minutes": None, "unit_ids": [], "manual_unit_ids": []}
+_SESSION_QUEUE_SNAPSHOT = {
+    "date": "",
+    "daily_minutes": None,
+    "unit_ids": [],
+    "manual_unit_ids": [],
+    "projected_seconds": None,
+    "estimator_signature": "",
+    "last_rebuild_at": "",
+    "last_rebuild_reason": "",
+}
 
 
 def _load_session_queue_snapshot(today: str, daily_minutes: int) -> dict:
     data = _SESSION_QUEUE_SNAPSHOT
     if str(data.get("date") or "") != today:
-        return {"date": today, "daily_minutes": int(daily_minutes), "unit_ids": [], "manual_unit_ids": []}
+        return {
+            "date": today,
+            "daily_minutes": int(daily_minutes),
+            "unit_ids": [],
+            "manual_unit_ids": [],
+            "projected_seconds": None,
+            "estimator_signature": "",
+            "last_rebuild_at": "",
+            "last_rebuild_reason": "",
+        }
     unit_ids = [int(uid) for uid in data.get("unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
     manual_ids = [int(uid) for uid in data.get("manual_unit_ids", []) if isinstance(uid, int) or str(uid).isdigit()]
-    return {"date": today, "daily_minutes": int(data.get("daily_minutes") or daily_minutes), "unit_ids": unit_ids, "manual_unit_ids": manual_ids}
+    return {
+        "date": today,
+        "daily_minutes": int(data.get("daily_minutes") or daily_minutes),
+        "unit_ids": unit_ids,
+        "manual_unit_ids": manual_ids,
+        "projected_seconds": data.get("projected_seconds"),
+        "estimator_signature": str(data.get("estimator_signature") or ""),
+        "last_rebuild_at": str(data.get("last_rebuild_at") or ""),
+        "last_rebuild_reason": str(data.get("last_rebuild_reason") or ""),
+    }
 
 
-def _store_session_queue_snapshot(today: str, daily_minutes: int, unit_ids: list[int], manual_unit_ids: list[int]) -> None:
+def _store_session_queue_snapshot(
+    today: str,
+    daily_minutes: int,
+    unit_ids: list[int],
+    manual_unit_ids: list[int],
+    projected_seconds: float | None = None,
+    estimator_signature: str = "",
+    last_rebuild_at: str = "",
+    last_rebuild_reason: str = "",
+) -> None:
     _SESSION_QUEUE_SNAPSHOT["date"] = today
     _SESSION_QUEUE_SNAPSHOT["daily_minutes"] = int(daily_minutes)
     _SESSION_QUEUE_SNAPSHOT["unit_ids"] = [int(uid) for uid in unit_ids]
     _SESSION_QUEUE_SNAPSHOT["manual_unit_ids"] = [int(uid) for uid in manual_unit_ids]
+    _SESSION_QUEUE_SNAPSHOT["projected_seconds"] = None if projected_seconds is None else float(projected_seconds)
+    _SESSION_QUEUE_SNAPSHOT["estimator_signature"] = str(estimator_signature or "")
+    _SESSION_QUEUE_SNAPSHOT["last_rebuild_at"] = str(last_rebuild_at or "")
+    _SESSION_QUEUE_SNAPSHOT["last_rebuild_reason"] = str(last_rebuild_reason or "")
+
+
+def _model_signature(model: RuntimeEstimationModel) -> str:
+    payload = {
+        "base": round(float(model.global_base_minutes_per_page), 5),
+        "stages": {k: round(float(v), 4) for k, v in sorted(model.stage_factors.items())},
+        "stale": {k: round(float(v), 4) for k, v in sorted(model.stale_bucket_factors.items())},
+        "source_count": len(model.source_factors),
+        "obs_count": int(model.debug.get("observation_count", 0)),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def _build_runtime_model_for_request(review_repo: ReviewRepo, settings_repo: SettingsRepo) -> RuntimeEstimationModel:
@@ -818,6 +872,10 @@ class SourceWorkspace(QWidget):
             daily_minutes,
             [int(uid) for uid in snapshot.get("unit_ids", [])],
             [int(uid) for uid in snapshot.get("manual_unit_ids", [])],
+            projected_seconds=snapshot.get("projected_seconds"),
+            estimator_signature=str(snapshot.get("estimator_signature") or ""),
+            last_rebuild_at=str(snapshot.get("last_rebuild_at") or ""),
+            last_rebuild_reason=str(snapshot.get("last_rebuild_reason") or ""),
         )
 
     def _selected_unit_for_today_queue(self):
@@ -1977,13 +2035,25 @@ class StudyQueuePage(QWidget):
         default_minutes = int(self.settings_repo.get("daily_minutes", "90"))
         return _load_session_queue_snapshot(today, default_minutes)
 
-    def _store_today_queue_snapshot(self, unit_ids: list[int], daily_minutes: int, manual_unit_ids: list[int] | None = None) -> None:
+    def _store_today_queue_snapshot(
+        self,
+        unit_ids: list[int],
+        daily_minutes: int,
+        manual_unit_ids: list[int] | None = None,
+        projected_seconds: float | None = None,
+        estimator_signature: str = "",
+        last_rebuild_reason: str = "",
+    ) -> None:
         today = self._today_iso()
         _store_session_queue_snapshot(
             today,
             int(daily_minutes),
             [int(uid) for uid in unit_ids],
             [int(uid) for uid in (manual_unit_ids or [])],
+            projected_seconds=projected_seconds,
+            estimator_signature=estimator_signature,
+            last_rebuild_at=iso_utc(now_utc()) if last_rebuild_reason else "",
+            last_rebuild_reason=last_rebuild_reason,
         )
 
     def _build_planned_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> list[int]:
@@ -2015,6 +2085,17 @@ class StudyQueuePage(QWidget):
                 break
         return planned_ids
 
+    def _projected_seconds_for_ids(self, unit_ids: list[int]) -> float:
+        units = self.review_repo.unit_views_by_ids([int(uid) for uid in unit_ids])
+        return float(sum(max(1.0, float(self._estimate_review_seconds(u))) for u in units))
+
+    def _runtime_model_signature(self) -> str:
+        model = getattr(self, "_runtime_estimation_model", None)
+        if model is None:
+            model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
+            self._runtime_estimation_model = model
+        return _model_signature(model)
+
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
         snapshot = self._load_today_queue_snapshot()
         planned_ids = list(snapshot["unit_ids"])
@@ -2037,12 +2118,48 @@ class StudyQueuePage(QWidget):
                     if reordered_ids != planned_ids:
                         planned_ids = reordered_ids
                         manual_ids = [int(uid) for uid in manual_ids if int(uid) in planned_ids]
-                        self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=manual_ids)
+                        self._store_today_queue_snapshot(
+                            planned_ids,
+                            daily_minutes,
+                            manual_unit_ids=manual_ids,
+                            projected_seconds=self._projected_seconds_for_ids(planned_ids),
+                            estimator_signature=self._runtime_model_signature(),
+                            last_rebuild_reason="due_reorder",
+                        )
                         return planned_ids, True
+                    reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
+                    projected_seconds = self._projected_seconds_for_ids(planned_ids)
+                    drift_rebuild = should_rebuild_for_estimate_drift(
+                        previous_seconds=snapshot.get("projected_seconds"),
+                        current_seconds=projected_seconds,
+                        unit_count=len(planned_ids),
+                        reviewed_today=reviewed_today,
+                        last_rebuild_at=str(snapshot.get("last_rebuild_at") or ""),
+                        now=now_utc(),
+                    )
+                    if drift_rebuild:
+                        planned_ids = []
         if not planned_ids:
             planned_ids = self._build_planned_queue_ids(due_units, daily_minutes, strict_sources)
-            self._store_today_queue_snapshot(planned_ids, daily_minutes, manual_unit_ids=[])
+            self._store_today_queue_snapshot(
+                planned_ids,
+                daily_minutes,
+                manual_unit_ids=[],
+                projected_seconds=self._projected_seconds_for_ids(planned_ids),
+                estimator_signature=self._runtime_model_signature(),
+                last_rebuild_reason="planned_build",
+            )
             return planned_ids, True
+        if snapshot.get("projected_seconds") is None or not snapshot.get("estimator_signature"):
+            manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", []) if int(uid) in planned_ids]
+            self._store_today_queue_snapshot(
+                planned_ids,
+                daily_minutes,
+                manual_unit_ids=manual_ids,
+                projected_seconds=self._projected_seconds_for_ids(planned_ids),
+                estimator_signature=self._runtime_model_signature(),
+                last_rebuild_reason="snapshot_metadata_sync",
+            )
         return planned_ids, False
 
     def add_unit_to_today_queue(self, source_id: int, page: int) -> bool:
@@ -2058,7 +2175,14 @@ class StudyQueuePage(QWidget):
         if int(unit.unit_id) not in manual_unit_ids:
             manual_unit_ids.append(int(unit.unit_id))
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_unit_ids)
+        self._store_today_queue_snapshot(
+            unit_ids,
+            daily_minutes,
+            manual_unit_ids=manual_unit_ids,
+            projected_seconds=self._projected_seconds_for_ids(unit_ids),
+            estimator_signature=self._runtime_model_signature(),
+            last_rebuild_reason="manual_add",
+        )
         self.refresh()
         return True
 
@@ -2071,7 +2195,14 @@ class StudyQueuePage(QWidget):
         unit_ids = [uid for uid in unit_ids if uid != int(unit_id)]
         manual_ids = [uid for uid in manual_ids if uid != int(unit_id)]
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_ids)
+        self._store_today_queue_snapshot(
+            unit_ids,
+            daily_minutes,
+            manual_unit_ids=manual_ids,
+            projected_seconds=self._projected_seconds_for_ids(unit_ids),
+            estimator_signature=self._runtime_model_signature(),
+            last_rebuild_reason="manual_remove",
+        )
         self.refresh()
         return True
 
@@ -2405,7 +2536,14 @@ class StudyQueuePage(QWidget):
         remaining_ids = [uid for uid in planned_ids if uid not in completed_today]
         if remaining_ids != planned_ids:
             remaining_manual_ids = [uid for uid in manual_unit_ids if uid in remaining_ids]
-            self._store_today_queue_snapshot(remaining_ids, available_minutes, manual_unit_ids=remaining_manual_ids)
+            self._store_today_queue_snapshot(
+                remaining_ids,
+                available_minutes,
+                manual_unit_ids=remaining_manual_ids,
+                projected_seconds=self._projected_seconds_for_ids(remaining_ids),
+                estimator_signature=self._runtime_model_signature(),
+                last_rebuild_reason="completion_prune",
+            )
             manual_unit_ids = remaining_manual_ids
         self.units = self.review_repo.unit_views_by_ids(remaining_ids)
         self.list.clear()
