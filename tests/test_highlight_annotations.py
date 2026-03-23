@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from study_app.persistence.database import Database
-from study_app.persistence.repositories import HighlightRepo, SourceRepo
+from study_app.persistence.repositories import HighlightRepo, OutlineRepo, SourceRepo
 
 
 class HighlightAnnotationsTests(unittest.TestCase):
@@ -222,6 +222,41 @@ class HighlightAnnotationsTests(unittest.TestCase):
 
             repo.delete_highlight(hid)
             self.assertIsNone(repo.get_highlight(hid))
+
+    def test_highlight_summary_groups_top_sections_by_unit_identity(self):
+        with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
+            db = Database(tmp.name)
+            self.addCleanup(db.close)
+            source_repo = SourceRepo(db)
+            outline_repo = OutlineRepo(db)
+            source_id = source_repo.create('Book', '/tmp/book.pdf', 10, 100)
+            outline_repo.replace_outline(
+                source_id,
+                [
+                    {"depth": 1, "title": "Book", "start_page": None, "end_page": None, "is_unit": False, "queue_enabled": True},
+                    {"depth": 2, "title": "Repeated", "start_page": 1, "end_page": 3, "is_unit": True, "queue_enabled": True},
+                    {"depth": 2, "title": "Repeated", "start_page": 4, "end_page": 6, "is_unit": True, "queue_enabled": True},
+                ],
+            )
+            units = db.conn.execute("SELECT id FROM units WHERE source_id=? ORDER BY id ASC", (source_id,)).fetchall()
+            unit_a, unit_b = int(units[0]["id"]), int(units[1]["id"])
+            repo = HighlightRepo(db)
+            db.conn.execute(
+                "INSERT INTO highlights(source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, unit_a, 2, 1, 'Q1', 'text', '', 'Q1', '', '[]', 0.35, '', '', '#2d9cdb', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+            )
+            db.conn.execute(
+                "INSERT INTO highlights(source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, unit_a, 3, 2, 'Q2', 'text', '', 'Q2', '', '[]', 0.35, '', '', '#2d9cdb', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+            )
+            db.conn.execute(
+                "INSERT INTO highlights(source_id,unit_id,page,page_index,quote_text,anchor_type,text_prefix,text_exact,text_suffix,rects_json,opacity,label,note,color,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, unit_b, 5, 4, 'Q3', 'text', '', 'Q3', '', '[]', 0.35, '', '', '#2d9cdb', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+            )
+            db.conn.commit()
+            summary = repo.highlight_summary_for_source(source_id)
+            self.assertEqual(len(summary["top_sections"]), 2)
+            self.assertNotEqual(summary["top_sections"][0]["unit_id"], summary["top_sections"][1]["unit_id"])
 
 
 if __name__ == '__main__':

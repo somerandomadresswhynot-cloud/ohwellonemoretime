@@ -185,7 +185,12 @@ class ReviewRepo:
     def __init__(self, db: Database):
         self.db = db
 
-    def due_units(self, now_iso: str) -> list[UnitView]:
+    def due_units(self, now_iso: str, source_id: int | None = None) -> list[UnitView]:
+        source_where = ""
+        params: list[object] = []
+        if source_id is not None:
+            source_where = " AND u.source_id=?"
+            params.append(int(source_id))
         rows = self.db.conn.execute(
             """WITH RECURSIVE node_path(node_id, path) AS (
                 SELECT n.id, n.title
@@ -204,7 +209,9 @@ class ReviewRepo:
             JOIN sources s ON s.id=u.source_id
             LEFT JOIN node_path ON node_path.node_id=u.node_id
             WHERE s.is_active=1 AND u.queue_enabled=1
+            """ + source_where + """
             ORDER BY u.id ASC""",
+            params,
         ).fetchall()
         unit_ids = [int(r["id"]) for r in rows]
         events_by_unit: dict[int, list[dict]] = defaultdict(list)
@@ -312,6 +319,15 @@ class ReviewRepo:
         ).fetchall()
         return {int(r["unit_id"]) for r in rows}
 
+    def reviewed_unit_ids_between(self, start_iso_utc: str, end_iso_utc: str) -> set[int]:
+        rows = self.db.conn.execute(
+            """SELECT DISTINCT unit_id
+            FROM review_events
+            WHERE deleted_at IS NULL AND ended_at >= ? AND ended_at < ?""",
+            (start_iso_utc, end_iso_utc),
+        ).fetchall()
+        return {int(r["unit_id"]) for r in rows}
+
     def review_count_on_date(self, day_iso: str) -> int:
         row = self.db.conn.execute(
             """SELECT COUNT(*) AS c FROM review_events
@@ -319,6 +335,68 @@ class ReviewRepo:
             (day_iso,),
         ).fetchone()
         return int(row["c"] or 0) if row else 0
+
+    def review_summary_between(self, start_iso_utc: str, end_iso_utc: str, source_id: int | None = None) -> dict:
+        params: list[object] = [start_iso_utc, end_iso_utc]
+        source_join = ""
+        source_where = ""
+        if source_id is not None:
+            source_join = " JOIN units u ON u.id=re.unit_id "
+            source_where = " AND u.source_id=?"
+            params.append(int(source_id))
+        row = self.db.conn.execute(
+            f"""SELECT
+                COUNT(*) AS review_count,
+                COALESCE(SUM(re.elapsed_seconds), 0) AS total_seconds,
+                COALESCE(AVG(re.elapsed_seconds), 0) AS avg_seconds,
+                MAX(re.id) AS max_review_id,
+                MAX(re.ended_at) AS last_review_at
+            FROM review_events re
+            {source_join}
+            WHERE re.deleted_at IS NULL
+              AND re.ended_at >= ?
+              AND re.ended_at < ?
+              {source_where}""",
+            params,
+        ).fetchone()
+        if not row:
+            return {"review_count": 0, "total_seconds": 0.0, "avg_seconds": 0.0, "max_review_id": 0, "last_review_at": None}
+        return {
+            "review_count": int(row["review_count"] or 0),
+            "total_seconds": float(row["total_seconds"] or 0.0),
+            "avg_seconds": float(row["avg_seconds"] or 0.0),
+            "max_review_id": int(row["max_review_id"] or 0),
+            "last_review_at": row["last_review_at"],
+        }
+
+    def source_last_review_at(self, source_id: int) -> str | None:
+        row = self.db.conn.execute(
+            """SELECT MAX(re.ended_at) AS last_review_at
+            FROM review_events re
+            JOIN units u ON u.id=re.unit_id
+            WHERE re.deleted_at IS NULL AND u.source_id=?""",
+            (int(source_id),),
+        ).fetchone()
+        return str(row["last_review_at"]) if row and row["last_review_at"] else None
+
+    def unit_review_snapshot(self, unit_id: int) -> dict:
+        row = self.db.conn.execute(
+            """SELECT
+                COUNT(*) AS review_count,
+                MAX(ended_at) AS last_reviewed_at,
+                COALESCE(AVG(elapsed_seconds), 0) AS avg_elapsed_seconds
+            FROM review_events
+            WHERE deleted_at IS NULL AND unit_id=?""",
+            (int(unit_id),),
+        ).fetchone()
+        return {
+            "review_count": int(row["review_count"] or 0) if row else 0,
+            "last_reviewed_at": (row["last_reviewed_at"] if row else None),
+            "avg_elapsed_seconds": float(row["avg_elapsed_seconds"] or 0.0) if row else 0.0,
+        }
+
+    def source_due_units(self, source_id: int, now_iso: str) -> list[UnitView]:
+        return self.due_units(now_iso, source_id=int(source_id))
 
     def first_unit_for_source_page(self, source_id: int, page: int) -> UnitView | None:
         row = self.db.conn.execute(
@@ -742,3 +820,59 @@ class HighlightRepo:
             ORDER BY h.page ASC, h.created_at DESC""",
             (source_id,),
         ).fetchall()
+
+    def highlight_summary_for_source(self, source_id: int) -> dict:
+        rows = self.db.conn.execute(
+            """SELECT
+                COUNT(*) AS total_highlights,
+                SUM(CASE WHEN anchor_type='text' THEN 1 ELSE 0 END) AS text_count,
+                SUM(CASE WHEN anchor_type='rect' THEN 1 ELSE 0 END) AS area_count
+            FROM highlights
+            WHERE source_id=?""",
+            (int(source_id),),
+        ).fetchone()
+        top_pages = self.db.conn.execute(
+            """SELECT page, COUNT(*) AS c
+            FROM highlights
+            WHERE source_id=?
+            GROUP BY page
+            ORDER BY c DESC, page ASC
+            LIMIT 3""",
+            (int(source_id),),
+        ).fetchall()
+        colors = self.db.conn.execute(
+            """SELECT color, COUNT(*) AS c
+            FROM highlights
+            WHERE source_id=?
+            GROUP BY color
+            ORDER BY c DESC, color ASC""",
+            (int(source_id),),
+        ).fetchall()
+        top_units = self.db.conn.execute(
+            """SELECT
+                COALESCE(u.id, -1) AS unit_identity,
+                COALESCE(u.title, '(no unit)') AS unit_title,
+                COUNT(*) AS c
+            FROM highlights h
+            LEFT JOIN units u ON u.id=h.unit_id
+            WHERE h.source_id=?
+            GROUP BY unit_identity, unit_title
+            ORDER BY c DESC, unit_identity ASC
+            LIMIT 3""",
+            (int(source_id),),
+        ).fetchall()
+        return {
+            "total_highlights": int(rows["total_highlights"] or 0) if rows else 0,
+            "text_count": int(rows["text_count"] or 0) if rows else 0,
+            "area_count": int(rows["area_count"] or 0) if rows else 0,
+            "top_pages": [(int(r["page"]), int(r["c"])) for r in top_pages],
+            "color_distribution": [(str(r["color"] or ""), int(r["c"])) for r in colors],
+            "top_sections": [
+                {
+                    "unit_id": int(r["unit_identity"]),
+                    "title": str(r["unit_title"]),
+                    "count": int(r["c"]),
+                }
+                for r in top_units
+            ],
+        }
