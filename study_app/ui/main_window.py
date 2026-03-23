@@ -1698,6 +1698,7 @@ class StudyQueuePage(QWidget):
         self.display_units = []
         self.units = []
         self._queue_last_pdf_page = 1
+        self._queue_recalculation_pending = False
         self._annotation_palette = [
             ("Blue", "#2d9cdb"),
             ("Purple", "#8b5cf6"),
@@ -1933,6 +1934,31 @@ class StudyQueuePage(QWidget):
         self.qt_timer.start(1000)
         self._apply_queue_annotation_ui_state()
         self.refresh()
+
+    def invalidate_session_queue_snapshot(self) -> None:
+        daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        self._store_today_queue_snapshot([], daily_minutes, manual_unit_ids=[])
+
+    def show_recalculation_pending(self) -> None:
+        if self._queue_recalculation_pending:
+            return
+        self._queue_recalculation_pending = True
+        self.units = []
+        self.display_units = []
+        self.active_unit = None
+        self.list.clear()
+        self.queue_banner.setText("Queue recalculation in progress…")
+        for _ in range(3):
+            item = QListWidgetItem()
+            card = QFrame()
+            card.setObjectName("queueTile")
+            card_l = QVBoxLayout(card)
+            lbl = QLabel("Recalculating queue…")
+            lbl.setStyleSheet("color:#9aa7b2;")
+            card_l.addWidget(lbl)
+            item.setSizeHint(QSize(280, 64))
+            self.list.addItem(item)
+            self.list.setItemWidget(item, card)
 
     def _today_iso(self) -> str:
         return now_utc().date().isoformat()
@@ -2357,6 +2383,7 @@ class StudyQueuePage(QWidget):
         self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
 
     def refresh(self):
+        self._queue_recalculation_pending = False
         due_units = self.review_repo.due_units(iso_utc(now_utc()))
         source_modes = {s.id: s.learning_mode for s in self.source_repo.list_sources()}
         strict_sources = {sid for sid, mode in source_modes.items() if mode == "strict"}
@@ -3145,6 +3172,10 @@ class MainWindow(QMainWindow):
 
     def request_sync_queue_views(self):
         self._queue_dirty = True
+        if not self._queue_sync_timer.isActive():
+            self.queue.invalidate_session_queue_snapshot()
+            if self.tabs.currentIndex() == 0:
+                self.queue.show_recalculation_pending()
         self._queue_sync_timer.start(self._sync_delay_ms)
 
     def _flush_now(self, force_queue: bool = False):
@@ -3160,7 +3191,8 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         if index == 0:
             if self._queue_sync_timer.isActive():
-                self._queue_sync_timer.stop()
+                self.queue.show_recalculation_pending()
+                return
             if self._queue_dirty:
                 self._flush_now(force_queue=True)
             return
