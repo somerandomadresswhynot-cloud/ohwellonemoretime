@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import html
+
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -11,10 +14,11 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
 )
-from PySide6.QtGui import QTextOption
+from PySide6.QtGui import QAction, QTextCursor, QTextDocument, QTextOption
 
 from study_app.services.outline_service import parse_outline_text
 
@@ -152,6 +156,238 @@ class RecallNoteDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.addWidget(self.editor)
         lay.addWidget(buttons)
+
+    def value(self) -> str:
+        return self.editor.toPlainText()
+
+
+_CLOZE_OPEN = "{{c::"
+_CLOZE_CLOSE = "}}"
+
+
+def _extract_cloze_segments(markdown_text: str) -> tuple[str, list[str]]:
+    text = markdown_text or ""
+    parts: list[str] = []
+    clozes: list[str] = []
+    idx = 0
+    while idx < len(text):
+        start = text.find(_CLOZE_OPEN, idx)
+        if start < 0:
+            parts.append(text[idx:])
+            break
+        parts.append(text[idx:start])
+        value_start = start + len(_CLOZE_OPEN)
+        end = text.find(_CLOZE_CLOSE, value_start)
+        if end < 0:
+            parts.append(text[start:])
+            break
+        cloze_value = text[value_start:end]
+        if _CLOZE_OPEN in cloze_value:
+            parts.append(text[start:end + len(_CLOZE_CLOSE)])
+        else:
+            token = f"CLOZE_TOKEN_{len(clozes)}"
+            parts.append(token)
+            clozes.append(cloze_value)
+        idx = end + len(_CLOZE_CLOSE)
+    return "".join(parts), clozes
+
+
+def _cloze_validation_messages(markdown_text: str) -> list[str]:
+    text = markdown_text or ""
+    messages: list[str] = []
+    open_count = text.count(_CLOZE_OPEN)
+    close_count = text.count(_CLOZE_CLOSE)
+    if open_count > close_count:
+        messages.append("Unclosed cloze marker found. Use '{{c::...}}'.")
+    if close_count > open_count:
+        messages.append("Extra closing cloze marker found ('}}').")
+    idx = 0
+    while idx < len(text):
+        start = text.find(_CLOZE_OPEN, idx)
+        if start < 0:
+            break
+        body_start = start + len(_CLOZE_OPEN)
+        end = text.find(_CLOZE_CLOSE, body_start)
+        if end < 0:
+            break
+        body = text[body_start:end]
+        if _CLOZE_OPEN in body:
+            messages.append("Nested cloze is not supported; inner markers are ignored.")
+            break
+        idx = end + len(_CLOZE_CLOSE)
+    return messages
+
+
+class HintMarkdownDialog(QDialog):
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Hint")
+        self.resize(760, 620)
+        self.editor = QTextEdit()
+        self.editor.setAcceptRichText(False)
+        self.editor.setPlainText(text or "")
+        self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.editor.customContextMenuRequested.connect(self._open_editor_context_menu)
+
+        self.preview = QTextBrowser()
+        self.preview.setOpenExternalLinks(False)
+        self.preview.anchorClicked.connect(self._on_anchor_clicked)
+        self._revealed_cloze_indexes: set[int] = set()
+        self._cloze_values: list[str] = []
+        self._count_label = QLabel("")
+        self._count_label.setStyleSheet("color:#9aa7b2;")
+        self._validation_label = QLabel("")
+        self._validation_label.setWordWrap(True)
+        self._validation_label.setStyleSheet("color:#ffb27f;")
+
+        self.history_hint = QLabel("Cloze: select text and right-click → Make Cloze. Right-click inside a cloze → Remove Cloze.")
+        self.history_hint.setStyleSheet("color:#9aa7b2;")
+        reveal_all_btn = QPushButton("Reveal All")
+        hide_all_btn = QPushButton("Hide All")
+        toggle_all_btn = QPushButton("Toggle All")
+        reveal_all_btn.clicked.connect(self._reveal_all_clozes)
+        hide_all_btn.clicked.connect(self._hide_all_clozes)
+        toggle_all_btn.clicked.connect(self._toggle_all_clozes)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.editor.textChanged.connect(self._refresh_preview)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Hint Markdown"))
+        lay.addWidget(self.editor, 3)
+        lay.addWidget(QLabel("Blurting View (left-click cloze to reveal/hide)"))
+        lay.addWidget(self.preview, 2)
+        count_row = QHBoxLayout()
+        count_row.addWidget(self._count_label)
+        count_row.addStretch()
+        count_row.addWidget(reveal_all_btn)
+        count_row.addWidget(hide_all_btn)
+        count_row.addWidget(toggle_all_btn)
+        lay.addLayout(count_row)
+        lay.addWidget(self._validation_label)
+        lay.addWidget(self.history_hint)
+        lay.addWidget(buttons)
+        self._refresh_preview()
+
+    def _open_editor_context_menu(self, pos) -> None:
+        cursor = self.editor.cursorForPosition(pos)
+        self.editor.setTextCursor(cursor)
+        menu = self.editor.createStandardContextMenu()
+        make_action = QAction("Make Cloze", self)
+        make_action.triggered.connect(self._make_cloze_from_selection)
+        menu.addAction(make_action)
+
+        cloze_bounds = self._cloze_bounds_at_cursor()
+        if cloze_bounds is not None:
+            remove_action = QAction("Remove Cloze", self)
+            remove_action.triggered.connect(lambda: self._remove_cloze(*cloze_bounds))
+            menu.addAction(remove_action)
+        menu.exec(self.editor.mapToGlobal(pos))
+
+    def _cloze_bounds_at_cursor(self) -> tuple[int, int] | None:
+        cursor = self.editor.textCursor()
+        text = self.editor.toPlainText()
+        pos = cursor.position()
+        idx = 0
+        while idx < len(text):
+            start = text.find(_CLOZE_OPEN, idx)
+            if start < 0:
+                break
+            body_start = start + len(_CLOZE_OPEN)
+            end = text.find(_CLOZE_CLOSE, body_start)
+            if end < 0:
+                break
+            close_end = end + len(_CLOZE_CLOSE)
+            if start <= pos <= close_end:
+                return start, close_end
+            idx = close_end
+        return None
+
+    def _make_cloze_from_selection(self) -> None:
+        cursor = self.editor.textCursor()
+        text = self.editor.toPlainText()
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        if end <= start:
+            return
+        selected = text[start:end]
+        if not selected.strip():
+            return
+        if _CLOZE_OPEN in selected or _CLOZE_CLOSE in selected:
+            return
+        cursor.beginEditBlock()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        cursor.insertText(f"{{{{c::{selected}}}}}")
+        cursor.endEditBlock()
+        self.editor.setTextCursor(cursor)
+
+    def _remove_cloze(self, start: int, end: int) -> None:
+        text = self.editor.toPlainText()
+        fragment = text[start:end]
+        if not (fragment.startswith(_CLOZE_OPEN) and fragment.endswith(_CLOZE_CLOSE)):
+            return
+        replacement = fragment[len(_CLOZE_OPEN):-len(_CLOZE_CLOSE)]
+        cursor = self.editor.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        cursor.insertText(replacement)
+        self.editor.setTextCursor(cursor)
+
+    def _on_anchor_clicked(self, url: QUrl) -> None:
+        if url.scheme() != "cloze":
+            return
+        try:
+            idx = int(url.path().strip("/"))
+        except Exception:
+            return
+        if idx in self._revealed_cloze_indexes:
+            self._revealed_cloze_indexes.remove(idx)
+        else:
+            self._revealed_cloze_indexes.add(idx)
+        self._refresh_preview()
+
+    def _reveal_all_clozes(self) -> None:
+        self._revealed_cloze_indexes = set(range(len(self._cloze_values)))
+        self._refresh_preview()
+
+    def _hide_all_clozes(self) -> None:
+        self._revealed_cloze_indexes = set()
+        self._refresh_preview()
+
+    def _toggle_all_clozes(self) -> None:
+        if not self._cloze_values:
+            return
+        if len(self._revealed_cloze_indexes) >= len(self._cloze_values):
+            self._revealed_cloze_indexes = set()
+        else:
+            self._revealed_cloze_indexes = set(range(len(self._cloze_values)))
+        self._refresh_preview()
+
+    def _refresh_preview(self) -> None:
+        source = self.editor.toPlainText()
+        markdown_with_tokens, self._cloze_values = _extract_cloze_segments(source)
+        self._revealed_cloze_indexes = {idx for idx in self._revealed_cloze_indexes if idx < len(self._cloze_values)}
+        warning_messages = _cloze_validation_messages(source)
+        self._validation_label.setText("\n".join(warning_messages))
+        preview_scroll = self.preview.verticalScrollBar().value()
+        editor_scroll = self.editor.verticalScrollBar().value()
+        doc = QTextDocument()
+        doc.setMarkdown(markdown_with_tokens)
+        rendered = doc.toHtml()
+        for idx, value in enumerate(self._cloze_values):
+            token = f"CLOZE_TOKEN_{idx}"
+            if idx in self._revealed_cloze_indexes:
+                label = html.escape(value)
+            else:
+                label = "▇▇▇"
+            rendered = rendered.replace(token, f'<a href="cloze://{idx}">{label}</a>')
+        hidden = max(0, len(self._cloze_values) - len(self._revealed_cloze_indexes))
+        shown = len(self._revealed_cloze_indexes)
+        self._count_label.setText(f"Clozes: {len(self._cloze_values)} total · {hidden} hidden · {shown} shown")
+        self.preview.setHtml(rendered)
+        self.preview.verticalScrollBar().setValue(preview_scroll)
+        self.editor.verticalScrollBar().setValue(editor_scroll)
 
     def value(self) -> str:
         return self.editor.toPlainText()

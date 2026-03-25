@@ -626,6 +626,83 @@ class ReviewRepo:
         )
         self.db.conn.commit()
 
+    def unit_hint_markdown(self, unit_id: int) -> str:
+        row = self.db.conn.execute("SELECT hint_markdown FROM units WHERE id=?", (int(unit_id),)).fetchone()
+        if not row:
+            return ""
+        return str(row["hint_markdown"] or "")
+
+    def save_unit_hint_markdown(self, unit_id: int, markdown_text: str) -> bool:
+        before = self.unit_hint_markdown(unit_id)
+        after = str(markdown_text or "")
+        if before == after:
+            return False
+        now_iso = utcnow_iso()
+        with self.db.conn:
+            self.db.conn.execute("UPDATE units SET hint_markdown=? WHERE id=?", (after, int(unit_id)))
+            self.db.conn.execute(
+                """INSERT INTO unit_hint_revisions(unit_id,changed_at,before_markdown,after_markdown)
+                VALUES(?,?,?,?)""",
+                (int(unit_id), now_iso, before, after),
+            )
+            self.db.conn.execute(
+                """DELETE FROM unit_hint_revisions
+                WHERE unit_id=?
+                  AND id NOT IN (
+                    SELECT id FROM unit_hint_revisions
+                    WHERE unit_id=?
+                    ORDER BY id DESC
+                    LIMIT 500
+                  )""",
+                (int(unit_id), int(unit_id)),
+            )
+        return True
+
+    def unit_hint_revisions(
+        self,
+        unit_id: int,
+        limit: int = 50,
+        before_revision_id: int | None = None,
+        search_text: str = "",
+    ):
+        where = ["unit_id=?"]
+        params: list[object] = [int(unit_id)]
+        if before_revision_id is not None:
+            where.append("id < ?")
+            params.append(int(before_revision_id))
+        text = (search_text or "").strip()
+        if text:
+            where.append("(before_markdown LIKE ? OR after_markdown LIKE ?)")
+            token = f"%{text}%"
+            params.extend([token, token])
+        params.append(max(1, int(limit)))
+        return self.db.conn.execute(
+            f"""SELECT * FROM unit_hint_revisions
+            WHERE {' AND '.join(where)}
+            ORDER BY id DESC
+            LIMIT ?""",
+            params,
+        ).fetchall()
+
+    def unit_hint_last_changed_at(self, unit_id: int) -> str | None:
+        row = self.db.conn.execute(
+            """SELECT changed_at
+            FROM unit_hint_revisions
+            WHERE unit_id=?
+            ORDER BY id DESC
+            LIMIT 1""",
+            (int(unit_id),),
+        ).fetchone()
+        if not row:
+            return None
+        return str(row["changed_at"]) if row["changed_at"] else None
+
+    def unit_hint_revision_by_id(self, revision_id: int):
+        return self.db.conn.execute(
+            "SELECT * FROM unit_hint_revisions WHERE id=?",
+            (int(revision_id),),
+        ).fetchone()
+
     def soft_delete_event(self, event_id: int) -> None:
         before = self.db.conn.execute("SELECT * FROM review_events WHERE id=?", (event_id,)).fetchone()
         self.db.conn.execute("UPDATE review_events SET deleted_at=? WHERE id=?", (utcnow_iso(), event_id))
