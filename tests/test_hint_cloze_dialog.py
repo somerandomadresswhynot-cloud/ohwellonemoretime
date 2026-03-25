@@ -36,7 +36,7 @@ def test_dialog_right_click_position_helpers_and_toggle_all(app):
         dlg._toggle_all_clozes()
         assert 0 not in dlg._revealed_cloze_indexes
         dlg._toggle_mode()
-        assert dlg.stack.currentWidget() is dlg.preview
+        assert dlg.stack.currentWidget() is dlg.rendered_editor
         dlg._toggle_mode()
         assert dlg.stack.currentWidget() is dlg.editor
 

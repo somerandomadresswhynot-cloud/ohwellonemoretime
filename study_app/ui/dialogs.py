@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import html
-
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -14,12 +12,11 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QTextBrowser,
     QTextEdit,
     QStackedWidget,
     QVBoxLayout,
 )
-from PySide6.QtGui import QAction, QTextCursor, QTextDocument, QTextOption
+from PySide6.QtGui import QAction, QTextCursor, QTextOption
 
 from study_app.services.outline_service import parse_outline_text
 
@@ -230,9 +227,9 @@ class HintMarkdownDialog(QDialog):
         self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
         self.editor.customContextMenuRequested.connect(self._open_editor_context_menu)
 
-        self.preview = QTextBrowser()
-        self.preview.setOpenExternalLinks(False)
-        self.preview.anchorClicked.connect(self._on_anchor_clicked)
+        self.rendered_editor = QTextEdit()
+        self.rendered_editor.setAcceptRichText(True)
+        self.rendered_editor.setPlaceholderText("Rendered markdown (editable)")
         self._preview_scroll_value = 0
         self._editor_scroll_value = 0
         self._edit_mode = True
@@ -277,9 +274,10 @@ class HintMarkdownDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         self.editor.textChanged.connect(self._refresh_preview)
+        self.rendered_editor.textChanged.connect(self._on_rendered_text_changed)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.editor)
-        self.stack.addWidget(self.preview)
+        self.stack.addWidget(self.rendered_editor)
         lay = QVBoxLayout(self)
         lay.addWidget(self.mode_btn, 0, Qt.AlignLeft)
         lay.addLayout(self.toolbar)
@@ -373,18 +371,10 @@ class HintMarkdownDialog(QDialog):
         cursor.insertText(replacement)
         self.editor.setTextCursor(cursor)
 
-    def _on_anchor_clicked(self, url: QUrl) -> None:
-        if url.scheme() != "cloze":
+    def _on_rendered_text_changed(self) -> None:
+        if self._edit_mode:
             return
-        try:
-            idx = int(url.path().strip("/"))
-        except Exception:
-            return
-        if idx in self._revealed_cloze_indexes:
-            self._revealed_cloze_indexes.remove(idx)
-        else:
-            self._revealed_cloze_indexes.add(idx)
-        self._refresh_preview()
+        self._preview_scroll_value = self.rendered_editor.verticalScrollBar().value()
 
     def _reveal_all_clozes(self) -> None:
         self._revealed_cloze_indexes = set(range(len(self._cloze_values)))
@@ -443,19 +433,21 @@ class HintMarkdownDialog(QDialog):
     def _set_mode(self, edit_mode: bool) -> None:
         if self._edit_mode and not edit_mode:
             self._editor_scroll_value = self.editor.verticalScrollBar().value()
-            self._preview_scroll_value = self.preview.verticalScrollBar().value()
+            self._preview_scroll_value = self.rendered_editor.verticalScrollBar().value()
+            self._refresh_preview()
         elif (not self._edit_mode) and edit_mode:
-            self._preview_scroll_value = self.preview.verticalScrollBar().value()
+            self._preview_scroll_value = self.rendered_editor.verticalScrollBar().value()
+            self.editor.blockSignals(True)
+            self.editor.setPlainText(self.rendered_editor.toMarkdown())
+            self.editor.blockSignals(False)
             self._editor_scroll_value = self.editor.verticalScrollBar().value()
         self._edit_mode = bool(edit_mode)
-        self.stack.setCurrentWidget(self.editor if self._edit_mode else self.preview)
+        self.stack.setCurrentWidget(self.editor if self._edit_mode else self.rendered_editor)
         self.mode_btn.setText("Switch to Render Markdown" if self._edit_mode else "Switch to Edit Markdown")
-        for btn in self._format_buttons:
-            btn.setEnabled(self._edit_mode)
         if self._edit_mode:
             self.editor.verticalScrollBar().setValue(self._editor_scroll_value)
         else:
-            self.preview.verticalScrollBar().setValue(self._preview_scroll_value)
+            self.rendered_editor.verticalScrollBar().setValue(self._preview_scroll_value)
 
     def _refresh_preview(self) -> None:
         source = self.editor.toPlainText()
@@ -463,25 +455,22 @@ class HintMarkdownDialog(QDialog):
         self._revealed_cloze_indexes = {idx for idx in self._revealed_cloze_indexes if idx < len(self._cloze_values)}
         warning_messages = _cloze_validation_messages(source)
         self._validation_label.setText("\n".join(warning_messages))
-        preview_scroll = self.preview.verticalScrollBar().value()
+        preview_scroll = self.rendered_editor.verticalScrollBar().value()
         editor_scroll = self.editor.verticalScrollBar().value()
-        doc = QTextDocument()
-        doc.setMarkdown(markdown_with_tokens)
-        rendered = doc.toHtml()
+        rendered_markdown = markdown_with_tokens
         for idx, value in enumerate(self._cloze_values):
             token = f"CLOZE_TOKEN_{idx}"
-            if idx in self._revealed_cloze_indexes:
-                label = html.escape(value)
-            else:
-                label = "▇▇▇"
-            rendered = rendered.replace(token, f'<a href="cloze://{idx}">{label}</a>')
+            replacement = value if idx in self._revealed_cloze_indexes else "▇▇▇"
+            rendered_markdown = rendered_markdown.replace(token, replacement)
+        self.rendered_editor.blockSignals(True)
+        self.rendered_editor.setMarkdown(rendered_markdown)
+        self.rendered_editor.blockSignals(False)
         hidden = max(0, len(self._cloze_values) - len(self._revealed_cloze_indexes))
         shown = len(self._revealed_cloze_indexes)
         self._count_label.setText(f"Clozes: {len(self._cloze_values)} total · {hidden} hidden · {shown} shown")
-        self.preview.setHtml(rendered)
         self._preview_scroll_value = preview_scroll
         self._editor_scroll_value = editor_scroll
-        self.preview.verticalScrollBar().setValue(self._preview_scroll_value)
+        self.rendered_editor.verticalScrollBar().setValue(self._preview_scroll_value)
         self.editor.verticalScrollBar().setValue(self._editor_scroll_value)
 
     def value(self) -> str:
