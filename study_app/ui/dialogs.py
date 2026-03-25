@@ -87,6 +87,7 @@ class ReviewHistoryDialog(QDialog):
         self.resize(680, 500)
         self.review_repo = review_repo
         self.events = events
+        self.changed = False
         self.list = QListWidget()
         self.pre = QTextEdit()
         self.post = QTextEdit()
@@ -110,7 +111,9 @@ class ReviewHistoryDialog(QDialog):
     def _load(self):
         self.list.clear()
         for ev in self.events:
-            item = QListWidgetItem(f"#{ev['id']} {ev['ended_at']} {ev['rating']} {ev['elapsed_seconds']}s")
+            ended = str(ev["ended_at"] or "")
+            day = ended[:10] if len(ended) >= 10 else ended
+            item = QListWidgetItem(f"#{ev['id']} {day} {ev['rating']} {ev['elapsed_seconds']}s")
             item.setData(256, ev)
             self.list.addItem(item)
         if self.list.count():
@@ -137,6 +140,7 @@ class ReviewHistoryDialog(QDialog):
             return
         ev = self.list.item(idx).data(256)
         self.review_repo.soft_delete_event(ev["id"])
+        self.changed = True
         QMessageBox.information(self, "Deleted", "Event marked deleted.")
         self.events = [e for e in self.events if e["id"] != ev["id"]]
         self._load()

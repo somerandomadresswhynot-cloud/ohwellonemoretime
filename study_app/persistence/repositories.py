@@ -328,6 +328,31 @@ class ReviewRepo:
         ).fetchall()
         return {int(r["unit_id"]) for r in rows}
 
+    def reviewed_unit_ids_between_ordered(self, start_iso_utc: str, end_iso_utc: str) -> list[int]:
+        rows = self.db.conn.execute(
+            """SELECT unit_id, MAX(ended_at) AS last_ended_at
+            FROM review_events
+            WHERE deleted_at IS NULL
+              AND ended_at >= ?
+              AND ended_at < ?
+            GROUP BY unit_id
+            ORDER BY last_ended_at ASC, unit_id ASC""",
+            (start_iso_utc, end_iso_utc),
+        ).fetchall()
+        return [int(r["unit_id"]) for r in rows]
+
+    def review_seconds_by_unit_between(self, start_iso_utc: str, end_iso_utc: str) -> dict[int, float]:
+        rows = self.db.conn.execute(
+            """SELECT unit_id, COALESCE(SUM(elapsed_seconds), 0) AS total_seconds
+            FROM review_events
+            WHERE deleted_at IS NULL
+              AND ended_at >= ?
+              AND ended_at < ?
+            GROUP BY unit_id""",
+            (start_iso_utc, end_iso_utc),
+        ).fetchall()
+        return {int(r["unit_id"]): float(r["total_seconds"] or 0.0) for r in rows}
+
     def review_count_on_date(self, day_iso: str) -> int:
         row = self.db.conn.execute(
             """SELECT COUNT(*) AS c FROM review_events
@@ -514,6 +539,26 @@ class ReviewRepo:
             })
         return out
 
+    def review_history_for_units(self, unit_ids: list[int]) -> dict[int, list[dict]]:
+        cleaned = [int(uid) for uid in unit_ids if uid is not None]
+        if not cleaned:
+            return {}
+        placeholders = ",".join("?" for _ in cleaned)
+        rows = self.db.conn.execute(
+            f"""SELECT unit_id, ended_at, rating
+            FROM review_events
+            WHERE deleted_at IS NULL AND unit_id IN ({placeholders})
+            ORDER BY unit_id ASC, ended_at ASC, id ASC""",
+            cleaned,
+        ).fetchall()
+        out: dict[int, list[dict]] = defaultdict(list)
+        for row in rows:
+            out[int(row["unit_id"])].append({
+                "ended_at": str(row["ended_at"]),
+                "rating": str(row["rating"]),
+            })
+        return dict(out)
+
     def source_units(self, source_id: int):
         return self.db.conn.execute("SELECT * FROM units WHERE source_id=? ORDER BY start_page,title", (source_id,)).fetchall()
 
@@ -626,6 +671,44 @@ class ReviewRepo:
         )
         self.db.conn.commit()
 
+    def _recompute_unit_from_active_history(self, unit_id: int) -> None:
+        unit_id_int = int(unit_id)
+        events = self.events_for_unit_chronological(unit_id_int)
+        if not events:
+            self.db.conn.execute(
+                """UPDATE units
+                SET last_review_at=NULL,
+                    next_review_at=NULL,
+                    review_count=0,
+                    ease_factor=2.5,
+                    interval_days=0.0,
+                    avg_rating=0.0,
+                    fsrs_difficulty=NULL,
+                    fsrs_stability=NULL,
+                    fsrs_last_review_at=NULL,
+                    fsrs_last_grade=NULL,
+                    fsrs_review_count=NULL,
+                    fsrs_lapse_count=NULL,
+                    fsrs_state_version=NULL,
+                    fsrs_due_retention_used=NULL
+                WHERE id=?""",
+                (unit_id_int,),
+            )
+            return
+
+        ratings = {"easy": 5.0, "with_effort": 3.0, "hard": 2.0, "skip": 1.0}
+        count = len(events)
+        avg_rating = sum(ratings.get(str(ev["rating"]), 3.0) for ev in events) / max(1, count)
+        last_review_at = str(events[-1]["ended_at"])
+        lightweight_history = [{"ended_at": str(ev["ended_at"]), "rating": str(ev["rating"])} for ev in events]
+        due_iso = _derive_due_at_from_events(lightweight_history)
+        interval_days = 0.0
+        if due_iso:
+            try:
+                interval_days = max(0.0, (parse_iso_to_utc(due_iso) - parse_iso_to_utc(last_review_at)).total_seconds() / 86400.0)
+            except Exception:
+                interval_days = 0.0
+        fsrs_state = replay_history_into_state(lightweight_history, DEFAULT_FSRS_PARAMETERS)
     def unit_hint_markdown(self, unit_id: int) -> str:
         row = self.db.conn.execute("SELECT hint_markdown FROM units WHERE id=?", (int(unit_id),)).fetchone()
         if not row:
@@ -707,10 +790,52 @@ class ReviewRepo:
         before = self.db.conn.execute("SELECT * FROM review_events WHERE id=?", (event_id,)).fetchone()
         self.db.conn.execute("UPDATE review_events SET deleted_at=? WHERE id=?", (utcnow_iso(), event_id))
         self.db.conn.execute(
-            "INSERT INTO review_revisions(review_event_id,changed_at,action,before_json,after_json) VALUES(?,?,?,?,?)",
-            (event_id, utcnow_iso(), "delete", json.dumps(dict(before)), json.dumps({"deleted": True})),
+            """UPDATE units
+            SET last_review_at=?,
+                next_review_at=?,
+                review_count=?,
+                ease_factor=2.5,
+                interval_days=?,
+                avg_rating=?,
+                fsrs_difficulty=?,
+                fsrs_stability=?,
+                fsrs_last_review_at=?,
+                fsrs_last_grade=?,
+                fsrs_review_count=?,
+                fsrs_lapse_count=?,
+                fsrs_state_version=?,
+                fsrs_due_retention_used=?
+            WHERE id=?""",
+            (
+                last_review_at,
+                due_iso,
+                int(count),
+                float(interval_days),
+                float(avg_rating),
+                (fsrs_state.difficulty if fsrs_state is not None else None),
+                (fsrs_state.stability if fsrs_state is not None else None),
+                (iso_utc(fsrs_state.last_review_at) if fsrs_state is not None else None),
+                (int(fsrs_state.last_grade) if fsrs_state is not None else None),
+                (int(fsrs_state.review_count) if fsrs_state is not None else None),
+                (int(fsrs_state.lapse_count) if fsrs_state is not None else None),
+                (int(fsrs_state.state_version) if fsrs_state is not None else None),
+                0.9 if fsrs_state is not None else None,
+                unit_id_int,
+            ),
         )
-        self.db.conn.commit()
+
+    def soft_delete_event(self, event_id: int) -> None:
+        before = self.db.conn.execute("SELECT * FROM review_events WHERE id=?", (event_id,)).fetchone()
+        if not before:
+            return
+        unit_id = int(before["unit_id"])
+        with self.db.conn:
+            self.db.conn.execute("UPDATE review_events SET deleted_at=? WHERE id=?", (utcnow_iso(), event_id))
+            self.db.conn.execute(
+                "INSERT INTO review_revisions(review_event_id,changed_at,action,before_json,after_json) VALUES(?,?,?,?,?)",
+                (event_id, utcnow_iso(), "delete", json.dumps(dict(before)), json.dumps({"deleted": True})),
+            )
+            self._recompute_unit_from_active_history(unit_id)
 
     def source_statistics(self, now_iso: str):
         due_counts: dict[int, int] = defaultdict(int)
