@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QEvent, Qt, QUrl, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -223,11 +224,15 @@ def _cloze_validation_messages(markdown_text: str) -> list[str]:
 
 
 class HintMarkdownDialog(QDialog):
+    keep_on_top_changed = Signal(bool)
+
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Hint")
         self.resize(920, 700)
         self._value = text or ""
+        self._keep_on_top = True
+        self._parent_for_filter = parent if hasattr(parent, "installEventFilter") else None
         self.web = QWebEngineView()
         self.make_cloze_btn = QPushButton("Cloze")
         self.reveal_all_btn = QPushButton("Reveal All")
@@ -264,6 +269,11 @@ class HintMarkdownDialog(QDialog):
         title = QLabel("Hint Markdown")
         title.setObjectName("hintTitle")
         title_row.addWidget(title)
+        self.keep_on_top_check = QCheckBox("Show on top of this app")
+        self.keep_on_top_check.setToolTip("Keeps the hint above this app window while enabled.")
+        self.keep_on_top_check.setChecked(True)
+        self.keep_on_top_check.toggled.connect(self._on_keep_on_top_toggled)
+        title_row.addWidget(self.keep_on_top_check)
         title_row.addStretch()
         lay.addLayout(title_row)
 
@@ -280,6 +290,17 @@ class HintMarkdownDialog(QDialog):
         lay.addWidget(buttons)
         self.web.loadFinished.connect(self._on_loaded)
         self.web.setHtml(_hint_editor_html(), baseUrl=QUrl("https://cdn.jsdelivr.net/"))
+        self._set_parent_filter_enabled(True)
+
+    def closeEvent(self, event) -> None:
+        self._set_parent_filter_enabled(False)
+        super().closeEvent(event)
+
+    def eventFilter(self, watched, event):
+        if watched is self._parent_for_filter and self._keep_on_top and event.type() == QEvent.WindowActivate:
+            self.raise_()
+            self.activateWindow()
+        return super().eventFilter(watched, event)
 
     def _on_loaded(self, ok: bool) -> None:
         if not ok:
@@ -296,6 +317,29 @@ class HintMarkdownDialog(QDialog):
 
     def value(self) -> str:
         return self._value
+
+    def keep_on_top(self) -> bool:
+        return bool(self._keep_on_top)
+
+    def set_keep_on_top(self, enabled: bool) -> None:
+        checked = bool(enabled)
+        self.keep_on_top_check.setChecked(checked)
+        self._on_keep_on_top_toggled(checked)
+
+    def _on_keep_on_top_toggled(self, enabled: bool) -> None:
+        self._keep_on_top = bool(enabled)
+        self.keep_on_top_changed.emit(self._keep_on_top)
+        if self._keep_on_top:
+            self.raise_()
+            self.activateWindow()
+
+    def _set_parent_filter_enabled(self, enabled: bool) -> None:
+        if not self._parent_for_filter:
+            return
+        if enabled:
+            self._parent_for_filter.installEventFilter(self)
+            return
+        self._parent_for_filter.removeEventFilter(self)
 
 
 def _hint_editor_html() -> str:
