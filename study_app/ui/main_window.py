@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -38,7 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
+from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo, _derive_due_at_from_events
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
@@ -1887,6 +1888,7 @@ class StudyQueuePage(QWidget):
         )
         self._analytics_cache: dict[str, dict] = {}
         self._analytics_cache_ttl_seconds = 5.0
+        self._queue_history_by_unit: dict[int, list[dict]] = {}
 
         left = QVBoxLayout()
         left.addWidget(QLabel("Queue"))
@@ -2706,6 +2708,11 @@ class StudyQueuePage(QWidget):
             today_window["next_start_utc_iso"],
         )
         self.units = self.review_repo.unit_views_by_ids(planned_ids)
+        self._queue_history_by_unit = self.review_repo.review_history_for_units([int(u.unit_id) for u in self.units])
+        for unit in self.units:
+            history = self._queue_history_by_unit.get(int(unit.unit_id), [])
+            unit.review_count = len(history)
+            unit.last_review_at = str(history[-1]["ended_at"]) if history else None
         todo_units = [u for u in self.units if int(u.unit_id) not in completed_today]
         done_units = [u for u in self.units if int(u.unit_id) in completed_today]
         ordered_units = todo_units + done_units
@@ -2797,14 +2804,25 @@ class StudyQueuePage(QWidget):
         return model.estimate_unit_seconds(unit, now_utc())
 
     def _estimate_retention(self, unit) -> float | None:
-        row = self.review_repo.unit_by_id(unit.unit_id)
-        if not row:
+        history = self._queue_history_by_unit.get(int(unit.unit_id), [])
+        if not history:
             return None
-        review_count = int(row["review_count"] or 0)
-        fsrs_count = int(row["fsrs_review_count"] or 0) if "fsrs_review_count" in row.keys() else 0
-        if review_count == 0 and fsrs_count == 0 and not row["last_review_at"]:
+        now = now_utc()
+        try:
+            last_review_at = parse_iso_to_utc(str(history[-1]["ended_at"]))
+        except Exception:
             return None
-        return retention_estimate(row, now_utc())
+        due_iso = _derive_due_at_from_events(history)
+        interval_days = 1.0
+        if due_iso:
+            try:
+                due_at = parse_iso_to_utc(str(due_iso))
+                interval_days = max(0.3, (due_at - last_review_at).total_seconds() / 86400.0)
+            except Exception:
+                interval_days = 1.0
+        elapsed_days = max(0.0, (now - last_review_at).total_seconds() / 86400.0)
+        score = math.exp(-elapsed_days / max(0.3, interval_days))
+        return max(0.01, min(0.99, float(score)))
 
     def _queue_reason_for_unit(self, unit, retention: float | None, is_manual: bool) -> str | None:
         if is_manual:
@@ -2906,7 +2924,6 @@ class StudyQueuePage(QWidget):
             label_map = {
                 "manual": "Manually added",
                 "low_retention": "Low retention",
-                "catch_up": "Catch-up / overflow",
             }
             progress_text = label_map.get(progression_reason, progression_reason)
             progress_badge = QLabel(progress_text)

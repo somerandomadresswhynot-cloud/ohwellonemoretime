@@ -187,6 +187,28 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         self.assertEqual(totals[unit_a], 35.0)
         self.assertEqual(totals[unit_b], 40.0)
 
+    def test_review_history_for_units_returns_active_history_only(self):
+        unit_a = int(self.units[0]["id"])
+        ended_at = "2026-03-23T01:00:00+00:00"
+        payload = {
+            "started_at": ended_at,
+            "ended_at": ended_at,
+            "elapsed_seconds": 10,
+            "rating": "easy",
+            "pre_note": "",
+            "post_note": "",
+        }
+        stats = {
+            "last_review_at": ended_at,
+            "review_count": 1,
+            "ease_factor": 2.5,
+            "avg_rating": 5.0,
+        }
+        event_id = self.review_repo.record_review(unit_a, payload, stats)
+        self.review_repo.soft_delete_event(event_id)
+        history = self.review_repo.review_history_for_units([unit_a, int(self.units[1]["id"])])
+        self.assertEqual(history.get(unit_a), None)
+
     def test_new_units_returns_only_never_reviewed(self):
         reviewed_id = int(self.units[0]['id'])
         payload = {

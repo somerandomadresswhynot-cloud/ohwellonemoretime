@@ -539,6 +539,26 @@ class ReviewRepo:
             })
         return out
 
+    def review_history_for_units(self, unit_ids: list[int]) -> dict[int, list[dict]]:
+        cleaned = [int(uid) for uid in unit_ids if uid is not None]
+        if not cleaned:
+            return {}
+        placeholders = ",".join("?" for _ in cleaned)
+        rows = self.db.conn.execute(
+            f"""SELECT unit_id, ended_at, rating
+            FROM review_events
+            WHERE deleted_at IS NULL AND unit_id IN ({placeholders})
+            ORDER BY unit_id ASC, ended_at ASC, id ASC""",
+            cleaned,
+        ).fetchall()
+        out: dict[int, list[dict]] = defaultdict(list)
+        for row in rows:
+            out[int(row["unit_id"])].append({
+                "ended_at": str(row["ended_at"]),
+                "rating": str(row["rating"]),
+            })
+        return dict(out)
+
     def source_units(self, source_id: int):
         return self.db.conn.execute("SELECT * FROM units WHERE source_id=? ORDER BY start_page,title", (source_id,)).fetchall()
 
