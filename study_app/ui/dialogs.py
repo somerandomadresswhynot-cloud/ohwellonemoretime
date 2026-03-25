@@ -307,8 +307,16 @@ def _hint_editor_html() -> str:
     .editor-toolbar { background:#0d1a36; border:1px solid #25406f; border-bottom:0; padding:6px 6px; }
     .editor-toolbar a { color:#dbe8ff !important; }
     .editor-toolbar i { color:#dbe8ff !important; }
-    .editor-toolbar a:hover, .editor-toolbar a.active { background:#223a64 !important; border-color:#34558f !important; color:#e6f0ff !important; }
-    .editor-toolbar a.active i { color:#e6f0ff !important; }
+    .editor-toolbar a:hover { background:#223a64 !important; border-color:#34558f !important; color:#e6f0ff !important; }
+    .editor-toolbar a.active,
+    .editor-toolbar button.active {
+      background:rgba(143,180,245,0.22) !important;
+      border-color:#4a6fae !important;
+      box-shadow:none !important;
+      color:#d8e7ff !important;
+    }
+    .editor-toolbar a.active i,
+    .editor-toolbar button.active i { color:#d8e7ff !important; }
     .editor-toolbar i.separator { border-color:#2f4f84 !important; }
     .CodeMirror { background:#101d3b; color:#e6efff; border:1px solid #25406f; min-height:380px; }
     .CodeMirror-cursor { border-left:1px solid #e6efff !important; }
