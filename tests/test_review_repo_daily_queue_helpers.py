@@ -158,6 +158,35 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         ordered = self.review_repo.reviewed_unit_ids_between_ordered("2026-03-23T00:00:00+00:00", "2026-03-24T00:00:00+00:00")
         self.assertEqual(ordered, [unit_a, unit_b])
 
+    def test_review_seconds_by_unit_between_sums_elapsed_seconds(self):
+        unit_a = int(self.units[0]["id"])
+        unit_b = int(self.units[1]["id"])
+        events = [
+            (unit_a, "2026-03-23T01:00:00+00:00", 15),
+            (unit_a, "2026-03-23T01:30:00+00:00", 20),
+            (unit_b, "2026-03-23T02:00:00+00:00", 40),
+            (unit_b, "2026-03-24T00:00:00+00:00", 99),
+        ]
+        for uid, ended_at, elapsed in events:
+            payload = {
+                "started_at": ended_at,
+                "ended_at": ended_at,
+                "elapsed_seconds": elapsed,
+                "rating": "easy",
+                "pre_note": "",
+                "post_note": "",
+            }
+            stats = {
+                "last_review_at": ended_at,
+                "review_count": 1,
+                "ease_factor": 2.5,
+                "avg_rating": 5.0,
+            }
+            self.review_repo.record_review(uid, payload, stats)
+        totals = self.review_repo.review_seconds_by_unit_between("2026-03-23T00:00:00+00:00", "2026-03-24T00:00:00+00:00")
+        self.assertEqual(totals[unit_a], 35.0)
+        self.assertEqual(totals[unit_b], 40.0)
+
     def test_new_units_returns_only_never_reviewed(self):
         reviewed_id = int(self.units[0]['id'])
         payload = {

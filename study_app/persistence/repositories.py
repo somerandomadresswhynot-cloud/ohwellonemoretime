@@ -341,6 +341,18 @@ class ReviewRepo:
         ).fetchall()
         return [int(r["unit_id"]) for r in rows]
 
+    def review_seconds_by_unit_between(self, start_iso_utc: str, end_iso_utc: str) -> dict[int, float]:
+        rows = self.db.conn.execute(
+            """SELECT unit_id, COALESCE(SUM(elapsed_seconds), 0) AS total_seconds
+            FROM review_events
+            WHERE deleted_at IS NULL
+              AND ended_at >= ?
+              AND ended_at < ?
+            GROUP BY unit_id""",
+            (start_iso_utc, end_iso_utc),
+        ).fetchall()
+        return {int(r["unit_id"]): float(r["total_seconds"] or 0.0) for r in rows}
+
     def review_count_on_date(self, day_iso: str) -> int:
         row = self.db.conn.execute(
             """SELECT COUNT(*) AS c FROM review_events

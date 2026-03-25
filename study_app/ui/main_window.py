@@ -2701,6 +2701,10 @@ class StudyQueuePage(QWidget):
             today_window["start_utc_iso"],
             today_window["next_start_utc_iso"],
         )
+        done_elapsed_by_unit = self.review_repo.review_seconds_by_unit_between(
+            today_window["start_utc_iso"],
+            today_window["next_start_utc_iso"],
+        )
         self.units = self.review_repo.unit_views_by_ids(planned_ids)
         todo_units = [u for u in self.units if int(u.unit_id) not in completed_today]
         done_units = [u for u in self.units if int(u.unit_id) in completed_today]
@@ -2737,7 +2741,14 @@ class StudyQueuePage(QWidget):
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
             reason = self._queue_reason_for_unit(u, retention, int(u.unit_id) in manual_unit_ids)
-            tile = self._build_queue_tile(u, est_seconds, retention, progression_reason=reason, is_done=is_done)
+            tile = self._build_queue_tile(
+                u,
+                est_seconds,
+                retention,
+                progression_reason=reason,
+                is_done=is_done,
+                actual_seconds=done_elapsed_by_unit.get(int(u.unit_id)),
+            )
             item = QListWidgetItem()
             item.setData(256, len(self.display_units))
             self.list.addItem(item)
@@ -2798,8 +2809,6 @@ class StudyQueuePage(QWidget):
     def _queue_reason_for_unit(self, unit, retention: float | None, is_manual: bool) -> str:
         if is_manual:
             return "manual"
-        if unit.next_review_at:
-            return "due_now"
         threshold = float(self.settings_repo.get("min_retention_percent", "45")) / 100.0
         if retention is not None and retention < threshold:
             return "low_retention"
@@ -2820,25 +2829,28 @@ class StudyQueuePage(QWidget):
         t = max(0.0, min(1.0, float(glow_strength)))
         if is_done:
             base_border = (94, 116, 160)
-            base_bg = (30, 40, 62)
             glow_border = (193, 165, 96)
-            glow_bg = (122, 105, 58)
         else:
             base_border = (46, 58, 70)
-            base_bg = (0, 0, 0)
             glow_border = (136, 170, 230)
-            glow_bg = (50, 72, 112)
         border = tuple(int(round((1.0 - t) * base_border[i] + t * glow_border[i])) for i in range(3))
-        bg = tuple(int(round((1.0 - t) * base_bg[i] + t * glow_bg[i])) for i in range(3))
         tile.setStyleSheet(
-            f"#queueTile {{ border: 1px solid rgb({border[0]}, {border[1]}, {border[2]}); border-radius: 10px; padding: 8px; background: rgba({bg[0]}, {bg[1]}, {bg[2]}, {int(35 + (t * 90))}); }}"
+            f"#queueTile {{ border: 1px solid rgb({border[0]}, {border[1]}, {border[2]}); border-radius: 10px; padding: 8px; }}"
             "QLabel#tileTitle { font-size: 15px; font-weight: 600; color: #f2f5f7; }"
             "QLabel#tileMeta { color: #9aa7b2; font-size: 11px; }"
             "QLabel#badge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d8e1e8; background: #2b3440; }"
             "QLabel#progressBadge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #332400; background: #d8b65a; }"
         )
 
-    def _build_queue_tile(self, unit, est_seconds: float, retention: float | None, progression_reason: str | None = None, is_done: bool = False) -> QWidget:
+    def _build_queue_tile(
+        self,
+        unit,
+        est_seconds: float,
+        retention: float | None,
+        progression_reason: str | None = None,
+        is_done: bool = False,
+        actual_seconds: float | None = None,
+    ) -> QWidget:
         root = QFrame()
         root.setObjectName("queueTile")
         root.setProperty("queue_done", bool(is_done))
@@ -2861,7 +2873,11 @@ class StudyQueuePage(QWidget):
         badge_row = QHBoxLayout()
         badge_row.setSpacing(6)
         pages = QLabel(f"pages {unit.start_page}-{unit.end_page}"); pages.setObjectName("badge")
-        mins = QLabel(self._format_estimated_time(est_seconds)); mins.setObjectName("badge")
+        if is_done and actual_seconds is not None:
+            mins = QLabel(self._format_actual_time(actual_seconds))
+        else:
+            mins = QLabel(self._format_estimated_time(est_seconds))
+        mins.setObjectName("badge")
         if retention is None:
             retention_lbl = QLabel("new")
             retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d9e8ff; background: #22345a;")
@@ -2889,7 +2905,6 @@ class StudyQueuePage(QWidget):
         if progression_reason:
             label_map = {
                 "manual": "Manually added",
-                "due_now": "Due now",
                 "low_retention": "Low retention",
                 "catch_up": "Catch-up / overflow",
             }
@@ -2900,8 +2915,6 @@ class StudyQueuePage(QWidget):
                 progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #eef2ff; background: #3b2f6b;")
             elif progression_reason == "low_retention":
                 progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #fff2df; background: #6a4a1e;")
-            elif progression_reason == "due_now":
-                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #e8ffe9; background: #1f5a35;")
             badge_row.addWidget(progress_badge)
         badge_row.addStretch()
 
@@ -2928,6 +2941,13 @@ class StudyQueuePage(QWidget):
             return f"~{seconds}s"
         mins = seconds / 60.0
         return f"~{mins:.1f} min"
+
+    def _format_actual_time(self, elapsed_seconds: float) -> str:
+        seconds = max(0, int(round(float(elapsed_seconds))))
+        if seconds < 90:
+            return f"{seconds}s"
+        mins = seconds / 60.0
+        return f"{mins:.1f} min"
 
     def _refresh_today_strip(self, total_planned: int, planned_ids: list[int], queue_signature: str) -> None:
         window = self._today_window()
@@ -3235,6 +3255,9 @@ class StudyQueuePage(QWidget):
         events = self.review_repo.events_for_unit(self.active_unit.unit_id)
         dlg = ReviewHistoryDialog(events, self.review_repo, self)
         dlg.exec()
+        if getattr(dlg, "changed", False):
+            self._invalidate_analytics_cache()
+            self.refresh()
 
     def _refresh_note_previews(self) -> None:
         pre = (self.pre_note_text or "").strip()
@@ -3264,7 +3287,9 @@ class StudyQueuePage(QWidget):
             return
         events = self.review_repo.events_for_unit(self.active_unit.unit_id)[:8]
         for ev in events:
-            text = f"• {ev['ended_at']} · {ev['rating']} · {ev['elapsed_seconds']}s"
+            ended = str(ev["ended_at"] or "")
+            day = ended[:10] if len(ended) >= 10 else ended
+            text = f"• {day} · {ev['rating']} · {ev['elapsed_seconds']}s"
             self.review_history_list.addItem(text)
 
 
