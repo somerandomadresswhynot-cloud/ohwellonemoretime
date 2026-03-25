@@ -49,6 +49,8 @@ from study_app.services.runtime_estimator import RuntimeEstimationModel, build_r
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
+from study_app.services.day_window import day_window_for_offset, is_valid_gmt_offset, normalized_gmt_offset, parse_gmt_offset
+from study_app.services.time_format import format_minutes_whole
 
 
 _SESSION_QUEUE_SNAPSHOT = {
@@ -654,6 +656,9 @@ class SourceWorkspace(QWidget):
         self.source_hl_tree.customContextMenuRequested.connect(self.open_source_highlight_context_menu)
         self.source_hl_count = QLabel("0 highlights")
         self.source_hl_count.setStyleSheet("color:#9aa7b2;")
+        self.source_hl_summary = QLabel("")
+        self.source_hl_summary.setWordWrap(True)
+        self.source_hl_summary.setStyleSheet("color:#b9c7d8;")
         self.source_filter_type = QComboBox()
         self.source_filter_type.addItems(["All Types", "Text", "Area"])
         self.source_filter_type.currentIndexChanged.connect(lambda *_: self.refresh_highlights())
@@ -675,6 +680,7 @@ class SourceWorkspace(QWidget):
         source_filters.addStretch()
         source_filters.addWidget(self.source_hl_count)
         l3.addLayout(source_filters)
+        l3.addWidget(self.source_hl_summary)
         l3.addWidget(self.source_hl_tree)
         tabs.addTab(tab_ins, "Insights")
         tabs.addTab(tab_unit, "Unit Highlights")
@@ -697,6 +703,7 @@ class SourceWorkspace(QWidget):
         self._parent_id: dict[int, int | None] = {}
         self._state_cache: dict[int, Qt.CheckState] = {}
         self._id_to_item: dict[int, QTreeWidgetItem] = {}
+        self._node_stats_by_id: dict[int, dict] = {}
         self._active_filter = ""
         self._last_pdf_page = 1
         self._pdf_page_poll = QTimer(self)
@@ -857,7 +864,19 @@ class SourceWorkspace(QWidget):
         self._update_add_today_button_state()
 
     def _today_iso(self) -> str:
-        return now_utc().date().isoformat()
+        return self._today_window()["day_key"]
+
+    def _timezone_offset(self) -> str:
+        return normalized_gmt_offset(self.settings_repo.get("timezone_gmt_offset", "+00:00"))
+
+    def _today_window(self) -> dict:
+        window = day_window_for_offset(self._timezone_offset(), now_utc())
+        return {
+            "day_key": window.day_key,
+            "start_utc_iso": window.utc_start_iso,
+            "next_start_utc_iso": window.utc_next_start_iso,
+            "offset": window.offset,
+        }
 
     def _load_today_queue_snapshot(self) -> dict:
         today = self._today_iso()
@@ -997,6 +1016,19 @@ class SourceWorkspace(QWidget):
                 self._child_ids.setdefault(pid, []).append(rid)
 
         self._state_cache = {}
+        due_set = {int(u.unit_id) for u in self.review_repo.source_due_units(self.source_id, iso_utc(now_utc()))}
+        unit_rows = self.review_repo.source_units(self.source_id)
+        self._node_stats_by_id = {}
+        for u in unit_rows:
+            node_id = int(u["node_id"])
+            review_count = int(u["review_count"] or 0)
+            retention = retention_estimate(u, now_utc()) if review_count > 0 else None
+            self._node_stats_by_id[node_id] = {
+                "is_due": int(u["id"]) in due_set,
+                "review_count": review_count,
+                "retention": retention,
+                "last_review_at": u["last_review_at"],
+            }
 
         def _state(node_id: int):
             if node_id in self._state_cache:
@@ -1062,7 +1094,23 @@ class SourceWorkspace(QWidget):
         else:
             item.setForeground(0, QBrush(QColor("#9aa7b2")))
         cstate = item.checkState(1)
-        item.setText(1, "on" if cstate == Qt.Checked else "off" if cstate == Qt.Unchecked else "mixed")
+        status = "on" if cstate == Qt.Checked else "off" if cstate == Qt.Unchecked else "mixed"
+        stats = self._node_stats_by_id.get(int(node_id))
+        if stats:
+            due_txt = "due" if stats["is_due"] else "ok"
+            rev_txt = f"r{stats['review_count']}"
+            ret = stats.get("retention")
+            ret_txt = "new" if ret is None else f"{int(round(max(0.01, min(0.99, ret)) * 100))}%"
+            status = f"{status} · {due_txt} · {ret_txt} · {rev_txt}"
+            tooltip = (
+                f"Due: {'yes' if stats['is_due'] else 'no'}\n"
+                f"Retention: {ret_txt}\n"
+                f"Review count: {stats['review_count']}\n"
+                f"Last reviewed: {stats.get('last_review_at') or 'never'}"
+            )
+            item.setToolTip(0, tooltip)
+            item.setToolTip(1, tooltip)
+        item.setText(1, status)
         if parent_item is None:
             self.tree.addTopLevelItem(item)
         else:
@@ -1415,18 +1463,43 @@ class SourceWorkspace(QWidget):
     def refresh_insights(self):
         units = self.review_repo.source_units(self.source_id)
         now = now_utc()
-        untouched = sum(1 for u in units if not u["last_review_at"])
         learned = [u for u in units if int(u["review_count"] or 0) > 0 and u["last_review_at"]]
-        low = sum(1 for u in learned if retention_estimate(u, now) < 0.45)
+        low_threshold = float(self.settings_repo.get("min_retention_percent", "45")) / 100.0
+        low = sum(1 for u in learned if retention_estimate(u, now) < low_threshold)
         avg = (sum(retention_estimate(u, now) for u in learned) / len(learned)) if learned else None
         avg_text = f"{avg:.0%}" if avg is not None else "n/a"
+        due_units = self.review_repo.source_due_units(self.source_id, iso_utc(now))
+        backlog_seconds = sum(float(self._estimate_review_seconds_unit_row(u)) for u in due_units)
+        seven_day_start = iso_utc(now - timedelta(days=7))
+        seven_day_end = iso_utc(now)
+        seven_day = self.review_repo.review_summary_between(seven_day_start, seven_day_end, source_id=self.source_id)
+        last_review_at = self.review_repo.source_last_review_at(self.source_id) or "never"
         self.insights.setText(
-            f"Total units: {len(units)}\n"
-            f"Untouched: {untouched}\n"
-            f"Learned: {len(learned)}\n"
-            f"Low retention (learned): {low}\n"
-            f"Avg retention (learned): {avg_text}"
+            f"Learned / Total: {len(learned)} / {len(units)}\n"
+            f"Due now: {len(due_units)}\n"
+            f"Backlog minutes: {backlog_seconds / 60.0:.1f}\n"
+            f"Last 7d: {seven_day['review_count']} reviews · {seven_day['total_seconds'] / 60.0:.1f} min\n"
+            f"Avg retention (learned): {avg_text}\n"
+            f"Low retention (<{int(low_threshold * 100)}%): {low}\n"
+            f"Last reviewed: {last_review_at}"
         )
+
+    def _estimate_review_seconds_unit_row(self, unit_row) -> float:
+        pages = max(1, (int(unit_row["end_page"]) - int(unit_row["start_page"])) + 1)
+        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
+        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
+        if int(unit_row["review_count"] or 0) == 0:
+            return max(1.0, pages * fallback_per_page, fallback_per_unit)
+        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(int(unit_row["id"]))
+        if unit_avg is not None:
+            return float(unit_avg)
+        source_avg = self.review_repo.avg_elapsed_seconds_for_source(self.source_id)
+        if source_avg is not None:
+            return float(source_avg)
+        global_avg = self.review_repo.avg_elapsed_seconds_global()
+        if global_avg is not None:
+            return float(global_avg)
+        return max(1.0, pages * fallback_per_page, fallback_per_unit)
 
     def add_highlight_from_clipboard(self):
         cb = QApplication.clipboard()
@@ -1613,6 +1686,20 @@ class SourceWorkspace(QWidget):
             filtered_rows.append(h)
 
         self.source_hl_count.setText(f"{len(filtered_rows)} shown / {len(all_rows)} total")
+        summary = self.highlight_repo.highlight_summary_for_source(self.source_id)
+        pages_total = max(1, int(getattr(self.source, "page_count", 0) or 1))
+        density = (float(summary["total_highlights"]) / float(pages_total)) * 100.0
+        top_pages_txt = ", ".join(f"p{p} ({c})" for p, c in summary["top_pages"]) if summary["top_pages"] else "n/a"
+        top_sections_txt = ", ".join(
+            f"{entry['title']} ({entry['count']})"
+            for entry in summary["top_sections"]
+        ) if summary["top_sections"] else "n/a"
+        colors_txt = ", ".join(f"{color or 'default'}:{count}" for color, count in summary["color_distribution"][:4]) if summary["color_distribution"] else "n/a"
+        self.source_hl_summary.setText(
+            f"Total {summary['total_highlights']} · {density:.1f}/100 pages · "
+            f"text {summary['text_count']} / area {summary['area_count']} · "
+            f"Top pages: {top_pages_txt} · Top sections: {top_sections_txt} · Colors: {colors_txt}"
+        )
         group_nodes: dict[str, QTreeWidgetItem] = {}
         page_nodes: dict[tuple[str, int], QTreeWidgetItem] = {}
         page_counts: dict[tuple[str, int], int] = {}
@@ -1793,9 +1880,17 @@ class StudyQueuePage(QWidget):
 
         self.queue_banner = QLabel("")
         self.queue_banner.setWordWrap(True)
+        self.today_strip = QLabel("")
+        self.today_strip.setWordWrap(True)
+        self.today_strip.setStyleSheet(
+            "border:1px solid #2e3a46; border-radius:8px; padding:6px; color:#d9e3ec; background:#151d2a;"
+        )
+        self._analytics_cache: dict[str, dict] = {}
+        self._analytics_cache_ttl_seconds = 5.0
 
         left = QVBoxLayout()
         left.addWidget(QLabel("Queue"))
+        left.addWidget(self.today_strip)
         left.addWidget(self.queue_banner)
         left.addWidget(self.list)
 
@@ -2005,6 +2100,7 @@ class StudyQueuePage(QWidget):
     def invalidate_session_queue_snapshot(self) -> None:
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
         self._store_today_queue_snapshot([], daily_minutes, manual_unit_ids=[])
+        self._invalidate_analytics_cache()
 
     def show_recalculation_pending(self) -> None:
         if self._queue_recalculation_pending:
@@ -2028,7 +2124,36 @@ class StudyQueuePage(QWidget):
             self.list.setItemWidget(item, card)
 
     def _today_iso(self) -> str:
-        return now_utc().date().isoformat()
+        return self._today_window()["day_key"]
+
+    def _timezone_offset(self) -> str:
+        return normalized_gmt_offset(self.settings_repo.get("timezone_gmt_offset", "+00:00"))
+
+    def _today_window(self) -> dict:
+        window = day_window_for_offset(self._timezone_offset(), now_utc())
+        return {
+            "day_key": window.day_key,
+            "start_utc_iso": window.utc_start_iso,
+            "next_start_utc_iso": window.utc_next_start_iso,
+            "offset": window.offset,
+        }
+
+    def _invalidate_analytics_cache(self) -> None:
+        self._analytics_cache.clear()
+
+    def _cache_get(self, key: str) -> dict | None:
+        entry = self._analytics_cache.get(key)
+        if not entry:
+            return None
+        age = (datetime.utcnow().timestamp() - float(entry.get("cached_at", 0)))
+        if age > self._analytics_cache_ttl_seconds:
+            self._analytics_cache.pop(key, None)
+            return None
+        return entry.get("value")
+
+    def _cache_set(self, key: str, value: dict) -> dict:
+        self._analytics_cache[key] = {"cached_at": datetime.utcnow().timestamp(), "value": value}
+        return value
 
     def _load_today_queue_snapshot(self) -> dict:
         today = self._today_iso()
@@ -2102,7 +2227,11 @@ class StudyQueuePage(QWidget):
         due_ids_in_order = [int(u.unit_id) for u in due_units]
         if planned_ids:
             saved_minutes = snapshot.get("daily_minutes")
-            reviewed_today = self.review_repo.review_count_on_date(self._today_iso())
+            today_window = self._today_window()
+            reviewed_today = self.review_repo.review_summary_between(
+                today_window["start_utc_iso"],
+                today_window["next_start_utc_iso"],
+            )["review_count"]
             if saved_minutes is not None and saved_minutes != int(daily_minutes) and reviewed_today == 0:
                 planned_ids = []
             else:
@@ -2175,14 +2304,8 @@ class StudyQueuePage(QWidget):
         if int(unit.unit_id) not in manual_unit_ids:
             manual_unit_ids.append(int(unit.unit_id))
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        self._store_today_queue_snapshot(
-            unit_ids,
-            daily_minutes,
-            manual_unit_ids=manual_unit_ids,
-            projected_seconds=self._projected_seconds_for_ids(unit_ids),
-            estimator_signature=self._runtime_model_signature(),
-            last_rebuild_reason="manual_add",
-        )
+        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_unit_ids)
+        self._invalidate_analytics_cache()
         self.refresh()
         return True
 
@@ -2195,14 +2318,8 @@ class StudyQueuePage(QWidget):
         unit_ids = [uid for uid in unit_ids if uid != int(unit_id)]
         manual_ids = [uid for uid in manual_ids if uid != int(unit_id)]
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
-        self._store_today_queue_snapshot(
-            unit_ids,
-            daily_minutes,
-            manual_unit_ids=manual_ids,
-            projected_seconds=self._projected_seconds_for_ids(unit_ids),
-            estimator_signature=self._runtime_model_signature(),
-            last_rebuild_reason="manual_remove",
-        )
+        self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_ids)
+        self._invalidate_analytics_cache()
         self.refresh()
         return True
 
@@ -2532,7 +2649,11 @@ class StudyQueuePage(QWidget):
         planned_ids, regenerated = self._resolve_today_queue_ids(due_units, available_minutes, strict_sources)
         snapshot = self._load_today_queue_snapshot()
         manual_unit_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
-        completed_today = self.review_repo.reviewed_unit_ids_on_date(self._today_iso())
+        today_window = self._today_window()
+        completed_today = self.review_repo.reviewed_unit_ids_between(
+            today_window["start_utc_iso"],
+            today_window["next_start_utc_iso"],
+        )
         remaining_ids = [uid for uid in planned_ids if uid not in completed_today]
         if remaining_ids != planned_ids:
             remaining_manual_ids = [uid for uid in manual_unit_ids if uid in remaining_ids]
@@ -2563,11 +2684,16 @@ class StudyQueuePage(QWidget):
             + (f" · {len(manual_unit_ids)} manual" if manual_unit_ids else "")
             + regenerated_text
         )
+        self._refresh_today_strip(
+            total_planned=total_planned,
+            planned_ids=planned_ids,
+            queue_signature="-".join(str(uid) for uid in planned_ids[:120]),
+        )
 
         for u in self.units:
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
-            reason = "manual" if int(u.unit_id) in manual_unit_ids else None
+            reason = self._queue_reason_for_unit(u, retention, int(u.unit_id) in manual_unit_ids)
             tile = self._build_queue_tile(u, est_seconds, retention, progression_reason=reason)
             item = QListWidgetItem()
             self.list.addItem(item)
@@ -2621,6 +2747,16 @@ class StudyQueuePage(QWidget):
         if review_count == 0 and fsrs_count == 0 and not row["last_review_at"]:
             return None
         return retention_estimate(row, now_utc())
+
+    def _queue_reason_for_unit(self, unit, retention: float | None, is_manual: bool) -> str:
+        if is_manual:
+            return "manual"
+        if unit.next_review_at:
+            return "due_now"
+        threshold = float(self.settings_repo.get("min_retention_percent", "45")) / 100.0
+        if retention is not None and retention < threshold:
+            return "low_retention"
+        return "catch_up"
 
     def _queue_tile_size_hint(self, tile: QWidget, width: int) -> QSize:
         min_h = 110
@@ -2682,11 +2818,21 @@ class StudyQueuePage(QWidget):
         for w in [pages, mins, retention_lbl]:
             badge_row.addWidget(w)
         if progression_reason:
-            progress_text = "manual" if progression_reason == "manual" else "needed for progression"
+            label_map = {
+                "manual": "Manually added",
+                "due_now": "Due now",
+                "low_retention": "Low retention",
+                "catch_up": "Catch-up / overflow",
+            }
+            progress_text = label_map.get(progression_reason, progression_reason)
             progress_badge = QLabel(progress_text)
             progress_badge.setObjectName("progressBadge")
             if progression_reason == "manual":
                 progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #eef2ff; background: #3b2f6b;")
+            elif progression_reason == "low_retention":
+                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #fff2df; background: #6a4a1e;")
+            elif progression_reason == "due_now":
+                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #e8ffe9; background: #1f5a35;")
             badge_row.addWidget(progress_badge)
         badge_row.addStretch()
 
@@ -2713,6 +2859,52 @@ class StudyQueuePage(QWidget):
             return f"~{seconds}s"
         mins = seconds / 60.0
         return f"~{mins:.1f} min"
+
+    def _refresh_today_strip(self, total_planned: int, planned_ids: list[int], queue_signature: str) -> None:
+        window = self._today_window()
+        settings_minutes = int(self.settings_repo.get("daily_minutes", "90"))
+        fallback_unit_seconds = self.settings_repo.get("fallback_review_seconds_per_unit", "90")
+        fallback_page_seconds = self.settings_repo.get("fallback_review_seconds_per_page", "60")
+        latest = self.review_repo.review_summary_between(window["start_utc_iso"], window["next_start_utc_iso"])
+        cache_key = (
+            f"{window['day_key']}|{window['offset']}|{settings_minutes}|"
+            f"{fallback_unit_seconds}|{fallback_page_seconds}|"
+            f"{queue_signature}|{latest['max_review_id']}"
+        )
+        cached = self._cache_get(cache_key)
+        if cached is None:
+            reviewed = int(latest["review_count"])
+            total_seconds = float(latest["total_seconds"])
+            page_summary = self.review_repo.reviewed_unit_page_summary_between(
+                window["start_utc_iso"],
+                window["next_start_utc_iso"],
+            )
+            reviewed_pages = int(page_summary["reviewed_pages_sum"])
+            planned_units = self.review_repo.unit_views_by_ids(planned_ids)
+            total_pages = sum(max(1, (int(u.end_page) - int(u.start_page)) + 1) for u in planned_units)
+            planned_estimated_seconds = sum(float(self._estimate_review_seconds(u)) for u in planned_units)
+            mins_per_page = 0.0 if reviewed_pages <= 0 else (total_seconds / 60.0) / float(reviewed_pages)
+            cached = self._cache_set(
+                cache_key,
+                {
+                    "reviewed": reviewed,
+                    "total_planned": int(total_planned),
+                    "reviewed_pages": reviewed_pages,
+                    "total_pages": int(total_pages),
+                    "mins_per_page": mins_per_page,
+                    "total_seconds": total_seconds,
+                    "planned_estimated_seconds": planned_estimated_seconds,
+                },
+            )
+        no_reviews_hint = " · No reviews yet today" if int(cached["reviewed"]) == 0 else ""
+        self.today_strip.setText(
+            "Today so far  |  "
+            f"Units reviewed: {cached['reviewed']}/{cached['total_planned']}  |  "
+            f"Pages reviewed: {cached['reviewed_pages']}/{cached['total_pages']}  |  "
+            f"Minutes per page: {cached['mins_per_page']:.1f}  |  "
+            f"Minutes learned today: {format_minutes_whole(cached['total_seconds'])}/{format_minutes_whole(cached['planned_estimated_seconds'])}"
+            f"{no_reviews_hint}"
+        )
 
     def _refresh_queue_doc_progress(self, current_page: int | None = None) -> None:
         if not self.active_unit:
@@ -2887,7 +3079,8 @@ class StudyQueuePage(QWidget):
         now = now_utc()
         unit_row = self.review_repo.unit_by_id(self.active_unit.unit_id)
         history = self.review_repo.events_for_unit_chronological(self.active_unit.unit_id)
-        tzinfo = datetime.now().astimezone().tzinfo
+        # Keep scheduling aligned with the explicit app timezone setting used for "today" boundaries.
+        tzinfo = parse_gmt_offset(normalized_gmt_offset(self.settings_repo.get("timezone_gmt_offset", "+00:00")))
         try:
             desired_retention = float(self.settings_repo.get("desired_retention", "0.90"))
         except Exception:
@@ -2926,6 +3119,7 @@ class StudyQueuePage(QWidget):
             "fsrs_due_retention_used": fsrs_result.due_retention_used,
         }
         self.review_repo.record_review(self.active_unit.unit_id, payload, unit_stats)
+        self._invalidate_analytics_cache()
         self.unit_drafts.pop(self.active_unit.unit_id, None)
         self.reset_timer()
         self.pre_note_text = ""
@@ -2985,11 +3179,21 @@ class SettingsPage(QWidget):
         self.new_cap = QSpinBox(); self.new_cap.setRange(0, 50); self.new_cap.setValue(int(settings_repo.get("new_units_cap", "6")))
         self.fallback_unit_seconds = QSpinBox(); self.fallback_unit_seconds.setRange(10, 3600); self.fallback_unit_seconds.setValue(int(settings_repo.get("fallback_review_seconds_per_unit", "90")))
         self.fallback_page_seconds = QSpinBox(); self.fallback_page_seconds.setRange(5, 1800); self.fallback_page_seconds.setValue(int(settings_repo.get("fallback_review_seconds_per_page", "60")))
+        self.timezone_offset = QLineEdit()
+        self.timezone_offset.setPlaceholderText("+00:00")
+        self.timezone_offset.setText(normalized_gmt_offset(settings_repo.get("timezone_gmt_offset", "+00:00")))
+        self.timezone_help = QLabel("Used for day boundaries in Today stats.")
+        self.timezone_help.setStyleSheet("color:#9aa7b2;")
+        self.timezone_error = QLabel("")
+        self.timezone_error.setStyleSheet("color:#f4b4b4;")
         form.addRow("Daily target minutes", self.daily)
         form.addRow("Low retention threshold %", self.min_ret)
         form.addRow("Max new units/day", self.new_cap)
         form.addRow("Fallback sec/unit", self.fallback_unit_seconds)
         form.addRow("Fallback sec/page", self.fallback_page_seconds)
+        form.addRow("Timezone (GMT offset ±HH:MM)", self.timezone_offset)
+        form.addRow("", self.timezone_help)
+        form.addRow("", self.timezone_error)
         save = QPushButton("Save Settings")
         save.clicked.connect(self.save)
         self.summary = QLabel("")
@@ -2997,11 +3201,17 @@ class SettingsPage(QWidget):
         self.refresh_summary()
 
     def save(self):
+        offset = (self.timezone_offset.text() or "").strip()
+        if not is_valid_gmt_offset(offset):
+            self.timezone_error.setText("Timezone must match ±HH:MM (examples: +00:00, -05:00, +05:30).")
+            return
+        self.timezone_error.setText("")
         self.settings_repo.set("daily_minutes", str(self.daily.value()))
         self.settings_repo.set("min_retention_percent", str(self.min_ret.value()))
         self.settings_repo.set("new_units_cap", str(self.new_cap.value()))
         self.settings_repo.set("fallback_review_seconds_per_unit", str(self.fallback_unit_seconds.value()))
         self.settings_repo.set("fallback_review_seconds_per_page", str(self.fallback_page_seconds.value()))
+        self.settings_repo.set("timezone_gmt_offset", offset)
         self.refresh_summary()
         self.settings_changed.emit()
 

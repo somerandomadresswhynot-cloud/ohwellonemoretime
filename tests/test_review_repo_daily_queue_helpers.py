@@ -104,6 +104,33 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         due = self.review_repo.due_units("2026-03-23T12:00:00+00:00")
         self.assertEqual(due, [])
 
+    def test_review_summary_between_uses_half_open_window(self):
+        unit_id = int(self.units[0]["id"])
+        for ended_at in [
+            "2026-03-22T23:59:59+00:00",
+            "2026-03-23T00:00:00+00:00",
+            "2026-03-23T12:00:00+00:00",
+            "2026-03-24T00:00:00+00:00",
+        ]:
+            payload = {
+                "started_at": ended_at,
+                "ended_at": ended_at,
+                "elapsed_seconds": 20,
+                "rating": "easy",
+                "pre_note": "",
+                "post_note": "",
+            }
+            stats = {
+                "last_review_at": ended_at,
+                "review_count": 1,
+                "ease_factor": 2.5,
+                "avg_rating": 5.0,
+            }
+            self.review_repo.record_review(unit_id, payload, stats)
+        summary = self.review_repo.review_summary_between("2026-03-23T00:00:00+00:00", "2026-03-24T00:00:00+00:00")
+        self.assertEqual(summary["review_count"], 2)
+        self.assertEqual(summary["total_seconds"], 40.0)
+
     def test_new_units_returns_only_never_reviewed(self):
         reviewed_id = int(self.units[0]['id'])
         payload = {
@@ -123,6 +150,66 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         self.review_repo.record_review(reviewed_id, payload, stats)
         new_ids = {int(u.unit_id) for u in self.review_repo.new_units()}
         self.assertNotIn(reviewed_id, new_ids)
+
+    def test_source_due_units_scopes_without_global_filtering(self):
+        source2 = self.source_repo.create('Book 2', '/tmp/book2.pdf', 100, 120)
+        self.outline_repo.replace_outline(
+            source2,
+            [
+                {"depth": 1, "title": "Book 2", "start_page": None, "end_page": None, "is_unit": False, "queue_enabled": True},
+                {"depth": 2, "title": "U3", "start_page": 1, "end_page": 5, "is_unit": True, "queue_enabled": True},
+            ],
+        )
+        unit1 = int(self.units[0]['id'])
+        unit2 = int(self.review_repo.source_units(source2)[0]['id'])
+        for uid in [unit1, unit2]:
+            payload = {
+                'started_at': "2026-03-20T10:00:00+00:00",
+                'ended_at': "2026-03-20T10:05:00+00:00",
+                'elapsed_seconds': 30,
+                'rating': 'with_effort',
+                'pre_note': '',
+                'post_note': '',
+            }
+            stats = {
+                'last_review_at': "2026-03-20T10:05:00+00:00",
+                'review_count': 1,
+                'ease_factor': 2.5,
+                'avg_rating': 3.0,
+            }
+            self.review_repo.record_review(uid, payload, stats)
+        due_ids = {int(u.unit_id) for u in self.review_repo.source_due_units(source2, "2026-03-23T12:00:00+00:00")}
+        self.assertEqual(due_ids, {unit2})
+
+    def test_reviewed_unit_page_summary_between_distinct_units(self):
+        unit_a = int(self.units[0]["id"])
+        unit_b = int(self.units[1]["id"])
+        events = [
+            (unit_a, "2026-03-23T01:00:00+00:00"),
+            (unit_a, "2026-03-23T02:00:00+00:00"),
+            (unit_b, "2026-03-23T03:00:00+00:00"),
+            (unit_b, "2026-03-24T00:00:00+00:00"),
+        ]
+        for uid, ended_at in events:
+            payload = {
+                "started_at": ended_at,
+                "ended_at": ended_at,
+                "elapsed_seconds": 10,
+                "rating": "easy",
+                "pre_note": "",
+                "post_note": "",
+            }
+            stats = {
+                "last_review_at": ended_at,
+                "review_count": 1,
+                "ease_factor": 2.5,
+                "avg_rating": 5.0,
+            }
+            self.review_repo.record_review(uid, payload, stats)
+        summary = self.review_repo.reviewed_unit_page_summary_between("2026-03-23T00:00:00+00:00", "2026-03-24T00:00:00+00:00")
+        self.assertEqual(summary["reviewed_unit_count"], 2)
+        # U1 (pages 1-5) + U2 (pages 6-10) => 5 + 5 pages
+        self.assertEqual(summary["reviewed_pages_sum"], 10)
 
 
 if __name__ == '__main__':
