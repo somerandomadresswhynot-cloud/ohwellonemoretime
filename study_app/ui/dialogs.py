@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import json
+
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -13,10 +15,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTextEdit,
-    QStackedWidget,
     QVBoxLayout,
 )
-from PySide6.QtGui import QAction, QTextCursor, QTextOption
+from PySide6.QtGui import QTextOption
+from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from study_app.services.outline_service import parse_outline_text
 
@@ -220,258 +222,122 @@ class HintMarkdownDialog(QDialog):
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Hint")
-        self.resize(760, 620)
-        self.editor = QTextEdit()
-        self.editor.setAcceptRichText(False)
-        self.editor.setPlainText(text or "")
-        self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.editor.customContextMenuRequested.connect(self._open_editor_context_menu)
-
-        self.rendered_editor = QTextEdit()
-        self.rendered_editor.setAcceptRichText(True)
-        self.rendered_editor.setPlaceholderText("Rendered markdown (editable)")
-        self._preview_scroll_value = 0
-        self._editor_scroll_value = 0
-        self._edit_mode = True
-        self._revealed_cloze_indexes: set[int] = set()
-        self._cloze_values: list[str] = []
-        self._count_label = QLabel("")
-        self._count_label.setStyleSheet("color:#9aa7b2;")
-        self._validation_label = QLabel("")
-        self._validation_label.setWordWrap(True)
-        self._validation_label.setStyleSheet("color:#ffb27f;")
-
-        self.history_hint = QLabel("Cloze: select text and right-click → Make Cloze. Right-click inside a cloze → Remove Cloze.")
-        self.history_hint.setStyleSheet("color:#9aa7b2;")
-        reveal_all_btn = QPushButton("Reveal All")
-        hide_all_btn = QPushButton("Hide All")
-        toggle_all_btn = QPushButton("Toggle All")
-        self.mode_btn = QPushButton("Switch to Render Markdown")
-        self.toolbar = QHBoxLayout()
-        self.toolbar.setSpacing(4)
-        self._format_buttons: list[QPushButton] = []
-        for label, handler in [
-            ("H1", lambda: self._prefix_lines("# ")),
-            ("H2", lambda: self._prefix_lines("## ")),
-            ("B", lambda: self._wrap_selection("**", "**")),
-            ("I", lambda: self._wrap_selection("*", "*")),
-            ("Code", lambda: self._wrap_selection("`", "`")),
-            ("Quote", lambda: self._prefix_lines("> ")),
-            ("List", lambda: self._prefix_lines("- ")),
-            ("Link", self._insert_link_template),
-        ]:
-            btn = QPushButton(label)
-            btn.setFixedHeight(24)
-            btn.clicked.connect(handler)
-            self._format_buttons.append(btn)
-            self.toolbar.addWidget(btn)
-        self.toolbar.addStretch()
-        reveal_all_btn.clicked.connect(self._reveal_all_clozes)
-        hide_all_btn.clicked.connect(self._hide_all_clozes)
-        toggle_all_btn.clicked.connect(self._toggle_all_clozes)
-        self.mode_btn.clicked.connect(self._toggle_mode)
+        self.resize(920, 700)
+        self._value = text or ""
+        self.web = QWebEngineView()
+        self.mode_btn = QPushButton("Toggle Render Markdown")
+        self.make_cloze_btn = QPushButton("Make Cloze")
+        self.reveal_all_btn = QPushButton("Reveal All Clozes")
+        self.hide_all_btn = QPushButton("Hide All Clozes")
+        self.mode_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.togglePreviewMode();"))
+        self.make_cloze_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.wrapSelectionCloze();"))
+        self.reveal_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(true);"))
+        self.hide_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(false);"))
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._save_from_web)
         buttons.rejected.connect(self.reject)
-        self.editor.textChanged.connect(self._refresh_preview)
-        self.rendered_editor.textChanged.connect(self._on_rendered_text_changed)
-        self.stack = QStackedWidget()
-        self.stack.addWidget(self.editor)
-        self.stack.addWidget(self.rendered_editor)
         lay = QVBoxLayout(self)
-        lay.addWidget(self.mode_btn, 0, Qt.AlignLeft)
-        lay.addLayout(self.toolbar)
-        lay.addWidget(self.stack, 1)
-        count_row = QHBoxLayout()
-        count_row.addWidget(self._count_label)
-        count_row.addStretch()
-        count_row.addWidget(reveal_all_btn)
-        count_row.addWidget(hide_all_btn)
-        count_row.addWidget(toggle_all_btn)
-        lay.addLayout(count_row)
-        lay.addWidget(self._validation_label)
-        lay.addWidget(self.history_hint)
+        control_row = QHBoxLayout()
+        control_row.addWidget(self.mode_btn)
+        control_row.addWidget(self.make_cloze_btn)
+        control_row.addWidget(self.reveal_all_btn)
+        control_row.addWidget(self.hide_all_btn)
+        control_row.addStretch()
+        lay.addLayout(control_row)
+        lay.addWidget(self.web, 1)
         lay.addWidget(buttons)
-        self._refresh_preview()
-        self._set_mode(edit_mode=True)
+        self.web.loadFinished.connect(self._on_loaded)
+        self.web.setHtml(_hint_editor_html(), baseUrl=QUrl("https://cdn.jsdelivr.net/"))
 
-    def _open_editor_context_menu(self, pos) -> None:
-        self._apply_context_menu_cursor(pos)
-        menu = self.editor.createStandardContextMenu()
-        make_action = QAction("Make Cloze", self)
-        make_action.triggered.connect(self._make_cloze_from_selection)
-        make_action.setEnabled(self.editor.textCursor().hasSelection())
-        menu.addAction(make_action)
-
-        cloze_bounds = self._cloze_bounds_at_cursor()
-        if cloze_bounds is not None:
-            remove_action = QAction("Remove Cloze", self)
-            remove_action.triggered.connect(lambda: self._remove_cloze(*cloze_bounds))
-            menu.addAction(remove_action)
-        menu.exec(self.editor.mapToGlobal(pos))
-
-    def _apply_context_menu_cursor(self, pos) -> None:
-        clicked_cursor = self.editor.cursorForPosition(pos)
-        existing = self.editor.textCursor()
-        if existing.hasSelection():
-            start = existing.selectionStart()
-            end = existing.selectionEnd()
-            click_pos = clicked_cursor.position()
-            if start <= click_pos <= end:
-                return
-        self.editor.setTextCursor(clicked_cursor)
-
-    def _cloze_bounds_at_cursor(self) -> tuple[int, int] | None:
-        cursor = self.editor.textCursor()
-        text = self.editor.toPlainText()
-        pos = cursor.position()
-        idx = 0
-        while idx < len(text):
-            start = text.find(_CLOZE_OPEN, idx)
-            if start < 0:
-                break
-            body_start = start + len(_CLOZE_OPEN)
-            end = text.find(_CLOZE_CLOSE, body_start)
-            if end < 0:
-                break
-            close_end = end + len(_CLOZE_CLOSE)
-            if start <= pos <= close_end:
-                return start, close_end
-            idx = close_end
-        return None
-
-    def _make_cloze_from_selection(self) -> None:
-        cursor = self.editor.textCursor()
-        text = self.editor.toPlainText()
-        start = cursor.selectionStart()
-        end = cursor.selectionEnd()
-        if end <= start:
+    def _on_loaded(self, ok: bool) -> None:
+        if not ok:
             return
-        selected = text[start:end]
-        if not selected.strip():
-            return
-        if _CLOZE_OPEN in selected or _CLOZE_CLOSE in selected:
-            return
-        cursor.beginEditBlock()
-        cursor.setPosition(start)
-        cursor.setPosition(end, QTextCursor.KeepAnchor)
-        cursor.insertText(f"{{{{c::{selected}}}}}")
-        cursor.endEditBlock()
-        self.editor.setTextCursor(cursor)
+        payload = json.dumps(self._value)
+        self.web.page().runJavaScript(f"window.setMarkdown({payload});")
 
-    def _remove_cloze(self, start: int, end: int) -> None:
-        text = self.editor.toPlainText()
-        fragment = text[start:end]
-        if not (fragment.startswith(_CLOZE_OPEN) and fragment.endswith(_CLOZE_CLOSE)):
-            return
-        replacement = fragment[len(_CLOZE_OPEN):-len(_CLOZE_CLOSE)]
-        cursor = self.editor.textCursor()
-        cursor.setPosition(start)
-        cursor.setPosition(end, QTextCursor.KeepAnchor)
-        cursor.insertText(replacement)
-        self.editor.setTextCursor(cursor)
+    def _save_from_web(self) -> None:
+        self.web.page().runJavaScript("window.getMarkdown();", self._on_markdown_ready)
 
-    def _on_rendered_text_changed(self) -> None:
-        if self._edit_mode:
-            return
-        self._preview_scroll_value = self.rendered_editor.verticalScrollBar().value()
-
-    def _reveal_all_clozes(self) -> None:
-        self._revealed_cloze_indexes = set(range(len(self._cloze_values)))
-        self._refresh_preview()
-
-    def _hide_all_clozes(self) -> None:
-        self._revealed_cloze_indexes = set()
-        self._refresh_preview()
-
-    def _toggle_all_clozes(self) -> None:
-        if not self._cloze_values:
-            return
-        if len(self._revealed_cloze_indexes) >= len(self._cloze_values):
-            self._revealed_cloze_indexes = set()
-        else:
-            self._revealed_cloze_indexes = set(range(len(self._cloze_values)))
-        self._refresh_preview()
-
-    def _toggle_mode(self) -> None:
-        self._set_mode(edit_mode=not self._edit_mode)
-
-    def _wrap_selection(self, prefix: str, suffix: str) -> None:
-        cursor = self.editor.textCursor()
-        if cursor.hasSelection():
-            text = cursor.selectedText().replace("\u2029", "\n")
-            cursor.insertText(f"{prefix}{text}{suffix}")
-        else:
-            cursor.insertText(f"{prefix}{suffix}")
-            cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, len(suffix))
-            self.editor.setTextCursor(cursor)
-
-    def _prefix_lines(self, prefix: str) -> None:
-        cursor = self.editor.textCursor()
-        text = self.editor.toPlainText()
-        start = cursor.selectionStart()
-        end = cursor.selectionEnd()
-        line_start = text.rfind("\n", 0, start) + 1
-        line_end = text.find("\n", end)
-        if line_end < 0:
-            line_end = len(text)
-        block = text[line_start:line_end]
-        lines = block.split("\n")
-        updated = "\n".join(prefix + line if line.strip() else line for line in lines)
-        cursor.beginEditBlock()
-        cursor.setPosition(line_start)
-        cursor.setPosition(line_end, QTextCursor.KeepAnchor)
-        cursor.insertText(updated)
-        cursor.endEditBlock()
-        self.editor.setTextCursor(cursor)
-
-    def _insert_link_template(self) -> None:
-        cursor = self.editor.textCursor()
-        selected = cursor.selectedText().replace("\u2029", "\n").strip() if cursor.hasSelection() else "text"
-        cursor.insertText(f"[{selected}](https://)")
-
-    def _set_mode(self, edit_mode: bool) -> None:
-        if self._edit_mode and not edit_mode:
-            self._editor_scroll_value = self.editor.verticalScrollBar().value()
-            self._preview_scroll_value = self.rendered_editor.verticalScrollBar().value()
-            self._refresh_preview()
-        elif (not self._edit_mode) and edit_mode:
-            self._preview_scroll_value = self.rendered_editor.verticalScrollBar().value()
-            self.editor.blockSignals(True)
-            self.editor.setPlainText(self.rendered_editor.toMarkdown())
-            self.editor.blockSignals(False)
-            self._editor_scroll_value = self.editor.verticalScrollBar().value()
-        self._edit_mode = bool(edit_mode)
-        self.stack.setCurrentWidget(self.editor if self._edit_mode else self.rendered_editor)
-        self.mode_btn.setText("Switch to Render Markdown" if self._edit_mode else "Switch to Edit Markdown")
-        if self._edit_mode:
-            self.editor.verticalScrollBar().setValue(self._editor_scroll_value)
-        else:
-            self.rendered_editor.verticalScrollBar().setValue(self._preview_scroll_value)
-
-    def _refresh_preview(self) -> None:
-        source = self.editor.toPlainText()
-        markdown_with_tokens, self._cloze_values = _extract_cloze_segments(source)
-        self._revealed_cloze_indexes = {idx for idx in self._revealed_cloze_indexes if idx < len(self._cloze_values)}
-        warning_messages = _cloze_validation_messages(source)
-        self._validation_label.setText("\n".join(warning_messages))
-        preview_scroll = self.rendered_editor.verticalScrollBar().value()
-        editor_scroll = self.editor.verticalScrollBar().value()
-        rendered_markdown = markdown_with_tokens
-        for idx, value in enumerate(self._cloze_values):
-            token = f"CLOZE_TOKEN_{idx}"
-            replacement = value if idx in self._revealed_cloze_indexes else "▇▇▇"
-            rendered_markdown = rendered_markdown.replace(token, replacement)
-        self.rendered_editor.blockSignals(True)
-        self.rendered_editor.setMarkdown(rendered_markdown)
-        self.rendered_editor.blockSignals(False)
-        hidden = max(0, len(self._cloze_values) - len(self._revealed_cloze_indexes))
-        shown = len(self._revealed_cloze_indexes)
-        self._count_label.setText(f"Clozes: {len(self._cloze_values)} total · {hidden} hidden · {shown} shown")
-        self._preview_scroll_value = preview_scroll
-        self._editor_scroll_value = editor_scroll
-        self.rendered_editor.verticalScrollBar().setValue(self._preview_scroll_value)
-        self.editor.verticalScrollBar().setValue(self._editor_scroll_value)
+    def _on_markdown_ready(self, value) -> None:
+        self._value = str(value or "")
+        self.accept()
 
     def value(self) -> str:
-        return self.editor.toPlainText()
+        return self._value
+
+
+def _hint_editor_html() -> str:
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
+  <style>
+    body { margin:0; background:#111826; color:#dbe4ef; font-family:Arial,sans-serif; }
+    #editor-root { height:100vh; }
+    .cloze-hidden { background:#293241; color:transparent; border-radius:4px; padding:0 4px; cursor:pointer; }
+    .cloze-shown { background:#1f7a3d; color:#ecffef; border-radius:4px; padding:0 4px; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <textarea id="editor-root"></textarea>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
+  <script>
+    let renderMode = false;
+    let editor = new EasyMDE({
+      element: document.getElementById('editor-root'),
+      spellChecker: false,
+      status: false,
+      renderingConfig: { singleLineBreaks: false },
+      previewRender: function(text) {
+        const replaced = text.replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(_m, g1) {
+          return '<span class="cloze-hidden" data-answer=\"' + encodeURIComponent(g1) + '\">▇▇▇</span>';
+        });
+        return marked.parse(replaced);
+      }
+    });
+    document.addEventListener('click', function(ev) {
+      const target = ev.target;
+      if (!target || !target.classList) return;
+      if (target.classList.contains('cloze-hidden')) {
+        const answer = decodeURIComponent(target.getAttribute('data-answer') || '');
+        target.textContent = answer;
+        target.classList.remove('cloze-hidden');
+        target.classList.add('cloze-shown');
+      } else if (target.classList.contains('cloze-shown')) {
+        target.textContent = '▇▇▇';
+        target.classList.remove('cloze-shown');
+        target.classList.add('cloze-hidden');
+      }
+    });
+    window.togglePreviewMode = function() { editor.togglePreview(); renderMode = !renderMode; };
+    window.wrapSelectionCloze = function() {
+      const cm = editor.codemirror;
+      const selected = cm.getSelection();
+      if (!selected || !selected.trim()) return;
+      cm.replaceSelection('{{c::' + selected + '}}');
+    };
+    window.setAllClozes = function(reveal) {
+      const nodes = document.querySelectorAll('.cloze-hidden, .cloze-shown');
+      for (const n of nodes) {
+        const answer = decodeURIComponent(n.getAttribute('data-answer') || '');
+        if (reveal) {
+          n.textContent = answer;
+          n.classList.remove('cloze-hidden');
+          n.classList.add('cloze-shown');
+        } else {
+          n.textContent = '▇▇▇';
+          n.classList.remove('cloze-shown');
+          n.classList.add('cloze-hidden');
+        }
+      }
+    };
+    window.getMarkdown = function() { return editor.value(); };
+    window.setMarkdown = function(v) { editor.value(v || ''); };
+  </script>
+</body>
+</html>
+"""
