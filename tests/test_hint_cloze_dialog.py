@@ -29,9 +29,9 @@ def test_validation_reports_unclosed_and_nested():
 def test_dialog_has_open_source_editor_controls(app):
     dlg = HintMarkdownDialog('alpha {{c::beta}}')
     try:
-        assert dlg.mode_btn.text()
         assert dlg.make_cloze_btn.text()
         assert dlg.reveal_all_btn.text()
         assert dlg.hide_all_btn.text()
+        assert dlg.toggle_all_btn.text()
     finally:
         dlg.close()

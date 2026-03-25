@@ -225,17 +225,14 @@ class HintMarkdownDialog(QDialog):
         self.resize(920, 700)
         self._value = text or ""
         self.web = QWebEngineView()
-        self.mode_btn = QPushButton("Render Markdown")
         self.make_cloze_btn = QPushButton("Cloze")
         self.reveal_all_btn = QPushButton("Reveal All")
         self.hide_all_btn = QPushButton("Hide All")
         self.toggle_all_btn = QPushButton("Toggle All")
-        self.mode_btn.setToolTip("Switch between Edit Markdown and Render Markdown")
         self.make_cloze_btn.setToolTip("Wrap selected text as {{c::...}}")
         self.reveal_all_btn.setToolTip("Reveal all clozes in rendered preview")
         self.hide_all_btn.setToolTip("Hide all clozes in rendered preview")
         self.toggle_all_btn.setToolTip("Toggle all clozes in rendered preview")
-        self.mode_btn.clicked.connect(self._toggle_mode)
         self.make_cloze_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.wrapSelectionCloze();"))
         self.reveal_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(true);"))
         self.hide_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(false);"))
@@ -264,7 +261,6 @@ class HintMarkdownDialog(QDialog):
         title.setObjectName("hintTitle")
         title_row.addWidget(title)
         title_row.addStretch()
-        title_row.addWidget(self.mode_btn)
         lay.addLayout(title_row)
 
         toolbar_row = QHBoxLayout()
@@ -286,15 +282,6 @@ class HintMarkdownDialog(QDialog):
             return
         payload = json.dumps(self._value)
         self.web.page().runJavaScript(f"window.setMarkdown({payload});")
-
-    def _toggle_mode(self) -> None:
-        self.web.page().runJavaScript("window.togglePreviewMode();", self._on_mode_toggled)
-
-    def _on_mode_toggled(self, is_render_mode) -> None:
-        if bool(is_render_mode):
-            self.mode_btn.setText("Edit Markdown")
-        else:
-            self.mode_btn.setText("Render Markdown")
 
     def _save_from_web(self) -> None:
         self.web.page().runJavaScript("window.getMarkdown();", self._on_markdown_ready)
@@ -320,12 +307,16 @@ def _hint_editor_html() -> str:
     .editor-toolbar { background:#0d1a36; border:1px solid #25406f; border-bottom:0; padding:6px 6px; }
     .editor-toolbar a { color:#dbe8ff !important; }
     .editor-toolbar i { color:#dbe8ff !important; }
-    .editor-toolbar a:hover, .editor-toolbar a.active { background:#223a64 !important; border-color:#34558f !important; }
+    .editor-toolbar a:hover, .editor-toolbar a.active { background:#223a64 !important; border-color:#34558f !important; color:#e6f0ff !important; }
+    .editor-toolbar a.active i { color:#e6f0ff !important; }
     .editor-toolbar i.separator { border-color:#2f4f84 !important; }
     .CodeMirror { background:#101d3b; color:#e6efff; border:1px solid #25406f; min-height:380px; }
     .CodeMirror-cursor { border-left:1px solid #e6efff !important; }
     .CodeMirror-gutters { background:#0f1b36; border-right:1px solid #223a64; }
+    .CodeMirror-scroll { overflow: hidden !important; }
     .editor-preview, .editor-preview-side { background:#101d3b; color:#e6efff; }
+    .editor-preview::-webkit-scrollbar, .editor-preview-side::-webkit-scrollbar { display:none; width:0; height:0; }
+    .CodeMirror-scrollbar-filler, .CodeMirror-gutter-filler { display:none !important; }
     .cloze-box { display:inline-block; vertical-align:baseline; white-space:nowrap; overflow:hidden; text-overflow:clip; border-radius:4px; padding:0 4px; cursor:pointer; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .cloze-hidden { background:#33425f; color:transparent; }
     .cloze-shown { background:#1f7a3d; color:#ecffef; }
@@ -336,7 +327,15 @@ def _hint_editor_html() -> str:
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
   <script>
-    let renderMode = false;
+    const measureCanvas = document.createElement('canvas');
+    const measureCtx = measureCanvas.getContext('2d');
+    const clozeFont = '600 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    function clozeWidthPx(value) {
+      measureCtx.font = clozeFont;
+      const text = value || '';
+      const measured = Math.ceil(measureCtx.measureText(text).width);
+      return Math.max(42, measured + 14);
+    }
     let editor = new EasyMDE({
       element: document.getElementById('editor-root'),
       spellChecker: false,
@@ -350,8 +349,8 @@ def _hint_editor_html() -> str:
       renderingConfig: { singleLineBreaks: false },
       previewRender: function(text) {
         const replaced = text.replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(_m, g1) {
-          const width = Math.max(3, (g1 || '').length);
-          return '<span class=\"cloze-box cloze-hidden\" data-answer=\"' + encodeURIComponent(g1) + '\" data-width=\"' + width + '\" style=\"width:' + width + 'ch\">▇▇▇</span>';
+          const widthPx = clozeWidthPx(g1);
+          return '<span class=\"cloze-box cloze-hidden\" data-answer=\"' + encodeURIComponent(g1) + '\" data-width-px=\"' + widthPx + '\" style=\"width:' + widthPx + 'px\">▇▇▇</span>';
         });
         return marked.parse(replaced);
       }
@@ -361,20 +360,19 @@ def _hint_editor_html() -> str:
       if (!target || !target.classList) return;
       if (target.classList.contains('cloze-hidden')) {
         const answer = decodeURIComponent(target.getAttribute('data-answer') || '');
-        const width = target.getAttribute('data-width') || '3';
-        target.style.width = width + 'ch';
+        const widthPx = target.getAttribute('data-width-px') || '42';
+        target.style.width = widthPx + 'px';
         target.textContent = answer;
         target.classList.remove('cloze-hidden');
         target.classList.add('cloze-shown');
       } else if (target.classList.contains('cloze-shown')) {
-        const width = target.getAttribute('data-width') || '3';
-        target.style.width = width + 'ch';
+        const widthPx = target.getAttribute('data-width-px') || '42';
+        target.style.width = widthPx + 'px';
         target.textContent = '▇▇▇';
         target.classList.remove('cloze-shown');
         target.classList.add('cloze-hidden');
       }
     });
-    window.togglePreviewMode = function() { editor.togglePreview(); renderMode = !renderMode; return renderMode; };
     window.wrapSelectionCloze = function() {
       const cm = editor.codemirror;
       const selected = cm.getSelection();
@@ -385,8 +383,8 @@ def _hint_editor_html() -> str:
       const nodes = document.querySelectorAll('.cloze-hidden, .cloze-shown');
       for (const n of nodes) {
         const answer = decodeURIComponent(n.getAttribute('data-answer') || '');
-        const width = n.getAttribute('data-width') || '3';
-        n.style.width = width + 'ch';
+        const widthPx = n.getAttribute('data-width-px') || '42';
+        n.style.width = widthPx + 'px';
         if (reveal) {
           n.textContent = answer;
           n.classList.remove('cloze-hidden');
