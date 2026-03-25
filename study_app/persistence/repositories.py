@@ -482,6 +482,38 @@ class ReviewRepo:
             return None
         return float(row["avg_elapsed"])
 
+
+    def runtime_estimation_observations(self) -> list[dict]:
+        rows = self.db.conn.execute(
+            """SELECT
+                re.id AS event_id,
+                re.unit_id,
+                u.source_id,
+                u.start_page,
+                u.end_page,
+                re.ended_at,
+                re.elapsed_seconds,
+                re.rating
+            FROM review_events re
+            JOIN units u ON u.id=re.unit_id
+            WHERE re.deleted_at IS NULL
+            ORDER BY re.unit_id ASC, re.ended_at ASC, re.id ASC"""
+        ).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            start_page = int(row["start_page"] or 1)
+            end_page = int(row["end_page"] or start_page)
+            out.append({
+                "event_id": int(row["event_id"]),
+                "unit_id": int(row["unit_id"]),
+                "source_id": int(row["source_id"]),
+                "ended_at": row["ended_at"],
+                "elapsed_seconds": row["elapsed_seconds"],
+                "rating": row["rating"],
+                "page_count": max(1, (end_page - start_page) + 1),
+            })
+        return out
+
     def source_units(self, source_id: int):
         return self.db.conn.execute("SELECT * FROM units WHERE source_id=? ORDER BY start_page,title", (source_id,)).fetchall()
 
