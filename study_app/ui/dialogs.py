@@ -249,7 +249,26 @@ class HintMarkdownDialog(QDialog):
         reveal_all_btn = QPushButton("Reveal All")
         hide_all_btn = QPushButton("Hide All")
         toggle_all_btn = QPushButton("Toggle All")
-        self.mode_btn = QPushButton("Switch to Blurting View")
+        self.mode_btn = QPushButton("Switch to Render Markdown")
+        self.toolbar = QHBoxLayout()
+        self.toolbar.setSpacing(4)
+        self._format_buttons: list[QPushButton] = []
+        for label, handler in [
+            ("H1", lambda: self._prefix_lines("# ")),
+            ("H2", lambda: self._prefix_lines("## ")),
+            ("B", lambda: self._wrap_selection("**", "**")),
+            ("I", lambda: self._wrap_selection("*", "*")),
+            ("Code", lambda: self._wrap_selection("`", "`")),
+            ("Quote", lambda: self._prefix_lines("> ")),
+            ("List", lambda: self._prefix_lines("- ")),
+            ("Link", self._insert_link_template),
+        ]:
+            btn = QPushButton(label)
+            btn.setFixedHeight(24)
+            btn.clicked.connect(handler)
+            self._format_buttons.append(btn)
+            self.toolbar.addWidget(btn)
+        self.toolbar.addStretch()
         reveal_all_btn.clicked.connect(self._reveal_all_clozes)
         hide_all_btn.clicked.connect(self._hide_all_clozes)
         toggle_all_btn.clicked.connect(self._toggle_all_clozes)
@@ -263,6 +282,7 @@ class HintMarkdownDialog(QDialog):
         self.stack.addWidget(self.preview)
         lay = QVBoxLayout(self)
         lay.addWidget(self.mode_btn, 0, Qt.AlignLeft)
+        lay.addLayout(self.toolbar)
         lay.addWidget(self.stack, 1)
         count_row = QHBoxLayout()
         count_row.addWidget(self._count_label)
@@ -386,6 +406,40 @@ class HintMarkdownDialog(QDialog):
     def _toggle_mode(self) -> None:
         self._set_mode(edit_mode=not self._edit_mode)
 
+    def _wrap_selection(self, prefix: str, suffix: str) -> None:
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            text = cursor.selectedText().replace("\u2029", "\n")
+            cursor.insertText(f"{prefix}{text}{suffix}")
+        else:
+            cursor.insertText(f"{prefix}{suffix}")
+            cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, len(suffix))
+            self.editor.setTextCursor(cursor)
+
+    def _prefix_lines(self, prefix: str) -> None:
+        cursor = self.editor.textCursor()
+        text = self.editor.toPlainText()
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        line_start = text.rfind("\n", 0, start) + 1
+        line_end = text.find("\n", end)
+        if line_end < 0:
+            line_end = len(text)
+        block = text[line_start:line_end]
+        lines = block.split("\n")
+        updated = "\n".join(prefix + line if line.strip() else line for line in lines)
+        cursor.beginEditBlock()
+        cursor.setPosition(line_start)
+        cursor.setPosition(line_end, QTextCursor.KeepAnchor)
+        cursor.insertText(updated)
+        cursor.endEditBlock()
+        self.editor.setTextCursor(cursor)
+
+    def _insert_link_template(self) -> None:
+        cursor = self.editor.textCursor()
+        selected = cursor.selectedText().replace("\u2029", "\n").strip() if cursor.hasSelection() else "text"
+        cursor.insertText(f"[{selected}](https://)")
+
     def _set_mode(self, edit_mode: bool) -> None:
         if self._edit_mode and not edit_mode:
             self._editor_scroll_value = self.editor.verticalScrollBar().value()
@@ -395,7 +449,9 @@ class HintMarkdownDialog(QDialog):
             self._editor_scroll_value = self.editor.verticalScrollBar().value()
         self._edit_mode = bool(edit_mode)
         self.stack.setCurrentWidget(self.editor if self._edit_mode else self.preview)
-        self.mode_btn.setText("Switch to Blurting View" if self._edit_mode else "Switch to Edit Markdown")
+        self.mode_btn.setText("Switch to Render Markdown" if self._edit_mode else "Switch to Edit Markdown")
+        for btn in self._format_buttons:
+            btn.setEnabled(self._edit_mode)
         if self._edit_mode:
             self.editor.verticalScrollBar().setValue(self._editor_scroll_value)
         else:
