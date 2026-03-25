@@ -5,7 +5,7 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, QTimer, Qt, Signal, QVariantAnimation
 from PySide6.QtGui import QColor, QBrush, QCursor, QPainter, QPen, QLinearGradient
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1902,6 +1902,7 @@ class StudyQueuePage(QWidget):
         self._suspend_back_capture = False
         self._queue_back_stack: list[dict] = []
         self._queue_back_stack_limit = 80
+        self._tile_glow_animations: dict[int, QVariantAnimation] = {}
         self.timer_tile = QueueTimerTile()
         self.timer_tile.start_btn.clicked.connect(self.start_timer)
         self.timer_tile.pause_btn.clicked.connect(self.pause_timer)
@@ -2201,7 +2202,11 @@ class StudyQueuePage(QWidget):
             return
         self._restoring_queue_state = True
         try:
-            self.list.setCurrentRow(idx)
+            row = next((r for r in range(self.list.count()) if self._display_index_for_row(r) == idx), -1)
+            if row >= 0:
+                self.list.setCurrentRow(row)
+                self.list.scrollToItem(self.list.item(row), QAbstractItemView.PositionAtCenter)
+                self._animate_queue_tile_glow(row)
             self.pre_note_text = str(snap.get("pre_note_text", ""))
             self.post_note_text = str(snap.get("post_note_text", ""))
             self.timer_seconds = max(0, int(snap.get("timer_seconds", 0) or 0))
@@ -2462,7 +2467,8 @@ class StudyQueuePage(QWidget):
         item = self.list.itemAt(pos)
         if not item:
             return
-        idx = self.list.row(item)
+        row = self.list.row(item)
+        idx = self._display_index_for_row(row)
         if idx < 0 or idx >= len(self.display_units):
             return
         unit, _reason = self.display_units[idx]
@@ -2471,7 +2477,7 @@ class StudyQueuePage(QWidget):
         remove = menu.addAction("Remove from Today's Queue")
         chosen = menu.exec(self.list.viewport().mapToGlobal(pos))
         if chosen == jump:
-            self.list.setCurrentRow(idx)
+            self.list.setCurrentRow(row)
             self.jump_to_active_unit()
         elif chosen == remove:
             self.remove_unit_from_today_queue(int(unit.unit_id))
@@ -2796,30 +2802,21 @@ class StudyQueuePage(QWidget):
             today_window["start_utc_iso"],
             today_window["next_start_utc_iso"],
         )
-        remaining_ids = [uid for uid in planned_ids if uid not in completed_today]
-        if remaining_ids != planned_ids:
-            remaining_manual_ids = [uid for uid in manual_unit_ids if uid in remaining_ids]
-            self._store_today_queue_snapshot(
-                remaining_ids,
-                available_minutes,
-                manual_unit_ids=remaining_manual_ids,
-                projected_seconds=self._projected_seconds_for_ids(remaining_ids),
-                estimator_signature=self._runtime_model_signature(),
-                last_rebuild_reason="completion_prune",
-            )
-            manual_unit_ids = remaining_manual_ids
-        self.units = self.review_repo.unit_views_by_ids(remaining_ids)
+        self.units = self.review_repo.unit_views_by_ids(planned_ids)
+        todo_units = [u for u in self.units if int(u.unit_id) not in completed_today]
+        done_units = [u for u in self.units if int(u.unit_id) in completed_today]
+        ordered_units = todo_units + done_units
         self.list.clear()
         self.source_path_cache = {}
         self.display_units = []
         self._queue_last_pdf_page = 1
         total_planned = len(planned_ids)
-        completed_count = max(0, total_planned - len(remaining_ids))
-        due_count = sum(1 for u in self.units if int(u.review_count or 0) > 0)
-        new_count = max(0, len(self.units) - due_count)
+        completed_count = len(done_units)
+        due_count = sum(1 for u in todo_units if int(u.review_count or 0) > 0)
+        new_count = max(0, len(todo_units) - due_count)
         regenerated_text = " · rebuilt for today" if regenerated else ""
         self.queue_banner.setText(
-            f"Today's fixed queue: {len(self.units)} remaining / {total_planned} planned"
+            f"Today's fixed queue: {len(todo_units)} to do + {completed_count} done / {total_planned} planned"
             + (f" · {completed_count} done" if completed_count else "")
             + (f" · {due_count} review" if due_count else "")
             + (f" · {new_count} new" if new_count else "")
@@ -2832,12 +2829,18 @@ class StudyQueuePage(QWidget):
             queue_signature="-".join(str(uid) for uid in planned_ids[:120]),
         )
 
-        for u in self.units:
+        delimiter_added = False
+        for u in ordered_units:
+            is_done = int(u.unit_id) in completed_today
+            if is_done and not delimiter_added and todo_units:
+                self._add_done_delimiter_row()
+                delimiter_added = True
             est_seconds = self._estimate_review_seconds(u)
             retention = self._estimate_retention(u)
             reason = self._queue_reason_for_unit(u, retention, int(u.unit_id) in manual_unit_ids)
-            tile = self._build_queue_tile(u, est_seconds, retention, progression_reason=reason)
+            tile = self._build_queue_tile(u, est_seconds, retention, progression_reason=reason, is_done=is_done)
             item = QListWidgetItem()
+            item.setData(256, len(self.display_units))
             self.list.addItem(item)
             self.list.setItemWidget(item, tile)
             self.display_units.append((u, reason))
@@ -2848,8 +2851,9 @@ class StudyQueuePage(QWidget):
                     self.pdf.prime_path(s.file_path)
 
         self._relayout_queue_tiles()
-        if self.list.count() > 0:
-            self.list.setCurrentRow(0)
+        first_selectable_row = next((row for row in range(self.list.count()) if self._display_index_for_row(row) >= 0), -1)
+        if first_selectable_row >= 0:
+            self.list.setCurrentRow(first_selectable_row)
             self._refresh_queue_doc_progress()
         else:
             self.active_unit = None
@@ -2868,6 +2872,8 @@ class StudyQueuePage(QWidget):
             item = self.list.item(i)
             tile = self.list.itemWidget(item)
             if not tile:
+                continue
+            if isinstance(tile, QFrame) and tile.objectName() != "queueTile":
                 continue
             tile.setFixedWidth(tile_w)
             tile.adjustSize()
@@ -2911,16 +2917,33 @@ class StudyQueuePage(QWidget):
         except Exception:
             return QSize(max(220, width), fallback_h)
 
-    def _build_queue_tile(self, unit, est_seconds: float, retention: float | None, progression_reason: str | None = None) -> QWidget:
-        root = QFrame()
-        root.setObjectName("queueTile")
-        root.setStyleSheet(
-            "#queueTile { border: 1px solid #2e3a46; border-radius: 10px; padding: 8px; }"
+    def _apply_queue_tile_style(self, tile: QFrame, is_done: bool, glow_strength: float = 0.0) -> None:
+        t = max(0.0, min(1.0, float(glow_strength)))
+        if is_done:
+            base_border = (94, 116, 160)
+            base_bg = (30, 40, 62)
+            glow_border = (193, 165, 96)
+            glow_bg = (122, 105, 58)
+        else:
+            base_border = (46, 58, 70)
+            base_bg = (0, 0, 0)
+            glow_border = (136, 170, 230)
+            glow_bg = (50, 72, 112)
+        border = tuple(int(round((1.0 - t) * base_border[i] + t * glow_border[i])) for i in range(3))
+        bg = tuple(int(round((1.0 - t) * base_bg[i] + t * glow_bg[i])) for i in range(3))
+        tile.setStyleSheet(
+            f"#queueTile {{ border: 1px solid rgb({border[0]}, {border[1]}, {border[2]}); border-radius: 10px; padding: 8px; background: rgba({bg[0]}, {bg[1]}, {bg[2]}, {int(35 + (t * 90))}); }}"
             "QLabel#tileTitle { font-size: 15px; font-weight: 600; color: #f2f5f7; }"
             "QLabel#tileMeta { color: #9aa7b2; font-size: 11px; }"
             "QLabel#badge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d8e1e8; background: #2b3440; }"
             "QLabel#progressBadge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #332400; background: #d8b65a; }"
         )
+
+    def _build_queue_tile(self, unit, est_seconds: float, retention: float | None, progression_reason: str | None = None, is_done: bool = False) -> QWidget:
+        root = QFrame()
+        root.setObjectName("queueTile")
+        root.setProperty("queue_done", bool(is_done))
+        self._apply_queue_tile_style(root, bool(is_done), glow_strength=0.0)
 
         lay = QVBoxLayout(root)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -2959,6 +2982,11 @@ class StudyQueuePage(QWidget):
 
         for w in [pages, mins, retention_lbl]:
             badge_row.addWidget(w)
+        if is_done:
+            done_badge = QLabel("Done")
+            done_badge.setObjectName("progressBadge")
+            done_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #f4eddc; background: #5f5672;")
+            badge_row.addWidget(done_badge)
         if progression_reason:
             label_map = {
                 "manual": "Manually added",
@@ -3138,10 +3166,63 @@ class StudyQueuePage(QWidget):
             division_markers=sorted(division_markers, key=lambda m: (int(m["page"]), int(m["depth"]))),
         )
 
+    def _display_index_for_row(self, row: int) -> int:
+        if row < 0:
+            return -1
+        item = self.list.item(row)
+        if not item:
+            return -1
+        mapped = item.data(256)
+        return int(mapped) if isinstance(mapped, int) else -1
+
+    def _add_done_delimiter_row(self) -> None:
+        item = QListWidgetItem()
+        item.setFlags(Qt.NoItemFlags)
+        item.setData(256, -1)
+        line = QFrame()
+        line_l = QHBoxLayout(line)
+        line_l.setContentsMargins(8, 4, 8, 4)
+        line_l.setSpacing(8)
+        left = QFrame(); left.setFrameShape(QFrame.HLine); left.setStyleSheet("color:#5d6880;")
+        right = QFrame(); right.setFrameShape(QFrame.HLine); right.setStyleSheet("color:#5d6880;")
+        label = QLabel("Done")
+        label.setStyleSheet("color:#d6c89b; font-size:11px; font-weight:600;")
+        line_l.addWidget(left, 1)
+        line_l.addWidget(label, 0)
+        line_l.addWidget(right, 6)
+        item.setSizeHint(QSize(220, 22))
+        self.list.addItem(item)
+        self.list.setItemWidget(item, line)
+
+    def _animate_queue_tile_glow(self, row: int) -> None:
+        item = self.list.item(row)
+        if not item:
+            return
+        tile = self.list.itemWidget(item)
+        if not isinstance(tile, QFrame) or tile.objectName() != "queueTile":
+            return
+        tile_id = id(tile)
+        anim = QVariantAnimation(self)
+        anim.setDuration(950)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.valueChanged.connect(lambda value, t=tile: self._apply_queue_tile_style(t, bool(t.property("queue_done")), float(value)))
+
+        def _cleanup():
+            self._apply_queue_tile_style(tile, bool(tile.property("queue_done")), glow_strength=0.0)
+            self._tile_glow_animations.pop(tile_id, None)
+
+        anim.finished.connect(_cleanup)
+        self._tile_glow_animations[tile_id] = anim
+        anim.start()
+
     def pick_unit(self, idx):
         self._push_queue_back_state("switch queue unit")
         self._save_current_draft()
-        if idx < 0 or idx >= len(self.display_units):
+        mapped_idx = self._display_index_for_row(idx)
+        if idx >= 0 and mapped_idx < 0:
+            return
+        if mapped_idx < 0 or mapped_idx >= len(self.display_units):
             self.active_unit = None
             self.queue_outline_tree.clear()
             self._queue_outline_items = {}
@@ -3151,7 +3232,7 @@ class StudyQueuePage(QWidget):
             self.queue_text_layer_hint.setText("Text layer: unknown")
             self.review_history_list.clear()
             return
-        self.active_unit = self.display_units[idx][0]
+        self.active_unit = self.display_units[mapped_idx][0]
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
         path = self.source_path_cache.get(self.active_unit.source_id)
         if not path:
