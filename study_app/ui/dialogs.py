@@ -233,6 +233,12 @@ class HintMarkdownDialog(QDialog):
         self.make_cloze_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.wrapSelectionCloze();"))
         self.reveal_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(true);"))
         self.hide_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(false);"))
+        self.setStyleSheet(
+            "QDialog{background:#0b1530;color:#dbe4ef;}"
+            "QPushButton{background:#233761;border:1px solid #2f4a7c;color:#dbe8ff;padding:6px 10px;border-radius:6px;}"
+            "QPushButton:hover{background:#2b4475;}"
+            "QPushButton:pressed{background:#1d2f50;}"
+        )
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save_from_web)
         buttons.rejected.connect(self.reject)
@@ -275,10 +281,17 @@ def _hint_editor_html() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
   <style>
-    body { margin:0; background:#111826; color:#dbe4ef; font-family:Arial,sans-serif; }
-    #editor-root { height:100vh; }
-    .cloze-hidden { background:#293241; color:transparent; border-radius:4px; padding:0 4px; cursor:pointer; }
-    .cloze-shown { background:#1f7a3d; color:#ecffef; border-radius:4px; padding:0 4px; cursor:pointer; }
+    body { margin:0; background:#0b1530; color:#dbe4ef; font-family:Inter,Segoe UI,Arial,sans-serif; }
+    .editor-toolbar { background:#0d1a36; border:1px solid #25406f; border-bottom:0; }
+    .editor-toolbar a { color:#dbe8ff !important; }
+    .editor-toolbar a:hover, .editor-toolbar a.active { background:#223a64 !important; border-color:#34558f !important; }
+    .CodeMirror { background:#101d3b; color:#e6efff; border:1px solid #25406f; min-height:380px; }
+    .CodeMirror-cursor { border-left:1px solid #e6efff !important; }
+    .CodeMirror-gutters { background:#0f1b36; border-right:1px solid #223a64; }
+    .editor-preview, .editor-preview-side { background:#101d3b; color:#e6efff; }
+    .cloze-box { display:inline-block; vertical-align:baseline; white-space:nowrap; overflow:hidden; text-overflow:clip; border-radius:4px; padding:0 4px; cursor:pointer; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .cloze-hidden { background:#33425f; color:transparent; }
+    .cloze-shown { background:#1f7a3d; color:#ecffef; }
   </style>
 </head>
 <body>
@@ -294,7 +307,8 @@ def _hint_editor_html() -> str:
       renderingConfig: { singleLineBreaks: false },
       previewRender: function(text) {
         const replaced = text.replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(_m, g1) {
-          return '<span class="cloze-hidden" data-answer=\"' + encodeURIComponent(g1) + '\">▇▇▇</span>';
+          const width = Math.max(3, (g1 || '').length);
+          return '<span class=\"cloze-box cloze-hidden\" data-answer=\"' + encodeURIComponent(g1) + '\" data-width=\"' + width + '\" style=\"width:' + width + 'ch\">▇▇▇</span>';
         });
         return marked.parse(replaced);
       }
@@ -304,10 +318,14 @@ def _hint_editor_html() -> str:
       if (!target || !target.classList) return;
       if (target.classList.contains('cloze-hidden')) {
         const answer = decodeURIComponent(target.getAttribute('data-answer') || '');
+        const width = target.getAttribute('data-width') || '3';
+        target.style.width = width + 'ch';
         target.textContent = answer;
         target.classList.remove('cloze-hidden');
         target.classList.add('cloze-shown');
       } else if (target.classList.contains('cloze-shown')) {
+        const width = target.getAttribute('data-width') || '3';
+        target.style.width = width + 'ch';
         target.textContent = '▇▇▇';
         target.classList.remove('cloze-shown');
         target.classList.add('cloze-hidden');
@@ -324,6 +342,8 @@ def _hint_editor_html() -> str:
       const nodes = document.querySelectorAll('.cloze-hidden, .cloze-shown');
       for (const n of nodes) {
         const answer = decodeURIComponent(n.getAttribute('data-answer') || '');
+        const width = n.getAttribute('data-width') || '3';
+        n.style.width = width + 'ch';
         if (reveal) {
           n.textContent = answer;
           n.classList.remove('cloze-hidden');
