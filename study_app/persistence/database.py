@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS units (
     fsrs_state_version INTEGER,
     fsrs_due_retention_used REAL,
     fsrs_parameters_json TEXT,
+    hint_markdown TEXT NOT NULL DEFAULT '',
     CHECK (start_page >= 1),
     CHECK (end_page >= start_page),
     FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
@@ -90,6 +91,15 @@ CREATE TABLE IF NOT EXISTS review_revisions (
     before_json TEXT,
     after_json TEXT,
     FOREIGN KEY(review_event_id) REFERENCES review_events(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS unit_hint_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    unit_id INTEGER NOT NULL,
+    changed_at TEXT NOT NULL,
+    before_markdown TEXT NOT NULL DEFAULT '',
+    after_markdown TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
 );
 
 
@@ -145,6 +155,9 @@ ON review_events(unit_id, deleted_at, ended_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_review_events_unit_deleted
 ON review_events(unit_id, deleted_at);
+
+CREATE INDEX IF NOT EXISTS idx_unit_hint_revisions_unit_changed
+ON unit_hint_revisions(unit_id, changed_at DESC, id DESC);
 """
 
 
@@ -210,6 +223,20 @@ class Database:
             self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_due_retention_used REAL")
         if "fsrs_parameters_json" not in unit_cols:
             self.conn.execute("ALTER TABLE units ADD COLUMN fsrs_parameters_json TEXT")
+        if "hint_markdown" not in unit_cols:
+            self.conn.execute("ALTER TABLE units ADD COLUMN hint_markdown TEXT NOT NULL DEFAULT ''")
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS unit_hint_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                unit_id INTEGER NOT NULL,
+                changed_at TEXT NOT NULL,
+                before_markdown TEXT NOT NULL DEFAULT '',
+                after_markdown TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
+            )
+            """
+        )
 
     def _backfill_highlight_annotation_fields(self) -> None:
         self.conn.execute(
@@ -345,6 +372,7 @@ class Database:
                 fsrs_state_version INTEGER,
                 fsrs_due_retention_used REAL,
                 fsrs_parameters_json TEXT,
+                hint_markdown TEXT NOT NULL DEFAULT '',
                 CHECK (start_page >= 1),
                 CHECK (end_page >= start_page),
                 FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE,
@@ -358,13 +386,13 @@ class Database:
                 id, source_id, node_id, title, start_page, end_page, queue_enabled,
                 last_review_at, next_review_at, review_count, ease_factor, interval_days, avg_rating,
                 fsrs_difficulty, fsrs_stability, fsrs_last_review_at, fsrs_last_grade, fsrs_review_count, fsrs_lapse_count,
-                fsrs_state_version, fsrs_due_retention_used, fsrs_parameters_json
+                fsrs_state_version, fsrs_due_retention_used, fsrs_parameters_json, hint_markdown
             )
             SELECT
                 id, source_id, node_id, title, start_page, end_page, queue_enabled,
                 last_review_at, next_review_at, review_count, ease_factor, interval_days, avg_rating,
                 fsrs_difficulty, fsrs_stability, fsrs_last_review_at, fsrs_last_grade, fsrs_review_count, fsrs_lapse_count,
-                fsrs_state_version, fsrs_due_retention_used, fsrs_parameters_json
+                fsrs_state_version, fsrs_due_retention_used, fsrs_parameters_json, COALESCE(hint_markdown, '')
             FROM units
             """
         )
