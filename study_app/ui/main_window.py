@@ -48,7 +48,7 @@ from study_app.services.fsrs_scheduler import DEFAULT_FSRS_PARAMETERS, schedule_
 from study_app.services.queue_drift import should_rebuild_for_estimate_drift
 from study_app.services.runtime_estimator import RuntimeEstimationModel, build_runtime_estimation_model
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
-from study_app.ui.dialogs import OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
+from study_app.ui.dialogs import HintMarkdownDialog, OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
 from study_app.ui.pdf_viewer import PersistentPdfViewer
 from study_app.services.day_window import day_window_for_offset, is_valid_gmt_offset, normalized_gmt_offset, parse_gmt_offset
 from study_app.services.time_format import format_minutes_whole
@@ -1900,13 +1900,17 @@ class StudyQueuePage(QWidget):
         self.pre_note_text = ""
         self.post_note_text = ""
         self._selected_rating: str | None = None
+        self.hint_markdown_text = ""
+        self.hint_last_changed_at: str | None = None
         self.timer_tile = QueueTimerTile()
         self.timer_tile.start_btn.clicked.connect(self.start_timer)
         self.timer_tile.pause_btn.clicked.connect(self.pause_timer)
         self.timer_tile.reset_btn.clicked.connect(self.reset_timer)
         self.pre_note_btn = QPushButton("Edit Pre-recall Note")
+        self.hint_btn = QPushButton("Hint")
         self.post_note_btn = QPushButton("Edit Post-recall Note")
         self.pre_note_btn.clicked.connect(self.edit_pre_note)
+        self.hint_btn.clicked.connect(self.edit_hint)
         self.post_note_btn.clicked.connect(self.edit_post_note)
         self.pdf = PersistentPdfViewer()
         self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
@@ -2010,6 +2014,7 @@ class StudyQueuePage(QWidget):
         self.queue_text_layer_hint.setStyleSheet("color:#9aa7b2;")
         queue_annotation_controls.addWidget(self.queue_text_layer_hint)
         self.pre_note_btn.setMinimumHeight(32)
+        self.hint_btn.setMinimumHeight(32)
         self.post_note_btn.setMinimumHeight(32)
         self.queue_outline_tree.setMinimumHeight(210)
         self.queue_outline_tree.setMaximumHeight(230)
@@ -2027,6 +2032,7 @@ class StudyQueuePage(QWidget):
         notes_col = QVBoxLayout()
         notes_col.setSpacing(6)
         notes_col.addWidget(self.pre_note_btn)
+        notes_col.addWidget(self.hint_btn)
         notes_col.addWidget(self.post_note_btn)
         notes_col.addStretch()
         timer_section_l.addLayout(notes_col, 1)
@@ -3137,6 +3143,9 @@ class StudyQueuePage(QWidget):
             return
         if mapped_idx < 0 or mapped_idx >= len(self.display_units):
             self.active_unit = None
+            self.hint_markdown_text = ""
+            self.hint_last_changed_at = None
+            self._refresh_note_previews()
             self.queue_outline_tree.clear()
             self._queue_outline_items = {}
             self._queue_outline_rows_by_id = {}
@@ -3167,6 +3176,9 @@ class StudyQueuePage(QWidget):
         self.pdf.set_page(self.active_unit.start_page)
         self._set_active_queue_outline_by_page(int(self.active_unit.start_page))
         self._load_draft_for_active()
+        self.hint_markdown_text = self.review_repo.unit_hint_markdown(self.active_unit.unit_id)
+        self.hint_last_changed_at = self.review_repo.unit_hint_last_changed_at(self.active_unit.unit_id)
+        self._refresh_note_previews()
         self._refresh_queue_history_panel()
         self._queue_last_pdf_page = int(self.pdf.view_state().get("page", self.active_unit.start_page))
         self._refresh_queue_doc_progress(self._queue_last_pdf_page)
@@ -3279,11 +3291,18 @@ class StudyQueuePage(QWidget):
     def _refresh_note_previews(self) -> None:
         pre = (self.pre_note_text or "").strip()
         post = (self.post_note_text or "").strip()
+        hint = (self.hint_markdown_text or "").strip()
         pre_label = "Edit Pre-recall Note ✓" if pre else "Edit Pre-recall Note"
         post_label = "Edit Post-recall Note ✓" if post else "Edit Post-recall Note"
+        hint_label = "Hint ✓" if hint else "Hint"
         self.pre_note_btn.setText(pre_label)
+        self.hint_btn.setText(hint_label)
         self.post_note_btn.setText(post_label)
         self.pre_note_btn.setToolTip(pre[:220] if pre else "No pre-recall note")
+        hint_tip = hint[:220] if hint else "No hint"
+        if self.hint_last_changed_at:
+            hint_tip = f"{hint_tip}\nLast edited: {self.hint_last_changed_at}"
+        self.hint_btn.setToolTip(hint_tip)
         self.post_note_btn.setToolTip(post[:220] if post else "No post-recall note")
 
     def edit_pre_note(self) -> None:
@@ -3296,6 +3315,16 @@ class StudyQueuePage(QWidget):
         dlg = RecallNoteDialog("Post-recall Note", self.post_note_text, self)
         if dlg.exec():
             self.post_note_text = dlg.value()
+            self._refresh_note_previews()
+
+    def edit_hint(self) -> None:
+        if not self.active_unit:
+            return
+        dlg = HintMarkdownDialog(self.hint_markdown_text, self)
+        if dlg.exec():
+            self.hint_markdown_text = dlg.value()
+            self.review_repo.save_unit_hint_markdown(self.active_unit.unit_id, self.hint_markdown_text)
+            self.hint_last_changed_at = self.review_repo.unit_hint_last_changed_at(self.active_unit.unit_id)
             self._refresh_note_previews()
 
     def _refresh_queue_history_panel(self) -> None:
