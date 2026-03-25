@@ -267,6 +267,31 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         # U1 (pages 1-5) + U2 (pages 6-10) => 5 + 5 pages
         self.assertEqual(summary["reviewed_pages_sum"], 10)
 
+    def test_soft_delete_event_recomputes_unit_stats_to_new_when_history_empty(self):
+        unit_id = int(self.units[0]["id"])
+        ended_at = "2026-03-23T01:00:00+00:00"
+        payload = {
+            "started_at": ended_at,
+            "ended_at": ended_at,
+            "elapsed_seconds": 10,
+            "rating": "easy",
+            "pre_note": "",
+            "post_note": "",
+        }
+        stats = {
+            "last_review_at": ended_at,
+            "review_count": 1,
+            "ease_factor": 2.5,
+            "avg_rating": 5.0,
+        }
+        event_id = self.review_repo.record_review(unit_id, payload, stats)
+        self.review_repo.soft_delete_event(event_id)
+        row = self.review_repo.unit_by_id(unit_id)
+        self.assertEqual(int(row["review_count"]), 0)
+        self.assertIsNone(row["last_review_at"])
+        self.assertIsNone(row["next_review_at"])
+        self.assertEqual(float(row["avg_rating"]), 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()

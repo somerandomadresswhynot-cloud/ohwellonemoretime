@@ -2806,13 +2806,13 @@ class StudyQueuePage(QWidget):
             return None
         return retention_estimate(row, now_utc())
 
-    def _queue_reason_for_unit(self, unit, retention: float | None, is_manual: bool) -> str:
+    def _queue_reason_for_unit(self, unit, retention: float | None, is_manual: bool) -> str | None:
         if is_manual:
             return "manual"
         threshold = float(self.settings_repo.get("min_retention_percent", "45")) / 100.0
         if retention is not None and retention < threshold:
             return "low_retention"
-        return "catch_up"
+        return None
 
     def _queue_tile_size_hint(self, tile: QWidget, width: int) -> QSize:
         min_h = 110
