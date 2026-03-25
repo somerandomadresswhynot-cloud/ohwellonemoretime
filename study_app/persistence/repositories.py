@@ -328,6 +328,19 @@ class ReviewRepo:
         ).fetchall()
         return {int(r["unit_id"]) for r in rows}
 
+    def reviewed_unit_ids_between_ordered(self, start_iso_utc: str, end_iso_utc: str) -> list[int]:
+        rows = self.db.conn.execute(
+            """SELECT unit_id, MAX(ended_at) AS last_ended_at
+            FROM review_events
+            WHERE deleted_at IS NULL
+              AND ended_at >= ?
+              AND ended_at < ?
+            GROUP BY unit_id
+            ORDER BY last_ended_at ASC, unit_id ASC""",
+            (start_iso_utc, end_iso_utc),
+        ).fetchall()
+        return [int(r["unit_id"]) for r in rows]
+
     def review_count_on_date(self, day_iso: str) -> int:
         row = self.db.conn.execute(
             """SELECT COUNT(*) AS c FROM review_events
