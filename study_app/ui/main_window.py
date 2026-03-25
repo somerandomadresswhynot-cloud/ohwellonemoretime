@@ -1899,6 +1899,7 @@ class StudyQueuePage(QWidget):
         self.post_note_text = ""
         self._selected_rating: str | None = None
         self._restoring_queue_state = False
+        self._suspend_back_capture = False
         self._queue_back_stack: list[dict] = []
         self._queue_back_stack_limit = 80
         self.timer_tile = QueueTimerTile()
@@ -2112,6 +2113,9 @@ class StudyQueuePage(QWidget):
         self.qt_timer = QTimer(self)
         self.qt_timer.timeout.connect(self.tick)
         self.qt_timer.start(1000)
+        self._back_feedback_timer = QTimer(self)
+        self._back_feedback_timer.setSingleShot(True)
+        self._back_feedback_timer.timeout.connect(self._update_queue_back_button_state)
         self._apply_queue_annotation_ui_state()
         self._update_rating_buttons_ui()
         self._update_queue_back_button_state()
@@ -2126,7 +2130,7 @@ class StudyQueuePage(QWidget):
             btn.blockSignals(True)
             btn.setChecked(selected)
             btn.blockSignals(False)
-            extra = "box-shadow: inset 0 0 0 2px #ecf3ff; font-weight:700;" if selected else ""
+            extra = "border:2px solid #ecf3ff; font-weight:700;" if selected else ""
             btn.setStyleSheet((self._rating_button_base_styles.get(key, "") + extra).strip())
 
     def _capture_queue_editor_state(self) -> dict | None:
@@ -2148,12 +2152,13 @@ class StudyQueuePage(QWidget):
             "selected_rating": self._selected_rating or "",
         }
 
-    def _push_queue_back_state(self) -> None:
-        if self._restoring_queue_state:
+    def _push_queue_back_state(self, reason: str = "") -> None:
+        if self._restoring_queue_state or self._suspend_back_capture:
             return
         snap = self._capture_queue_editor_state()
         if not snap:
             return
+        snap["reason"] = str(reason or "previous change")
         if self._queue_back_stack and self._queue_back_stack[-1] == snap:
             return
         self._queue_back_stack.append(snap)
@@ -2166,7 +2171,8 @@ class StudyQueuePage(QWidget):
         enabled = count > 0
         self.back_state_btn.setEnabled(enabled)
         if enabled:
-            self.back_state_hint.setText(f"{count} previous state{'s' if count != 1 else ''}")
+            latest_reason = str(self._queue_back_stack[-1].get("reason", "previous change"))
+            self.back_state_hint.setText(f"{count} saved · Back: {latest_reason}")
             self.back_state_btn.setStyleSheet(
                 "QPushButton { background:#294577; border:1px solid #4f73aa; color:#ecf4ff; border-radius:6px; padding:6px 10px; }"
                 "QPushButton:hover { background:#335b97; }"
@@ -2178,10 +2184,15 @@ class StudyQueuePage(QWidget):
     def _on_queue_back_clicked(self) -> None:
         if not self._queue_back_stack:
             self._update_queue_back_button_state()
+            self.back_state_hint.setText("Nothing to go back to")
+            self._back_feedback_timer.start(1200)
             return
         snap = self._queue_back_stack.pop()
         self._restore_queue_editor_state(snap)
         self._update_queue_back_button_state()
+        reason = str(snap.get("reason", "previous change"))
+        self.back_state_hint.setText(f"Restored: {reason}")
+        self._back_feedback_timer.start(1800)
 
     def _restore_queue_editor_state(self, snap: dict) -> None:
         target_unit_id = int(snap.get("active_unit_id", 0) or 0)
@@ -2475,7 +2486,7 @@ class StudyQueuePage(QWidget):
     def _on_queue_doc_progress_page_requested(self, page: int) -> None:
         if not self.active_unit:
             return
-        self._push_queue_back_state()
+        self._push_queue_back_state("page jump in PDF progress")
         self.pdf.set_page(int(page))
         self._queue_last_pdf_page = int(page)
         self._set_active_queue_outline_by_page(int(page))
@@ -2486,7 +2497,7 @@ class StudyQueuePage(QWidget):
         page = int(item.data(0, 257) or 0)
         if page < 1:
             return
-        self._push_queue_back_state()
+        self._push_queue_back_state("outline jump")
         self.pdf.set_page(page)
         self._queue_last_pdf_page = page
         self._set_active_queue_outline_by_page(page)
@@ -3128,7 +3139,7 @@ class StudyQueuePage(QWidget):
         )
 
     def pick_unit(self, idx):
-        self._push_queue_back_state()
+        self._push_queue_back_state("switch queue unit")
         self._save_current_draft()
         if idx < 0 or idx >= len(self.display_units):
             self.active_unit = None
@@ -3169,7 +3180,7 @@ class StudyQueuePage(QWidget):
 
     def jump_to_active_unit(self):
         if self.active_unit:
-            self._push_queue_back_state()
+            self._push_queue_back_state("jump to unit start")
             self.pdf.set_page(self.active_unit.start_page)
             self._sync_queue_pdf_overlays()
 
@@ -3186,19 +3197,20 @@ class StudyQueuePage(QWidget):
                 self._sync_queue_pdf_overlays()
 
     def start_timer(self):
-        self._push_queue_back_state()
+        self._push_queue_back_state("start timer")
         self.timer_running = True
         if not self.started_at:
             self.started_at = now_utc()
         self.timer_tile.set_running(True)
 
     def pause_timer(self):
-        self._push_queue_back_state()
+        self._push_queue_back_state("pause timer")
         self.timer_running = False
         self.timer_tile.set_running(False)
 
-    def reset_timer(self):
-        self._push_queue_back_state()
+    def reset_timer(self, push_state: bool = True):
+        if push_state:
+            self._push_queue_back_state("reset timer")
         self.timer_seconds = 0
         self.started_at = None
         self.timer_running = False
@@ -3212,7 +3224,8 @@ class StudyQueuePage(QWidget):
     def rate(self, rating: str):
         if not self.active_unit:
             return
-        self._push_queue_back_state()
+        label = {"easy": "Easy", "with_effort": "With Effort", "hard": "Hard", "skip": "Skip"}.get(rating, rating)
+        self._push_queue_back_state(f"before rating: {label}")
         self._selected_rating = rating
         self._update_rating_buttons_ui()
         now = now_utc()
@@ -3257,14 +3270,18 @@ class StudyQueuePage(QWidget):
             "fsrs_state_version": int(fsrs_result.state.state_version),
             "fsrs_due_retention_used": fsrs_result.due_retention_used,
         }
-        self.review_repo.record_review(self.active_unit.unit_id, payload, unit_stats)
-        self._invalidate_analytics_cache()
-        self.unit_drafts.pop(self.active_unit.unit_id, None)
-        self.reset_timer()
-        self.pre_note_text = ""
-        self.post_note_text = ""
-        self._refresh_note_previews()
-        self.refresh()
+        self._suspend_back_capture = True
+        try:
+            self.review_repo.record_review(self.active_unit.unit_id, payload, unit_stats)
+            self._invalidate_analytics_cache()
+            self.unit_drafts.pop(self.active_unit.unit_id, None)
+            self.reset_timer(push_state=False)
+            self.pre_note_text = ""
+            self.post_note_text = ""
+            self._refresh_note_previews()
+            self.refresh()
+        finally:
+            self._suspend_back_capture = False
 
     def open_history(self):
         if not self.active_unit:
@@ -3286,14 +3303,14 @@ class StudyQueuePage(QWidget):
     def edit_pre_note(self) -> None:
         dlg = RecallNoteDialog("Pre-recall Note", self.pre_note_text, self)
         if dlg.exec():
-            self._push_queue_back_state()
+            self._push_queue_back_state("edit pre-note")
             self.pre_note_text = dlg.value()
             self._refresh_note_previews()
 
     def edit_post_note(self) -> None:
         dlg = RecallNoteDialog("Post-recall Note", self.post_note_text, self)
         if dlg.exec():
-            self._push_queue_back_state()
+            self._push_queue_back_state("edit post-note")
             self.post_note_text = dlg.value()
             self._refresh_note_previews()
 
