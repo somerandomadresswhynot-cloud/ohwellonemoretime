@@ -4,7 +4,6 @@ import json
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWidgets import (
-    QFrame,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -226,23 +225,25 @@ class HintMarkdownDialog(QDialog):
         self.resize(920, 700)
         self._value = text or ""
         self.web = QWebEngineView()
-        self.mode_btn = QPushButton("Render")
+        self.mode_btn = QPushButton("Render Markdown")
         self.make_cloze_btn = QPushButton("Cloze")
-        self.reveal_all_btn = QPushButton("Show")
-        self.hide_all_btn = QPushButton("Hide")
-        self.mode_btn.setToolTip("Toggle rendered markdown preview")
+        self.reveal_all_btn = QPushButton("Reveal All")
+        self.hide_all_btn = QPushButton("Hide All")
+        self.toggle_all_btn = QPushButton("Toggle All")
+        self.mode_btn.setToolTip("Switch between Edit Markdown and Render Markdown")
         self.make_cloze_btn.setToolTip("Wrap selected text as {{c::...}}")
         self.reveal_all_btn.setToolTip("Reveal all clozes in rendered preview")
         self.hide_all_btn.setToolTip("Hide all clozes in rendered preview")
-        self.mode_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.togglePreviewMode();"))
+        self.toggle_all_btn.setToolTip("Toggle all clozes in rendered preview")
+        self.mode_btn.clicked.connect(self._toggle_mode)
         self.make_cloze_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.wrapSelectionCloze();"))
         self.reveal_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(true);"))
         self.hide_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(false);"))
+        self.toggle_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.toggleAllClozes();"))
         self.setStyleSheet(
             "QDialog{background:#0b1530;color:#dbe4ef;}"
-            "QFrame#hintToolbarGroup{background:#0e1b38;border:1px solid #1f3a66;border-radius:8px;}"
-            "QLabel#groupTitle{color:#8fb4f5;font-size:11px;font-weight:600;padding:2px 0;}"
-            "QPushButton{background:#223761;border:1px solid #345389;color:#e8f0ff;padding:6px 12px;border-radius:6px;}"
+            "QLabel#hintTitle{color:#e7efff;font-size:13px;font-weight:600;}"
+            "QPushButton{background:#223761;border:1px solid #345389;color:#e8f0ff;padding:5px 10px;border-radius:6px;}"
             "QPushButton:hover{background:#2a4678;border-color:#4063a0;}"
             "QPushButton:pressed{background:#1b2d4e;}"
         )
@@ -257,39 +258,24 @@ class HintMarkdownDialog(QDialog):
         buttons.accepted.connect(self._save_from_web)
         buttons.rejected.connect(self.reject)
         lay = QVBoxLayout(self)
-        control_row = QHBoxLayout()
-        control_row.setSpacing(10)
-        control_row.setContentsMargins(0, 0, 0, 0)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Hint Markdown")
+        title.setObjectName("hintTitle")
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self.mode_btn)
+        lay.addLayout(title_row)
 
-        view_group = QFrame()
-        view_group.setObjectName("hintToolbarGroup")
-        view_lay = QVBoxLayout(view_group)
-        view_lay.setContentsMargins(10, 8, 10, 8)
-        view_lay.setSpacing(6)
-        view_title = QLabel("View")
-        view_title.setObjectName("groupTitle")
-        view_lay.addWidget(view_title)
-        view_lay.addWidget(self.mode_btn)
-
-        cloze_group = QFrame()
-        cloze_group.setObjectName("hintToolbarGroup")
-        cloze_lay = QVBoxLayout(cloze_group)
-        cloze_lay.setContentsMargins(10, 8, 10, 8)
-        cloze_lay.setSpacing(6)
-        cloze_title = QLabel("Cloze")
-        cloze_title.setObjectName("groupTitle")
-        cloze_lay.addWidget(cloze_title)
-        cloze_btn_row = QHBoxLayout()
-        cloze_btn_row.setSpacing(6)
-        cloze_btn_row.addWidget(self.make_cloze_btn)
-        cloze_btn_row.addWidget(self.reveal_all_btn)
-        cloze_btn_row.addWidget(self.hide_all_btn)
-        cloze_lay.addLayout(cloze_btn_row)
-
-        control_row.addWidget(view_group, 0)
-        control_row.addWidget(cloze_group, 1)
-        control_row.addStretch()
-        lay.addLayout(control_row)
+        toolbar_row = QHBoxLayout()
+        toolbar_row.setContentsMargins(0, 0, 0, 0)
+        toolbar_row.setSpacing(6)
+        toolbar_row.addWidget(self.make_cloze_btn)
+        toolbar_row.addWidget(self.reveal_all_btn)
+        toolbar_row.addWidget(self.hide_all_btn)
+        toolbar_row.addWidget(self.toggle_all_btn)
+        toolbar_row.addStretch()
+        lay.addLayout(toolbar_row)
         lay.addWidget(self.web, 1)
         lay.addWidget(buttons)
         self.web.loadFinished.connect(self._on_loaded)
@@ -300,6 +286,15 @@ class HintMarkdownDialog(QDialog):
             return
         payload = json.dumps(self._value)
         self.web.page().runJavaScript(f"window.setMarkdown({payload});")
+
+    def _toggle_mode(self) -> None:
+        self.web.page().runJavaScript("window.togglePreviewMode();", self._on_mode_toggled)
+
+    def _on_mode_toggled(self, is_render_mode) -> None:
+        if bool(is_render_mode):
+            self.mode_btn.setText("Edit Markdown")
+        else:
+            self.mode_btn.setText("Render Markdown")
 
     def _save_from_web(self) -> None:
         self.web.page().runJavaScript("window.getMarkdown();", self._on_markdown_ready)
@@ -379,7 +374,7 @@ def _hint_editor_html() -> str:
         target.classList.add('cloze-hidden');
       }
     });
-    window.togglePreviewMode = function() { editor.togglePreview(); renderMode = !renderMode; };
+    window.togglePreviewMode = function() { editor.togglePreview(); renderMode = !renderMode; return renderMode; };
     window.wrapSelectionCloze = function() {
       const cm = editor.codemirror;
       const selected = cm.getSelection();
@@ -402,6 +397,10 @@ def _hint_editor_html() -> str:
           n.classList.add('cloze-hidden');
         }
       }
+    };
+    window.toggleAllClozes = function() {
+      const anyHidden = document.querySelector('.cloze-hidden') !== null;
+      window.setAllClozes(anyHidden);
     };
     window.getMarkdown = function() { return editor.value(); };
     window.setMarkdown = function(v) { editor.value(v || ''); };
