@@ -4,6 +4,7 @@ import json
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWidgets import (
+    QFrame,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -225,29 +226,68 @@ class HintMarkdownDialog(QDialog):
         self.resize(920, 700)
         self._value = text or ""
         self.web = QWebEngineView()
-        self.mode_btn = QPushButton("Toggle Render Markdown")
-        self.make_cloze_btn = QPushButton("Make Cloze")
-        self.reveal_all_btn = QPushButton("Reveal All Clozes")
-        self.hide_all_btn = QPushButton("Hide All Clozes")
+        self.mode_btn = QPushButton("Render")
+        self.make_cloze_btn = QPushButton("Cloze")
+        self.reveal_all_btn = QPushButton("Show")
+        self.hide_all_btn = QPushButton("Hide")
+        self.mode_btn.setToolTip("Toggle rendered markdown preview")
+        self.make_cloze_btn.setToolTip("Wrap selected text as {{c::...}}")
+        self.reveal_all_btn.setToolTip("Reveal all clozes in rendered preview")
+        self.hide_all_btn.setToolTip("Hide all clozes in rendered preview")
         self.mode_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.togglePreviewMode();"))
         self.make_cloze_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.wrapSelectionCloze();"))
         self.reveal_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(true);"))
         self.hide_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(false);"))
         self.setStyleSheet(
             "QDialog{background:#0b1530;color:#dbe4ef;}"
-            "QPushButton{background:#233761;border:1px solid #2f4a7c;color:#dbe8ff;padding:6px 10px;border-radius:6px;}"
-            "QPushButton:hover{background:#2b4475;}"
-            "QPushButton:pressed{background:#1d2f50;}"
+            "QFrame#hintToolbarGroup{background:#0e1b38;border:1px solid #1f3a66;border-radius:8px;}"
+            "QLabel#groupTitle{color:#8fb4f5;font-size:11px;font-weight:600;padding:2px 0;}"
+            "QPushButton{background:#223761;border:1px solid #345389;color:#e8f0ff;padding:6px 12px;border-radius:6px;}"
+            "QPushButton:hover{background:#2a4678;border-color:#4063a0;}"
+            "QPushButton:pressed{background:#1b2d4e;}"
         )
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        save_btn = buttons.button(QDialogButtonBox.Save)
+        cancel_btn = buttons.button(QDialogButtonBox.Cancel)
+        if save_btn:
+            save_btn.setText("Save Hint")
+            save_btn.setStyleSheet("background:#1e7f68;border:1px solid #2ea387;color:#effff9;font-weight:600;padding:6px 14px;border-radius:6px;")
+        if cancel_btn:
+            cancel_btn.setStyleSheet("background:#1f3155;border:1px solid #35527f;color:#d8e7ff;padding:6px 14px;border-radius:6px;")
         buttons.accepted.connect(self._save_from_web)
         buttons.rejected.connect(self.reject)
         lay = QVBoxLayout(self)
         control_row = QHBoxLayout()
-        control_row.addWidget(self.mode_btn)
-        control_row.addWidget(self.make_cloze_btn)
-        control_row.addWidget(self.reveal_all_btn)
-        control_row.addWidget(self.hide_all_btn)
+        control_row.setSpacing(10)
+        control_row.setContentsMargins(0, 0, 0, 0)
+
+        view_group = QFrame()
+        view_group.setObjectName("hintToolbarGroup")
+        view_lay = QVBoxLayout(view_group)
+        view_lay.setContentsMargins(10, 8, 10, 8)
+        view_lay.setSpacing(6)
+        view_title = QLabel("View")
+        view_title.setObjectName("groupTitle")
+        view_lay.addWidget(view_title)
+        view_lay.addWidget(self.mode_btn)
+
+        cloze_group = QFrame()
+        cloze_group.setObjectName("hintToolbarGroup")
+        cloze_lay = QVBoxLayout(cloze_group)
+        cloze_lay.setContentsMargins(10, 8, 10, 8)
+        cloze_lay.setSpacing(6)
+        cloze_title = QLabel("Cloze")
+        cloze_title.setObjectName("groupTitle")
+        cloze_lay.addWidget(cloze_title)
+        cloze_btn_row = QHBoxLayout()
+        cloze_btn_row.setSpacing(6)
+        cloze_btn_row.addWidget(self.make_cloze_btn)
+        cloze_btn_row.addWidget(self.reveal_all_btn)
+        cloze_btn_row.addWidget(self.hide_all_btn)
+        cloze_lay.addLayout(cloze_btn_row)
+
+        control_row.addWidget(view_group, 0)
+        control_row.addWidget(cloze_group, 1)
         control_row.addStretch()
         lay.addLayout(control_row)
         lay.addWidget(self.web, 1)
@@ -282,9 +322,11 @@ def _hint_editor_html() -> str:
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
   <style>
     body { margin:0; background:#0b1530; color:#dbe4ef; font-family:Inter,Segoe UI,Arial,sans-serif; }
-    .editor-toolbar { background:#0d1a36; border:1px solid #25406f; border-bottom:0; }
+    .editor-toolbar { background:#0d1a36; border:1px solid #25406f; border-bottom:0; padding:6px 6px; }
     .editor-toolbar a { color:#dbe8ff !important; }
+    .editor-toolbar i { color:#dbe8ff !important; }
     .editor-toolbar a:hover, .editor-toolbar a.active { background:#223a64 !important; border-color:#34558f !important; }
+    .editor-toolbar i.separator { border-color:#2f4f84 !important; }
     .CodeMirror { background:#101d3b; color:#e6efff; border:1px solid #25406f; min-height:380px; }
     .CodeMirror-cursor { border-left:1px solid #e6efff !important; }
     .CodeMirror-gutters { background:#0f1b36; border-right:1px solid #223a64; }
@@ -304,6 +346,12 @@ def _hint_editor_html() -> str:
       element: document.getElementById('editor-root'),
       spellChecker: false,
       status: false,
+      toolbar: [
+        'bold', 'italic', 'heading', '|',
+        'quote', 'unordered-list', 'ordered-list', '|',
+        'link', 'image', 'code', '|',
+        'preview', 'side-by-side', 'fullscreen'
+      ],
       renderingConfig: { singleLineBreaks: false },
       previewRender: function(text) {
         const replaced = text.replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(_m, g1) {
