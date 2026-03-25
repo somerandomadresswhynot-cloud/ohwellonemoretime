@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTextBrowser,
     QTextEdit,
+    QStackedWidget,
     QVBoxLayout,
 )
 from PySide6.QtGui import QAction, QTextCursor, QTextDocument, QTextOption
@@ -232,6 +233,9 @@ class HintMarkdownDialog(QDialog):
         self.preview = QTextBrowser()
         self.preview.setOpenExternalLinks(False)
         self.preview.anchorClicked.connect(self._on_anchor_clicked)
+        self._preview_scroll_value = 0
+        self._editor_scroll_value = 0
+        self._edit_mode = True
         self._revealed_cloze_indexes: set[int] = set()
         self._cloze_values: list[str] = []
         self._count_label = QLabel("")
@@ -245,18 +249,21 @@ class HintMarkdownDialog(QDialog):
         reveal_all_btn = QPushButton("Reveal All")
         hide_all_btn = QPushButton("Hide All")
         toggle_all_btn = QPushButton("Toggle All")
+        self.mode_btn = QPushButton("Switch to Blurting View")
         reveal_all_btn.clicked.connect(self._reveal_all_clozes)
         hide_all_btn.clicked.connect(self._hide_all_clozes)
         toggle_all_btn.clicked.connect(self._toggle_all_clozes)
+        self.mode_btn.clicked.connect(self._toggle_mode)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         self.editor.textChanged.connect(self._refresh_preview)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.editor)
+        self.stack.addWidget(self.preview)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Hint Markdown"))
-        lay.addWidget(self.editor, 3)
-        lay.addWidget(QLabel("Blurting View (left-click cloze to reveal/hide)"))
-        lay.addWidget(self.preview, 2)
+        lay.addWidget(self.mode_btn, 0, Qt.AlignLeft)
+        lay.addWidget(self.stack, 1)
         count_row = QHBoxLayout()
         count_row.addWidget(self._count_label)
         count_row.addStretch()
@@ -268,13 +275,14 @@ class HintMarkdownDialog(QDialog):
         lay.addWidget(self.history_hint)
         lay.addWidget(buttons)
         self._refresh_preview()
+        self._set_mode(edit_mode=True)
 
     def _open_editor_context_menu(self, pos) -> None:
-        cursor = self.editor.cursorForPosition(pos)
-        self.editor.setTextCursor(cursor)
+        self._apply_context_menu_cursor(pos)
         menu = self.editor.createStandardContextMenu()
         make_action = QAction("Make Cloze", self)
         make_action.triggered.connect(self._make_cloze_from_selection)
+        make_action.setEnabled(self.editor.textCursor().hasSelection())
         menu.addAction(make_action)
 
         cloze_bounds = self._cloze_bounds_at_cursor()
@@ -283,6 +291,17 @@ class HintMarkdownDialog(QDialog):
             remove_action.triggered.connect(lambda: self._remove_cloze(*cloze_bounds))
             menu.addAction(remove_action)
         menu.exec(self.editor.mapToGlobal(pos))
+
+    def _apply_context_menu_cursor(self, pos) -> None:
+        clicked_cursor = self.editor.cursorForPosition(pos)
+        existing = self.editor.textCursor()
+        if existing.hasSelection():
+            start = existing.selectionStart()
+            end = existing.selectionEnd()
+            click_pos = clicked_cursor.position()
+            if start <= click_pos <= end:
+                return
+        self.editor.setTextCursor(clicked_cursor)
 
     def _cloze_bounds_at_cursor(self) -> tuple[int, int] | None:
         cursor = self.editor.textCursor()
@@ -364,6 +383,24 @@ class HintMarkdownDialog(QDialog):
             self._revealed_cloze_indexes = set(range(len(self._cloze_values)))
         self._refresh_preview()
 
+    def _toggle_mode(self) -> None:
+        self._set_mode(edit_mode=not self._edit_mode)
+
+    def _set_mode(self, edit_mode: bool) -> None:
+        if self._edit_mode and not edit_mode:
+            self._editor_scroll_value = self.editor.verticalScrollBar().value()
+            self._preview_scroll_value = self.preview.verticalScrollBar().value()
+        elif (not self._edit_mode) and edit_mode:
+            self._preview_scroll_value = self.preview.verticalScrollBar().value()
+            self._editor_scroll_value = self.editor.verticalScrollBar().value()
+        self._edit_mode = bool(edit_mode)
+        self.stack.setCurrentWidget(self.editor if self._edit_mode else self.preview)
+        self.mode_btn.setText("Switch to Blurting View" if self._edit_mode else "Switch to Edit Markdown")
+        if self._edit_mode:
+            self.editor.verticalScrollBar().setValue(self._editor_scroll_value)
+        else:
+            self.preview.verticalScrollBar().setValue(self._preview_scroll_value)
+
     def _refresh_preview(self) -> None:
         source = self.editor.toPlainText()
         markdown_with_tokens, self._cloze_values = _extract_cloze_segments(source)
@@ -386,8 +423,10 @@ class HintMarkdownDialog(QDialog):
         shown = len(self._revealed_cloze_indexes)
         self._count_label.setText(f"Clozes: {len(self._cloze_values)} total · {hidden} hidden · {shown} shown")
         self.preview.setHtml(rendered)
-        self.preview.verticalScrollBar().setValue(preview_scroll)
-        self.editor.verticalScrollBar().setValue(editor_scroll)
+        self._preview_scroll_value = preview_scroll
+        self._editor_scroll_value = editor_scroll
+        self.preview.verticalScrollBar().setValue(self._preview_scroll_value)
+        self.editor.verticalScrollBar().setValue(self._editor_scroll_value)
 
     def value(self) -> str:
         return self.editor.toPlainText()

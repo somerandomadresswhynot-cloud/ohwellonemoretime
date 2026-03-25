@@ -35,6 +35,10 @@ def test_dialog_right_click_position_helpers_and_toggle_all(app):
         assert 0 in dlg._revealed_cloze_indexes
         dlg._toggle_all_clozes()
         assert 0 not in dlg._revealed_cloze_indexes
+        dlg._toggle_mode()
+        assert dlg.stack.currentWidget() is dlg.preview
+        dlg._toggle_mode()
+        assert dlg.stack.currentWidget() is dlg.editor
 
         text = dlg.editor.toPlainText()
         cloze_start = text.index('{{c::beta}}')
@@ -47,5 +51,25 @@ def test_dialog_right_click_position_helpers_and_toggle_all(app):
         dlg._remove_cloze(*bounds)
         assert '{{c::beta}}' not in dlg.editor.toPlainText()
         assert 'beta' in dlg.editor.toPlainText()
+    finally:
+        dlg.close()
+
+
+def test_right_click_inside_selection_keeps_selection(app):
+    dlg = HintMarkdownDialog('alpha beta gamma')
+    try:
+        text = dlg.editor.toPlainText()
+        start = text.index('beta')
+        end = start + len('beta')
+        cursor = dlg.editor.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, cursor.KeepAnchor)
+        dlg.editor.setTextCursor(cursor)
+        pos = dlg.editor.cursorRect(cursor).center()
+        dlg._apply_context_menu_cursor(pos)
+        kept = dlg.editor.textCursor()
+        assert kept.hasSelection()
+        assert kept.selectionStart() == start
+        assert kept.selectionEnd() == end
     finally:
         dlg.close()
