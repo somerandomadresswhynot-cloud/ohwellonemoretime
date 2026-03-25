@@ -299,7 +299,6 @@ class HintMarkdownDialog(QDialog):
     def eventFilter(self, watched, event):
         if watched is self._parent_for_filter and self._keep_on_top and event.type() == QEvent.WindowActivate:
             self.raise_()
-            self.activateWindow()
         return super().eventFilter(watched, event)
 
     def _on_loaded(self, ok: bool) -> None:
@@ -331,7 +330,6 @@ class HintMarkdownDialog(QDialog):
         self.keep_on_top_changed.emit(self._keep_on_top)
         if self._keep_on_top:
             self.raise_()
-            self.activateWindow()
 
     def _set_parent_filter_enabled(self, enabled: bool) -> None:
         if not self._parent_for_filter:
