@@ -1486,12 +1486,24 @@ class SourceWorkspace(QWidget):
         )
 
     def _estimate_review_seconds_unit_row(self, unit_row) -> float:
-        pages = max(1, (int(unit_row["end_page"]) - int(unit_row["start_page"])) + 1)
+        def _field(name: str, default=0):
+            if isinstance(unit_row, dict):
+                return unit_row.get(name, default)
+            if hasattr(unit_row, name):
+                return getattr(unit_row, name)
+            # Backward-compatibility for legacy sqlite rows
+            try:
+                return unit_row[name]
+            except Exception:
+                return default
+
+        pages = max(1, (int(_field("end_page", 1)) - int(_field("start_page", 1))) + 1)
         fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
         fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
-        if int(unit_row["review_count"] or 0) == 0:
+        if int(_field("review_count", 0) or 0) == 0:
             return max(1.0, pages * fallback_per_page, fallback_per_unit)
-        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(int(unit_row["id"]))
+        unit_id = _field("id", _field("unit_id", 0))
+        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(int(unit_id or 0))
         if unit_avg is not None:
             return float(unit_avg)
         source_avg = self.review_repo.avg_elapsed_seconds_for_source(self.source_id)

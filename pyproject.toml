@@ -19,4 +19,11 @@ include = ["study_app*"]
 exclude = ["third_party*", "tests*"]
 
 [tool.setuptools.package-data]
-study_app = ["ui/web/*.html", "ui/web/*.js", "ui/web/*.css", "ui/*.md"]
+study_app = [
+  "ui/web/*.html",
+  "ui/web/*.js",
+  "ui/web/*.css",
+  "ui/web/vendor/pdfjs/README.md",
+  "ui/web/vendor/pdfjs/build/*.mjs",
+  "ui/*.md",
+]

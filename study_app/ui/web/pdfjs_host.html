@@ -16,6 +16,12 @@
     });
   </script>
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
-  <script type="module" src="./pdfjs_host.js"></script>
+  <script type="module">
+    import { bootPdfHost } from './pdfjs_host.js';
+    bootPdfHost().catch((err) => {
+      const el = document.getElementById('toolbar-status');
+      if (el) el.textContent = 'PDF.js host bootstrap failed: ' + (err && err.message ? err.message : err);
+    });
+  </script>
 </body>
 </html>
