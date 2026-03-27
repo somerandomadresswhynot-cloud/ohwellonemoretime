@@ -10,3 +10,24 @@ dependencies = [
 
 [project.scripts]
 study-app = "study_app.main:run"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["study_app*"]
+exclude = ["third_party*", "tests*"]
+
+[tool.setuptools.package-data]
+study_app = [
+  "ui/web/*.html",
+  "ui/web/*.js",
+  "ui/web/*.css",
+  "ui/web/pdfjs_bridge.js",
+  "ui/web/pdfjs_annotations.js",
+  "ui/web/pdfjs_bridge.css",
+  "ui/web/vendor/pdfjs/README.md",
+  "ui/web/vendor/pdfjs/web/*",
+  "ui/web/vendor/pdfjs/build/*.mjs",
+  "ui/*.md",
+]
