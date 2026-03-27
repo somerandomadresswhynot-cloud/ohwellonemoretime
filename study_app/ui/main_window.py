@@ -640,6 +640,9 @@ class SourceWorkspace(QWidget):
         self.text_layer_hint = QLabel("Text layer: probing…")
         self.text_layer_hint.setStyleSheet("color:#9aa7b2;")
         color_row.addWidget(self.text_layer_hint)
+        self.annotation_mode_hint = QLabel("")
+        self.annotation_mode_hint.setStyleSheet("color:#d6e0ef; font-weight:600;")
+        color_row.addWidget(self.annotation_mode_hint)
         color_row.addStretch()
 
         c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
@@ -739,6 +742,13 @@ class SourceWorkspace(QWidget):
         self.opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
         self.opacity_spin.blockSignals(False)
         self.pdf.set_annotation_tool(self._annotation_tool)
+        mode_label = {
+            "select_text": "Tool: Select Text (drag to select, right-click to copy/highlight)",
+            "area": "Tool: Area (drag to draw rectangle highlight)",
+            "pan": "Tool: Pan (navigation mode)",
+            "erase": "Tool: Erase (click highlight to remove)",
+        }.get(self._annotation_tool, "Tool: Select Text")
+        self.annotation_mode_hint.setText(mode_label)
 
     def _persist_annotation_state(self) -> None:
         self.settings_repo.set_ui_state("pdf_annotation_tool", self._annotation_tool)
@@ -1486,12 +1496,24 @@ class SourceWorkspace(QWidget):
         )
 
     def _estimate_review_seconds_unit_row(self, unit_row) -> float:
-        pages = max(1, (int(unit_row["end_page"]) - int(unit_row["start_page"])) + 1)
+        def _field(name: str, default=0):
+            if unit_row is None:
+                return default
+            if isinstance(unit_row, dict):
+                return unit_row.get(name, default)
+            try:
+                return unit_row[name]
+            except Exception:
+                pass
+            attr_name = "unit_id" if name == "id" else name
+            return getattr(unit_row, attr_name, default)
+
+        pages = max(1, (int(_field("end_page", 1)) - int(_field("start_page", 1))) + 1)
         fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
         fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
-        if int(unit_row["review_count"] or 0) == 0:
+        if int(_field("review_count", 0) or 0) == 0:
             return max(1.0, pages * fallback_per_page, fallback_per_unit)
-        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(int(unit_row["id"]))
+        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(int(_field("id", 0)))
         if unit_avg is not None:
             return float(unit_avg)
         source_avg = self.review_repo.avg_elapsed_seconds_for_source(self.source_id)
@@ -1536,6 +1558,9 @@ class SourceWorkspace(QWidget):
         if not quote:
             return
         menu = QMenu(self)
+        copy_action = menu.addAction("Copy selection")
+        copy_action.triggered.connect(lambda: self.pdf.copy_selected_text())
+        menu.addSeparator()
         add_today_queue = menu.addAction("Add to today's queue")
         add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(int(page)))
         menu.addSeparator()
@@ -1919,7 +1944,7 @@ class StudyQueuePage(QWidget):
         self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
         self.pdf.set_area_created_handler(self._on_queue_area_rect_created)
         self.pdf.set_highlight_hit_handler(self._on_queue_overlay_highlight_hit)
-        self.pdf.set_multi_page_mode()
+        self.pdf.set_single_page_mode()
         self.pdf.set_fit_mode()
         self.pdf.setMinimumHeight(760)
         self.queue_outline_tree = QTreeWidget()
@@ -2016,6 +2041,9 @@ class StudyQueuePage(QWidget):
         self.queue_text_layer_hint = QLabel("Text layer: probing…")
         self.queue_text_layer_hint.setStyleSheet("color:#9aa7b2;")
         queue_annotation_controls.addWidget(self.queue_text_layer_hint)
+        self.queue_annotation_mode_hint = QLabel("")
+        self.queue_annotation_mode_hint.setStyleSheet("color:#d6e0ef; font-weight:600;")
+        queue_annotation_controls.addWidget(self.queue_annotation_mode_hint)
         self.pre_note_btn.setMinimumHeight(32)
         self.hint_btn.setMinimumHeight(32)
         self.post_note_btn.setMinimumHeight(32)
@@ -2441,6 +2469,13 @@ class StudyQueuePage(QWidget):
         self.queue_opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
         self.queue_opacity_spin.blockSignals(False)
         self.pdf.set_annotation_tool(self._annotation_tool)
+        mode_label = {
+            "select_text": "Tool: Select Text (drag to select, right-click to copy/highlight)",
+            "area": "Tool: Area (drag to draw rectangle highlight)",
+            "pan": "Tool: Pan (navigation mode)",
+            "erase": "Tool: Erase (click highlight to remove)",
+        }.get(self._annotation_tool, "Tool: Select Text")
+        self.queue_annotation_mode_hint.setText(mode_label)
 
     def _set_queue_annotation_tool(self, tool: str) -> None:
         if tool not in {"select_text", "area", "pan", "erase"}:
@@ -2492,6 +2527,9 @@ class StudyQueuePage(QWidget):
             return
         anchor = self._queue_text_anchor_payload(quote)
         menu = QMenu(self)
+        copy_action = menu.addAction("Copy selection")
+        copy_action.triggered.connect(lambda: self.pdf.copy_selected_text())
+        menu.addSeparator()
         quick = menu.addAction(f"Add highlight ({self._annotation_color})")
         quick.triggered.connect(
             lambda: self.highlight_repo.add_text_highlight(
@@ -3167,7 +3205,7 @@ class StudyQueuePage(QWidget):
                 self.source_path_cache[self.active_unit.source_id] = path
         last_zoom = self.pdf.zoom_factor()
         self.pdf.load_if_needed(path)
-        self.pdf.set_multi_page_mode()
+        self.pdf.set_single_page_mode()
         self._refresh_queue_text_layer_hint(path or "")
         zoom_setting = self.settings_repo.get_ui_state("queue_pdf_zoom", "")
         try:

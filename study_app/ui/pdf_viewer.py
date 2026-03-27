@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import os
 from pathlib import Path
 import warnings
 
@@ -38,22 +39,6 @@ class _AnnotationOverlay(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setMouseTracking(True)
 
-    def _norm_to_px_rect(self, norm_rect: dict) -> QRectF:
-        x = float(norm_rect.get("x", 0.0))
-        y = float(norm_rect.get("y", 0.0))
-        w = float(norm_rect.get("w", 0.0))
-        h = float(norm_rect.get("h", 0.0))
-        return QRectF(x * self.width(), y * self.height(), w * self.width(), h * self.height())
-
-    def _px_to_norm_rect(self, rect: QRectF) -> dict:
-        if self.width() <= 0 or self.height() <= 0:
-            return {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
-        x = max(0.0, min(1.0, rect.left() / self.width()))
-        y = max(0.0, min(1.0, rect.top() / self.height()))
-        w = max(0.0, min(1.0 - x, rect.width() / self.width()))
-        h = max(0.0, min(1.0 - y, rect.height() / self.height()))
-        return {"x": round(x, 6), "y": round(y, 6), "w": round(w, 6), "h": round(h, 6)}
-
     def _draft_rect(self) -> QRectF | None:
         if self._drag_start is None or self._drag_end is None:
             return None
@@ -70,7 +55,7 @@ class _AnnotationOverlay(QWidget):
             pen.setWidth(2)
             p.setPen(pen)
             for norm_rect in entry.get("rects", []):
-                p.drawRoundedRect(self._norm_to_px_rect(norm_rect), 3, 3)
+                p.drawRoundedRect(self._owner.overlay_rect_to_viewport(norm_rect), 3, 3)
 
         draft = self._draft_rect()
         if draft and self._owner._interaction_mode == "area_select":
@@ -89,9 +74,15 @@ class _AnnotationOverlay(QWidget):
             clicked = event.position()
             for entry in reversed(self._owner._overlay_highlights):
                 for norm_rect in entry.get("rects", []):
-                    if self._norm_to_px_rect(norm_rect).contains(clicked):
+                    if self._owner.overlay_rect_to_viewport(norm_rect).contains(clicked):
                         if self._owner._highlight_hit_handler:
                             self._owner._highlight_hit_handler(int(entry.get("id", 0)))
+                        self._owner._debug(
+                            "overlay.erase.hit",
+                            highlight_id=int(entry.get("id", 0)),
+                            x=round(float(clicked.x()), 2),
+                            y=round(float(clicked.y()), 2),
+                        )
                         event.accept()
                         return
         super().mousePressEvent(event)
@@ -113,7 +104,20 @@ class _AnnotationOverlay(QWidget):
             if rect is None or rect.width() < 6 or rect.height() < 6:
                 return
             if self._owner._area_created_handler:
-                self._owner._area_created_handler(self._px_to_norm_rect(rect), int(self._owner.view_state().get("page", 1)))
+                page = int(self._owner.view_state().get("page", 1))
+                stored_rect = self._owner.viewport_rect_to_stored_rect(rect, page)
+                self._owner._debug(
+                    "overlay.area.created",
+                    page=page,
+                    viewport_rect={
+                        "x": round(float(rect.x()), 2),
+                        "y": round(float(rect.y()), 2),
+                        "w": round(float(rect.width()), 2),
+                        "h": round(float(rect.height()), 2),
+                    },
+                    stored_rect=stored_rect,
+                )
+                self._owner._area_created_handler(stored_rect, page)
             return
         super().mouseReleaseEvent(event)
 
@@ -121,6 +125,7 @@ class _AnnotationOverlay(QWidget):
 class PersistentPdfViewer(QWidget):
     def __init__(self):
         super().__init__()
+        self._debug_enabled = os.environ.get("STUDY_APP_PDF_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
         self.current_path = ""
         self._view = None
         self._label = QLabel("PDF view unavailable (QtPdf missing).")
@@ -129,6 +134,7 @@ class PersistentPdfViewer(QWidget):
         self._last_location = (0.0, 0.0)
         self._selection_menu_handler = None
         self._context_menu_connected = False
+        self._viewport_context_menu_connected = False
         self._page_nav = None
         self._page_changed_connected = False
 
@@ -160,6 +166,7 @@ class PersistentPdfViewer(QWidget):
             self._overlay.raise_()
             self._overlay.resize(self._view.viewport().size())
             self._view.viewport().installEventFilter(self)
+            self._view.installEventFilter(self)
             root.addWidget(viewport_host)
 
             controls = QHBoxLayout()
@@ -193,22 +200,69 @@ class PersistentPdfViewer(QWidget):
         self._selection_menu_handler = handler
         if not self._view:
             return
+        viewport = self._view.viewport()
         self._view.setContextMenuPolicy(Qt.CustomContextMenu)
+        viewport.setContextMenuPolicy(Qt.CustomContextMenu)
         if self._context_menu_connected:
             self._safe_disconnect(self._view.customContextMenuRequested, self._on_context_menu)
             self._context_menu_connected = False
+        if self._viewport_context_menu_connected:
+            self._safe_disconnect(viewport.customContextMenuRequested, self._on_viewport_context_menu)
+            self._viewport_context_menu_connected = False
         self._view.customContextMenuRequested.connect(self._on_context_menu)
+        viewport.customContextMenuRequested.connect(self._on_viewport_context_menu)
         self._context_menu_connected = True
+        self._viewport_context_menu_connected = True
 
     def _on_context_menu(self, _pos) -> None:
+        self._debug("context_menu.view")
         if self._selection_menu_handler:
             self._selection_menu_handler(QCursor.pos(), self.selected_text(), int(self.view_state().get("page", 1)))
 
+    def _on_viewport_context_menu(self, pos) -> None:
+        self._debug("context_menu.viewport", x=int(pos.x()), y=int(pos.y()))
+        if self._selection_menu_handler:
+            global_pos = self._view.viewport().mapToGlobal(pos)
+            self._selection_menu_handler(global_pos, self.selected_text(), int(self.view_state().get("page", 1)))
+
+    def _debug(self, event: str, **payload) -> None:
+        if not self._debug_enabled:
+            return
+        details = " ".join(f"{k}={payload[k]!r}" for k in sorted(payload))
+        print(f"[pdf_viewer] {event} {details}".rstrip())
+
     def eventFilter(self, watched, event):
+        if self._view and watched is self._view:
+            if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseMove, QEvent.ContextMenu):
+                self._debug(
+                    "event.view",
+                    type=int(event.type()),
+                    mode=self._interaction_mode,
+                )
         if self._overlay and self._view and watched is self._view.viewport():
             if event.type() in (QEvent.Resize, QEvent.Show):
                 self._overlay.resize(self._view.viewport().size())
                 self._overlay.raise_()
+            if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseMove, QEvent.ContextMenu):
+                pos = getattr(event, "position", lambda: QPointF(-1, -1))()
+                self._debug(
+                    "event.viewport",
+                    type=int(event.type()),
+                    mode=self._interaction_mode,
+                    x=round(float(pos.x()), 2),
+                    y=round(float(pos.y()), 2),
+                    page=int(self.view_state().get("page", 1)),
+                )
+                if event.type() == QEvent.MouseButtonRelease and self._interaction_mode == "text_select":
+                    selected = self.selected_text()
+                    self._debug("selection.after_mouse_release", chars=len(selected))
+            if event.type() == QEvent.KeyPress and self._interaction_mode == "text_select":
+                key = getattr(event, "key", lambda: -1)()
+                mods = int(getattr(event, "modifiers", lambda: Qt.NoModifier)())
+                if key == Qt.Key_C and mods & Qt.ControlModifier:
+                    if self.copy_selected_text():
+                        event.accept()
+                        return True
         return super().eventFilter(watched, event)
 
     def set_area_created_handler(self, handler) -> None:
@@ -221,6 +275,109 @@ class PersistentPdfViewer(QWidget):
         self._overlay_highlights = highlights or []
         if self._overlay:
             self._overlay.update()
+
+    def _page_size_points(self, page: int) -> tuple[float, float]:
+        if not self._view or page < 1:
+            return (0.0, 0.0)
+        doc = self._view.document()
+        if doc is None:
+            return (0.0, 0.0)
+        try:
+            size = doc.pagePointSize(int(page) - 1)
+            return (max(0.0, float(size.width())), max(0.0, float(size.height())))
+        except Exception:
+            return (0.0, 0.0)
+
+    def viewport_rect_to_stored_rect(self, rect: QRectF, page: int) -> dict:
+        if not self._view or not self._overlay:
+            return {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0, "coord": "viewport_norm_v1"}
+        zoom = max(0.0001, float(self.zoom_factor()))
+        nav = self._view.pageNavigator()
+        try:
+            loc = nav.currentLocation()
+            loc_x = float(loc.x())
+            loc_y = float(loc.y())
+        except Exception:
+            loc_x = 0.0
+            loc_y = 0.0
+        page_w, page_h = self._page_size_points(page)
+        if page_w <= 0.0 or page_h <= 0.0:
+            return self._viewport_norm_rect(rect)
+        doc_left = loc_x + (float(rect.left()) / zoom)
+        doc_top = loc_y + (float(rect.top()) / zoom)
+        doc_w = float(rect.width()) / zoom
+        doc_h = float(rect.height()) / zoom
+        x = max(0.0, min(1.0, doc_left / page_w))
+        y = max(0.0, min(1.0, doc_top / page_h))
+        w = max(0.0, min(1.0 - x, doc_w / page_w))
+        h = max(0.0, min(1.0 - y, doc_h / page_h))
+        return {
+            "coord": "page_norm_v1",
+            "x": round(x, 6),
+            "y": round(y, 6),
+            "w": round(w, 6),
+            "h": round(h, 6),
+        }
+
+    def _viewport_norm_rect(self, rect: QRectF) -> dict:
+        overlay_w = max(1.0, float(self._overlay.width() if self._overlay else 1.0))
+        overlay_h = max(1.0, float(self._overlay.height() if self._overlay else 1.0))
+        x = max(0.0, min(1.0, float(rect.left()) / overlay_w))
+        y = max(0.0, min(1.0, float(rect.top()) / overlay_h))
+        w = max(0.0, min(1.0 - x, float(rect.width()) / overlay_w))
+        h = max(0.0, min(1.0 - y, float(rect.height()) / overlay_h))
+        return {
+            "coord": "viewport_norm_v1",
+            "x": round(x, 6),
+            "y": round(y, 6),
+            "w": round(w, 6),
+            "h": round(h, 6),
+        }
+
+    def overlay_rect_to_viewport(self, stored_rect: dict) -> QRectF:
+        x = float(stored_rect.get("x", 0.0))
+        y = float(stored_rect.get("y", 0.0))
+        w = float(stored_rect.get("w", 0.0))
+        h = float(stored_rect.get("h", 0.0))
+        coord = str(stored_rect.get("coord") or "")
+        if not self._overlay or not self._view:
+            return QRectF()
+        if coord != "page_norm_v1":
+            return QRectF(x * self._overlay.width(), y * self._overlay.height(), w * self._overlay.width(), h * self._overlay.height())
+        page = int(self.view_state().get("page", 1))
+        page_w, page_h = self._page_size_points(page)
+        if page_w <= 0.0 or page_h <= 0.0:
+            return QRectF(x * self._overlay.width(), y * self._overlay.height(), w * self._overlay.width(), h * self._overlay.height())
+        nav = self._view.pageNavigator()
+        try:
+            loc = nav.currentLocation()
+            loc_x = float(loc.x())
+            loc_y = float(loc.y())
+        except Exception:
+            loc_x = 0.0
+            loc_y = 0.0
+        zoom = max(0.0001, float(self.zoom_factor()))
+        doc_left = x * page_w
+        doc_top = y * page_h
+        doc_w = w * page_w
+        doc_h = h * page_h
+        px_left = (doc_left - loc_x) * zoom
+        px_top = (doc_top - loc_y) * zoom
+        px_w = doc_w * zoom
+        px_h = doc_h * zoom
+        self._debug(
+            "overlay.reproject",
+            page=page,
+            coord=coord,
+            doc_left=round(doc_left, 2),
+            doc_top=round(doc_top, 2),
+            zoom=round(zoom, 3),
+            viewport_left=round(px_left, 2),
+            viewport_top=round(px_top, 2),
+            viewport_w=round(px_w, 2),
+            viewport_h=round(px_h, 2),
+        )
+        return QRectF(px_left, px_top, px_w, px_h)
 
     def selected_text(self) -> str:
         if not self._view:
@@ -241,13 +398,21 @@ class PersistentPdfViewer(QWidget):
                     return str(txt).strip()
         except Exception:
             pass
-        # Fallback: clipboard text (user can Ctrl+C selected fragment).
+        return ""
+
+    def copy_selected_text(self) -> bool:
+        text = self.selected_text()
+        if not text:
+            self._debug("copy_selected_text.empty_selection")
+            return False
         try:
             from PySide6.QtWidgets import QApplication
-
-            return (QApplication.clipboard().text() or "").strip()
-        except Exception:
-            return ""
+            QApplication.clipboard().setText(text)
+            self._debug("copy_selected_text.ok", chars=len(text))
+            return True
+        except Exception as exc:
+            self._debug("copy_selected_text.failed", error=str(exc))
+            return False
 
     def _enable_text_selection_mode(self) -> None:
         if not self._view:
@@ -301,12 +466,14 @@ class PersistentPdfViewer(QWidget):
             self._view.setCursor(Qt.IBeamCursor)
             if self._overlay:
                 self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._debug("tool.changed", tool=tool, mode=self._interaction_mode, overlay_transparent=True)
             return
         if self._interaction_mode == "pan":
             self._disable_text_selection_mode()
             self._view.setCursor(Qt.OpenHandCursor)
             if self._overlay:
                 self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._debug("tool.changed", tool=tool, mode=self._interaction_mode, overlay_transparent=True)
             return
         # Area + erase modes are handled by workspace overlays; keep pointer neutral here.
         self._disable_text_selection_mode()
@@ -315,6 +482,7 @@ class PersistentPdfViewer(QWidget):
             self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
             self._overlay.raise_()
             self._overlay.update()
+        self._debug("tool.changed", tool=tool, mode=self._interaction_mode, overlay_transparent=False)
 
     def _attach_page_changed(self, doc: QPdfDocument) -> None:
         nav = self._view.pageNavigator()
@@ -377,7 +545,7 @@ class PersistentPdfViewer(QWidget):
     def _apply_default_view_mode(self) -> None:
         if not self._view:
             return
-        self.set_multi_page_mode()
+        self.set_single_page_mode()
         self.set_fit_mode()
 
     def set_multi_page_mode(self) -> None:
@@ -515,4 +683,7 @@ class PersistentPdfViewer(QWidget):
         if self._context_menu_connected and self._view is not None:
             self._safe_disconnect(self._view.customContextMenuRequested, self._on_context_menu)
             self._context_menu_connected = False
+        if self._viewport_context_menu_connected and self._view is not None:
+            self._safe_disconnect(self._view.viewport().customContextMenuRequested, self._on_viewport_context_menu)
+            self._viewport_context_menu_connected = False
         super().closeEvent(event)
