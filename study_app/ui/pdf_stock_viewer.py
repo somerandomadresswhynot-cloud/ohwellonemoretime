@@ -100,6 +100,7 @@ class PdfStockViewer(QWidget):
         self._tool = "select_text"
         self._pending_annotations: list[dict] = []
         self._bridge_ready = False
+        self._native_pdf_fallback = False
 
         root = QVBoxLayout(self)
         if not QWebEngineView or not QWebChannel:
@@ -150,11 +151,12 @@ class PdfStockViewer(QWidget):
         if viewer_html.exists():
             self._web.load(QUrl.fromLocalFile(str(viewer_html.resolve())))
         else:
-            fallback = "<html><body><h3>Missing vendored PDF.js viewer assets.</h3></body></html>"
+            self._native_pdf_fallback = True
+            fallback = "<html><body><h3>PDF.js assets missing; using native PDF fallback.</h3></body></html>"
             self._web.setHtml(fallback)
 
     def _on_viewer_loaded(self, ok: bool) -> None:
-        if not ok or not self._web:
+        if not ok or not self._web or self._native_pdf_fallback:
             return
         base = Path(__file__).parent / "web"
         css_url = QUrl.fromLocalFile(str((base / "pdfjs_bridge.css").resolve())).toString()
@@ -265,6 +267,10 @@ class PdfStockViewer(QWidget):
         self.load_annotations(payload)
 
     def open_pdf(self, file_path: str, initial_page: int | None = None) -> None:
+        if self._native_pdf_fallback and self._web:
+            _ = initial_page
+            self._web.load(QUrl.fromLocalFile(str(Path(file_path).resolve())))
+            return
         url = QUrl.fromLocalFile(str(Path(file_path).resolve())).toString()
         self._js_call("openPdf", url, initial_page)
 
@@ -319,7 +325,7 @@ class PdfStockViewer(QWidget):
             self.load_annotations(self._pending_annotations)
 
     def _js_call(self, fn: str, *args) -> None:
-        if not self._web:
+        if not self._web or self._native_pdf_fallback:
             return
         payload = json.dumps(args)
         js = f"window.ohwPdfHost && window.ohwPdfHost.{fn}(...{payload});"
