@@ -1902,6 +1902,9 @@ class StudyQueuePage(QWidget):
         self._selected_rating: str | None = None
         self.hint_markdown_text = ""
         self.hint_last_changed_at: str | None = None
+        self._hint_dialog: HintMarkdownDialog | None = None
+        self._hint_keep_on_top = True
+        self._hint_temporarily_disabled_buttons: list[QPushButton] = []
         self.timer_tile = QueueTimerTile()
         self.timer_tile.start_btn.clicked.connect(self.start_timer)
         self.timer_tile.pause_btn.clicked.connect(self.pause_timer)
@@ -3320,12 +3323,49 @@ class StudyQueuePage(QWidget):
     def edit_hint(self) -> None:
         if not self.active_unit:
             return
+        if self._hint_dialog and self._hint_dialog.isVisible():
+            self._hint_dialog.raise_()
+            self._hint_dialog.activateWindow()
+            return
         dlg = HintMarkdownDialog(self.hint_markdown_text, self)
-        if dlg.exec():
-            self.hint_markdown_text = dlg.value()
-            self.review_repo.save_unit_hint_markdown(self.active_unit.unit_id, self.hint_markdown_text)
-            self.hint_last_changed_at = self.review_repo.unit_hint_last_changed_at(self.active_unit.unit_id)
-            self._refresh_note_previews()
+        dlg.set_keep_on_top(self._hint_keep_on_top)
+        dlg.keep_on_top_changed.connect(self._on_hint_keep_on_top_changed)
+        dlg.accepted.connect(self._save_hint_from_dialog)
+        dlg.finished.connect(self._on_hint_dialog_finished)
+        self._hint_dialog = dlg
+        self._set_hint_editing_controls_locked(True)
+        dlg.show()
+
+    def _on_hint_keep_on_top_changed(self, enabled: bool) -> None:
+        self._hint_keep_on_top = bool(enabled)
+
+    def _save_hint_from_dialog(self) -> None:
+        if not self.active_unit or not self._hint_dialog:
+            return
+        self.hint_markdown_text = self._hint_dialog.value()
+        self.review_repo.save_unit_hint_markdown(self.active_unit.unit_id, self.hint_markdown_text)
+        self.hint_last_changed_at = self.review_repo.unit_hint_last_changed_at(self.active_unit.unit_id)
+        self._refresh_note_previews()
+
+    def _on_hint_dialog_finished(self, _result: int) -> None:
+        self._set_hint_editing_controls_locked(False)
+        self._hint_dialog = None
+
+    def _set_hint_editing_controls_locked(self, locked: bool) -> None:
+        if locked:
+            self._hint_temporarily_disabled_buttons = []
+            for btn in self.findChildren(QPushButton):
+                if not btn.isEnabled():
+                    continue
+                btn.setEnabled(False)
+                self._hint_temporarily_disabled_buttons.append(btn)
+            return
+        for btn in self._hint_temporarily_disabled_buttons:
+            try:
+                btn.setEnabled(True)
+            except RuntimeError:
+                continue
+        self._hint_temporarily_disabled_buttons = []
 
     def _refresh_queue_history_panel(self) -> None:
         self.review_history_list.clear()
