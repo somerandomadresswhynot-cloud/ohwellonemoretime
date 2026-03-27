@@ -761,6 +761,7 @@ class SourceWorkspace(QWidget):
     def _on_opacity_changed(self, value: int) -> None:
         self._annotation_opacity = max(0.1, min(1.0, float(value) / 100.0))
         self._persist_annotation_state()
+        self._sync_pdf_overlay_highlights()
 
     def _on_area_rect_created(self, norm_rect: dict, page: int) -> None:
         if self._annotation_tool != "area":
@@ -853,6 +854,7 @@ class SourceWorkspace(QWidget):
         self.source = self.source_repo.get(self.source_id)
         self.pdf.load_if_needed(self.source.file_path)
         self.pdf.set_fit_mode()
+        self._set_annotation_tool("select_text", from_click=False)
         self._refresh_text_layer_hint()
         self.refresh_tree()
         self.refresh_insights()
@@ -1486,12 +1488,25 @@ class SourceWorkspace(QWidget):
         )
 
     def _estimate_review_seconds_unit_row(self, unit_row) -> float:
-        pages = max(1, (int(unit_row["end_page"]) - int(unit_row["start_page"])) + 1)
+        def _field(row, key: str, default=0):
+            if isinstance(row, dict):
+                return row.get(key, default)
+            try:
+                return row[key]
+            except Exception:
+                pass
+            return getattr(row, key, default)
+
+        start_page = int(_field(unit_row, "start_page", 0) or 0)
+        end_page = int(_field(unit_row, "end_page", start_page) or start_page)
+        unit_id = int(_field(unit_row, "id", _field(unit_row, "unit_id", 0)) or 0)
+        review_count = int(_field(unit_row, "review_count", 0) or 0)
+        pages = max(1, (end_page - start_page) + 1)
         fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
         fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
-        if int(unit_row["review_count"] or 0) == 0:
+        if review_count == 0:
             return max(1.0, pages * fallback_per_page, fallback_per_unit)
-        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(int(unit_row["id"]))
+        unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit_id) if unit_id > 0 else None
         if unit_avg is not None:
             return float(unit_avg)
         source_avg = self.review_repo.avg_elapsed_seconds_for_source(self.source_id)
@@ -1533,9 +1548,16 @@ class SourceWorkspace(QWidget):
 
     def open_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         quote = (selected_text or "").strip()
-        if not quote:
-            return
         menu = QMenu(self)
+        copy_action = menu.addAction("Copy selection")
+        if quote:
+            copy_action.triggered.connect(lambda: QApplication.clipboard().setText(quote))
+        else:
+            copy_action.setEnabled(False)
+        menu.addSeparator()
+        if not quote:
+            menu.exec(global_pos)
+            return
         add_today_queue = menu.addAction("Add to today's queue")
         add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(int(page)))
         menu.addSeparator()
@@ -2488,10 +2510,19 @@ class StudyQueuePage(QWidget):
     def open_queue_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         source_id = self._active_source_id()
         quote = (selected_text or "").strip()
-        if not source_id or not quote:
+        if not source_id:
             return
         anchor = self._queue_text_anchor_payload(quote)
         menu = QMenu(self)
+        copy_action = menu.addAction("Copy selection")
+        if quote:
+            copy_action.triggered.connect(lambda: QApplication.clipboard().setText(quote))
+        else:
+            copy_action.setEnabled(False)
+        menu.addSeparator()
+        if not quote:
+            menu.exec(global_pos)
+            return
         quick = menu.addAction(f"Add highlight ({self._annotation_color})")
         quick.triggered.connect(
             lambda: self.highlight_repo.add_text_highlight(
@@ -3175,6 +3206,8 @@ class StudyQueuePage(QWidget):
         except Exception:
             target_zoom = float(last_zoom)
         self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
+        self._annotation_tool = "select_text"
+        self._apply_queue_annotation_ui_state()
         self._refresh_queue_outline_tree(self.active_unit.source_id)
         self.pdf.set_page(self.active_unit.start_page)
         self._set_active_queue_outline_by_page(int(self.active_unit.start_page))
