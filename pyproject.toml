@@ -5,6 +5,7 @@ description = "Personal desktop study app for PDF reading and scheduled review"
 requires-python = ">=3.10"
 dependencies = [
   "PySide6>=6.6",
+  "PySide6-WebEngine>=6.6",
   "pypdf>=4.2.0"
 ]
 
