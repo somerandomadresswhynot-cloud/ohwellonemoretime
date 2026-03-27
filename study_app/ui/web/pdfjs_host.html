@@ -2,13 +2,19 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' file: data: blob:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' qrc: file: data: blob: 'unsafe-inline' 'unsafe-eval'; script-src 'self' qrc: file: blob: 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' file:; connect-src 'self' qrc: file: data: blob:; worker-src 'self' blob: file:;">
   <title>PDF.js Host</title>
   <link rel="stylesheet" href="./pdfjs_host.css" />
 </head>
 <body>
   <div id="toolbar-status">Loading PDF.js host…</div>
   <div id="viewer-root"></div>
+  <script>
+    window.addEventListener('error', function (ev) {
+      const el = document.getElementById('toolbar-status');
+      if (el) el.textContent = 'PDF.js host error: ' + (ev.message || 'unknown error');
+    });
+  </script>
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <script type="module" src="./pdfjs_host.js"></script>
 </body>

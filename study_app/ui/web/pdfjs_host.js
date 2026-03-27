@@ -207,12 +207,21 @@ function applyTool(tool) {
 }
 
 window.pdfHost = {
-  async openPdf(filePath, initialPage = null) {
-    const url = new URL(`file://${filePath}`);
-    state.pdfDoc = await pdfjsLib.getDocument({ url: url.toString() }).promise;
-    await renderPdf();
-    setStatus(`Loaded ${state.pdfDoc.numPages} pages`);
-    if (initialPage) this.goToPage(initialPage);
+  async openPdf(filePathOrUrl, initialPage = null) {
+    try {
+      let url = String(filePathOrUrl || '');
+      if (!url.startsWith('file://')) {
+        const normalized = url.replaceAll('\\', '/');
+        url = `file:///${normalized.replace(/^\/+/, '')}`;
+      }
+      state.pdfDoc = await pdfjsLib.getDocument({ url }).promise;
+      await renderPdf();
+      setStatus(`Loaded ${state.pdfDoc.numPages} pages`);
+      if (initialPage) this.goToPage(initialPage);
+    } catch (err) {
+      setStatus(`Failed to open PDF: ${err && err.message ? err.message : err}`);
+      throw err;
+    }
   },
   goToPage(pageNumber) {
     const refs = state.pages.get(Number(pageNumber));

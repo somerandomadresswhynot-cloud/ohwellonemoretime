@@ -238,7 +238,8 @@ class PdfJsViewer(QWidget):
 
     # required bridge API
     def open_pdf(self, file_path: str, initial_page: int | None = None) -> None:
-        self._js_call("openPdf", str(Path(file_path).resolve()), initial_page)
+        url = QUrl.fromLocalFile(str(Path(file_path).resolve())).toString()
+        self._js_call("openPdf", url, initial_page)
 
     def go_to_page(self, page_number: int) -> None:
         self._js_call("goToPage", max(1, int(page_number or 1)))
