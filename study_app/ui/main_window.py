@@ -586,9 +586,6 @@ class SourceWorkspace(QWidget):
         self.search.textChanged.connect(lambda *_: self._filter_timer.start(220))
 
         self.pdf = PersistentPdfViewer()
-        self.pdf.set_selection_menu_handler(self.open_selection_menu)
-        self.pdf.set_area_created_handler(self._on_area_rect_created)
-        self.pdf.set_highlight_hit_handler(self._on_overlay_highlight_hit)
         self.zoom = QSpinBox(); self.zoom.setRange(50, 250); self.zoom.setValue(100)
         self.zoom.valueChanged.connect(lambda v: self.pdf.set_zoom(v / 100))
         btn_jump = QPushButton("Jump To Selected Unit")
@@ -609,42 +606,12 @@ class SourceWorkspace(QWidget):
         self.doc_progress = DocumentProgressBar()
         self.doc_progress.page_requested.connect(self._on_doc_progress_page_requested)
 
-        self._tool_buttons: dict[str, QPushButton] = {}
-        self._tool_buttons["select_text"] = self._mk_tool_btn("Select Text", "select_text")
-        self._tool_buttons["area"] = self._mk_tool_btn("Area", "area")
-        self._tool_buttons["pan"] = self._mk_tool_btn("Pan", "pan")
-        self._tool_buttons["erase"] = self._mk_tool_btn("Erase", "erase")
-
-        color_row = QHBoxLayout()
-        color_row.addWidget(QLabel("Annotate"))
-        for btn in self._tool_buttons.values():
-            color_row.addWidget(btn)
-        color_row.addSpacing(8)
-        color_row.addWidget(QLabel("Color"))
-        self._color_buttons: dict[str, QPushButton] = {}
-        for _label, color in self._annotation_palette:
-            cbtn = QPushButton("")
-            cbtn.setCheckable(True)
-            cbtn.setFixedSize(QSize(18, 18))
-            cbtn.clicked.connect(lambda _=False, c=color: self._set_annotation_color(c))
-            self._color_buttons[color] = cbtn
-            color_row.addWidget(cbtn)
-        color_row.addSpacing(8)
-        color_row.addWidget(QLabel("Opacity"))
-        self.opacity_spin = QSpinBox()
-        self.opacity_spin.setRange(10, 100)
-        self.opacity_spin.setSuffix("%")
-        self.opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
-        self.opacity_spin.valueChanged.connect(self._on_opacity_changed)
-        color_row.addWidget(self.opacity_spin)
-        self.text_layer_hint = QLabel("Text layer: probing…")
+        self.text_layer_hint = QLabel("Embedded browser PDF viewer")
         self.text_layer_hint.setStyleSheet("color:#9aa7b2;")
-        color_row.addWidget(self.text_layer_hint)
-        color_row.addStretch()
 
         c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
         pdf_row = QHBoxLayout(); pdf_row.addWidget(self.pdf, 1)
-        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addLayout(color_row); c_l.addWidget(self.page_label); c_l.addLayout(pdf_row, 1); c_l.addWidget(self.doc_progress)
+        c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addWidget(self.text_layer_hint); c_l.addWidget(self.page_label); c_l.addLayout(pdf_row, 1); c_l.addWidget(self.doc_progress)
 
         self.insights = QLabel()
         self.insights.setWordWrap(True)
@@ -710,7 +677,6 @@ class SourceWorkspace(QWidget):
         self._pdf_page_poll = QTimer(self)
         self._pdf_page_poll.timeout.connect(self._on_pdf_page_polled)
         self._pdf_page_poll.start(450)
-        self._apply_annotation_ui_state()
         self._btn_today_feedback_timer = QTimer(self)
         self._btn_today_feedback_timer.setSingleShot(True)
         self._btn_today_feedback_timer.timeout.connect(self._update_add_today_button_state)
@@ -749,13 +715,11 @@ class SourceWorkspace(QWidget):
         if tool not in {"select_text", "area", "pan", "erase"}:
             return
         self._annotation_tool = tool
-        self._apply_annotation_ui_state()
         if from_click:
             self._persist_annotation_state()
 
     def _set_annotation_color(self, color: str) -> None:
         self._annotation_color = color
-        self._apply_annotation_ui_state()
         self._persist_annotation_state()
 
     def _on_opacity_changed(self, value: int) -> None:
@@ -853,7 +817,6 @@ class SourceWorkspace(QWidget):
         self.source = self.source_repo.get(self.source_id)
         self.pdf.load_if_needed(self.source.file_path)
         self.pdf.set_fit_mode()
-        self._refresh_text_layer_hint()
         self.refresh_tree()
         self.refresh_insights()
         self.refresh_highlights()
@@ -1916,9 +1879,6 @@ class StudyQueuePage(QWidget):
         self.hint_btn.clicked.connect(self.edit_hint)
         self.post_note_btn.clicked.connect(self.edit_post_note)
         self.pdf = PersistentPdfViewer()
-        self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
-        self.pdf.set_area_created_handler(self._on_queue_area_rect_created)
-        self.pdf.set_highlight_hit_handler(self._on_queue_overlay_highlight_hit)
         self.pdf.set_multi_page_mode()
         self.pdf.set_fit_mode()
         self.pdf.setMinimumHeight(760)
@@ -1975,47 +1935,8 @@ class StudyQueuePage(QWidget):
 
         self.queue_doc_progress = DocumentProgressBar()
         self.queue_doc_progress.page_requested.connect(self._on_queue_doc_progress_page_requested)
-        queue_annotation_controls = QVBoxLayout()
-        queue_annotation_controls.setSpacing(4)
-        queue_ann_row1 = QHBoxLayout()
-        queue_ann_row1.setSpacing(6)
-        queue_ann_row1.addWidget(QLabel("Annotate"))
-        self._queue_tool_buttons: dict[str, QPushButton] = {}
-        for label, key in [("Select Text", "select_text"), ("Area", "area"), ("Pan", "pan"), ("Erase", "erase")]:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setFixedHeight(24)
-            btn.clicked.connect(lambda _=False, k=key: self._set_queue_annotation_tool(k))
-            self._queue_tool_buttons[key] = btn
-            queue_ann_row1.addWidget(btn)
-        queue_ann_row1.addStretch()
-        queue_annotation_controls.addLayout(queue_ann_row1)
-
-        queue_ann_row2 = QHBoxLayout()
-        queue_ann_row2.setSpacing(6)
-        queue_ann_row2.addWidget(QLabel("Color"))
-        self._queue_color_buttons: dict[str, QPushButton] = {}
-        for _label, color in self._annotation_palette:
-            cbtn = QPushButton("")
-            cbtn.setCheckable(True)
-            cbtn.setFixedSize(QSize(16, 16))
-            cbtn.clicked.connect(lambda _=False, c=color: self._set_queue_annotation_color(c))
-            self._queue_color_buttons[color] = cbtn
-            queue_ann_row2.addWidget(cbtn)
-        queue_ann_row2.addSpacing(6)
-        queue_ann_row2.addWidget(QLabel("Opacity"))
-        self.queue_opacity_spin = QSpinBox()
-        self.queue_opacity_spin.setRange(10, 100)
-        self.queue_opacity_spin.setSuffix("%")
-        self.queue_opacity_spin.setValue(int(round(self._annotation_opacity * 100)))
-        self.queue_opacity_spin.valueChanged.connect(self._on_queue_opacity_changed)
-        queue_ann_row2.addWidget(self.queue_opacity_spin)
-        queue_ann_row2.addStretch()
-        queue_annotation_controls.addLayout(queue_ann_row2)
-
-        self.queue_text_layer_hint = QLabel("Text layer: probing…")
+        self.queue_text_layer_hint = QLabel("Embedded browser PDF viewer")
         self.queue_text_layer_hint.setStyleSheet("color:#9aa7b2;")
-        queue_annotation_controls.addWidget(self.queue_text_layer_hint)
         self.pre_note_btn.setMinimumHeight(32)
         self.hint_btn.setMinimumHeight(32)
         self.post_note_btn.setMinimumHeight(32)
@@ -2046,14 +1967,6 @@ class StudyQueuePage(QWidget):
         srs_section_l.setContentsMargins(0, 0, 0, 0)
         srs_section_l.addLayout(ratings)
         left_controls_col.addWidget(srs_section)
-
-        annotation_section = QWidget()
-        annotation_section_l = QVBoxLayout(annotation_section)
-        annotation_section_l.setContentsMargins(0, 0, 0, 0)
-        annotation_section_l.setSpacing(4)
-        annotation_section_l.addWidget(QLabel("Annotations"))
-        annotation_section_l.addLayout(queue_annotation_controls)
-        left_controls_col.addWidget(annotation_section)
 
         outline_section = QWidget()
         outline_section_l = QVBoxLayout(outline_section)
@@ -2109,7 +2022,6 @@ class StudyQueuePage(QWidget):
         self.qt_timer = QTimer(self)
         self.qt_timer.timeout.connect(self.tick)
         self.qt_timer.start(1000)
-        self._apply_queue_annotation_ui_state()
         self._update_rating_buttons_ui()
         self.refresh()
 
@@ -2446,12 +2358,10 @@ class StudyQueuePage(QWidget):
         if tool not in {"select_text", "area", "pan", "erase"}:
             return
         self._annotation_tool = tool
-        self._apply_queue_annotation_ui_state()
         self._persist_queue_annotation_state()
 
     def _set_queue_annotation_color(self, color: str) -> None:
         self._annotation_color = color
-        self._apply_queue_annotation_ui_state()
         self._persist_queue_annotation_state()
 
     def _on_queue_opacity_changed(self, value: int) -> None:
