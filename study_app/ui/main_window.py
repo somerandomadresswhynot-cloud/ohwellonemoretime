@@ -854,6 +854,7 @@ class SourceWorkspace(QWidget):
         self.source = self.source_repo.get(self.source_id)
         self.pdf.load_if_needed(self.source.file_path)
         self.pdf.set_fit_mode()
+        self._set_annotation_tool("select_text", from_click=False)
         self._refresh_text_layer_hint()
         self.refresh_tree()
         self.refresh_insights()
@@ -3205,6 +3206,8 @@ class StudyQueuePage(QWidget):
         except Exception:
             target_zoom = float(last_zoom)
         self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
+        self._annotation_tool = "select_text"
+        self._apply_queue_annotation_ui_state()
         self._refresh_queue_outline_tree(self.active_unit.source_id)
         self.pdf.set_page(self.active_unit.start_page)
         self._set_active_queue_outline_by_page(int(self.active_unit.start_page))

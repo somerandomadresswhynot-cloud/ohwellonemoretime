@@ -168,8 +168,8 @@ class PersistentPdfViewer(QWidget):
             self._apply_default_view_mode()
             viewport_layout.addWidget(self._view)
             self._overlay = _AnnotationOverlay(self, self._view.viewport())
-            self._overlay.raise_()
             self._overlay.resize(self._view.viewport().size())
+            self._overlay.hide()
             self._view.viewport().installEventFilter(self)
             root.addWidget(viewport_host)
 
@@ -409,18 +409,21 @@ class PersistentPdfViewer(QWidget):
             self._enable_text_selection_mode()
             self._view.setCursor(Qt.IBeamCursor)
             if self._overlay:
+                self._overlay.hide()
                 self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             return
         if self._interaction_mode == "pan":
             self._disable_text_selection_mode()
             self._view.setCursor(Qt.OpenHandCursor)
             if self._overlay:
+                self._overlay.hide()
                 self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             return
         # Area + erase modes are handled by workspace overlays; keep pointer neutral here.
         self._disable_text_selection_mode()
         self._view.setCursor(Qt.ArrowCursor)
         if self._overlay:
+            self._overlay.show()
             self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, False)
             self._overlay.raise_()
             self._overlay.update()
