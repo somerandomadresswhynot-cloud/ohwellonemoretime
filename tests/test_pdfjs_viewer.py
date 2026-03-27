@@ -53,6 +53,8 @@ class PdfJsViewerSmokeTests(unittest.TestCase):
 
         app = QApplication.instance() or QApplication([])
         viewer = PersistentPdfViewer()
+        self.assertTrue(hasattr(viewer, "prime_path"))
+        viewer.prime_path("")
         viewer.set_annotation_tool('select_text')
         viewer.set_overlay_highlights([
             {'id': 1, 'color': '#2d9cdb', 'opacity': 0.4, 'rects': [{'x': 10, 'y': 10, 'width': 20, 'height': 15}]},

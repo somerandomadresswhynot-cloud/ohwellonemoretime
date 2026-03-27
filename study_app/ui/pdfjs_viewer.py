@@ -194,6 +194,17 @@ class PdfJsViewer(QWidget):
         _ = location
         self.go_to_page(page)
 
+
+    def prime_path(self, path: str) -> None:
+        # Compatibility with the previous QtPdf viewer API.
+        # QWebEngine/PDF.js has no document cache hook here, so we just validate input.
+        if not path:
+            return
+        try:
+            _ = Path(path).exists()
+        except Exception:
+            return
+
     def load_if_needed(self, path: str) -> None:
         if not path:
             return
