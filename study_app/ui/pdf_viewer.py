@@ -129,6 +129,7 @@ class PersistentPdfViewer(QWidget):
         self._last_location = (0.0, 0.0)
         self._selection_menu_handler = None
         self._context_menu_connected = False
+        self._viewport_context_menu_connected = False
         self._page_nav = None
         self._page_changed_connected = False
 
@@ -194,11 +195,17 @@ class PersistentPdfViewer(QWidget):
         if not self._view:
             return
         self._view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._view.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
         if self._context_menu_connected:
             self._safe_disconnect(self._view.customContextMenuRequested, self._on_context_menu)
             self._context_menu_connected = False
+        if self._viewport_context_menu_connected:
+            self._safe_disconnect(self._view.viewport().customContextMenuRequested, self._on_context_menu)
+            self._viewport_context_menu_connected = False
         self._view.customContextMenuRequested.connect(self._on_context_menu)
+        self._view.viewport().customContextMenuRequested.connect(self._on_context_menu)
         self._context_menu_connected = True
+        self._viewport_context_menu_connected = True
 
     def _on_context_menu(self, _pos) -> None:
         if self._selection_menu_handler:
@@ -515,4 +522,7 @@ class PersistentPdfViewer(QWidget):
         if self._context_menu_connected and self._view is not None:
             self._safe_disconnect(self._view.customContextMenuRequested, self._on_context_menu)
             self._context_menu_connected = False
+        if self._viewport_context_menu_connected and self._view is not None:
+            self._safe_disconnect(self._view.viewport().customContextMenuRequested, self._on_context_menu)
+            self._viewport_context_menu_connected = False
         super().closeEvent(event)

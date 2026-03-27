@@ -761,6 +761,7 @@ class SourceWorkspace(QWidget):
     def _on_opacity_changed(self, value: int) -> None:
         self._annotation_opacity = max(0.1, min(1.0, float(value) / 100.0))
         self._persist_annotation_state()
+        self._sync_pdf_overlay_highlights()
 
     def _on_area_rect_created(self, norm_rect: dict, page: int) -> None:
         if self._annotation_tool != "area":
@@ -1533,9 +1534,16 @@ class SourceWorkspace(QWidget):
 
     def open_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         quote = (selected_text or "").strip()
-        if not quote:
-            return
         menu = QMenu(self)
+        copy_action = menu.addAction("Copy selection")
+        if quote:
+            copy_action.triggered.connect(lambda: QApplication.clipboard().setText(quote))
+        else:
+            copy_action.setEnabled(False)
+        menu.addSeparator()
+        if not quote:
+            menu.exec(global_pos)
+            return
         add_today_queue = menu.addAction("Add to today's queue")
         add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(int(page)))
         menu.addSeparator()
@@ -2488,10 +2496,19 @@ class StudyQueuePage(QWidget):
     def open_queue_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         source_id = self._active_source_id()
         quote = (selected_text or "").strip()
-        if not source_id or not quote:
+        if not source_id:
             return
         anchor = self._queue_text_anchor_payload(quote)
         menu = QMenu(self)
+        copy_action = menu.addAction("Copy selection")
+        if quote:
+            copy_action.triggered.connect(lambda: QApplication.clipboard().setText(quote))
+        else:
+            copy_action.setEnabled(False)
+        menu.addSeparator()
+        if not quote:
+            menu.exec(global_pos)
+            return
         quick = menu.addAction(f"Add highlight ({self._annotation_color})")
         quick.triggered.connect(
             lambda: self.highlight_repo.add_text_highlight(
