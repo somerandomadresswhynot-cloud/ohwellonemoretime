@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from PySide6.QtCore import QObject, QUrl, Signal, Slot, Qt
 from PySide6.QtGui import QCursor
@@ -109,6 +111,8 @@ class PdfJsViewer(QWidget):
             self._web = None
             return
 
+        self._ensure_pdfjs_assets()
+
         self._web = QWebEngineView(self)
         self._bridge = PdfJsBridge()
         self._channel = QWebChannel(self._web.page())
@@ -147,6 +151,32 @@ class PdfJsViewer(QWidget):
 
         host_url = QUrl.fromLocalFile(str((Path(__file__).parent / "web" / "pdfjs_host.html").resolve()))
         self._web.load(host_url)
+
+    def _ensure_pdfjs_assets(self) -> None:
+        vendor_build = Path(__file__).parent / "web" / "vendor" / "pdfjs" / "build"
+        third_party_build = Path(__file__).resolve().parents[2] / "third_party" / "pdfjs" / "build"
+
+        def _has_assets(path: Path) -> bool:
+            return (path / "pdf.mjs").exists() and (path / "pdf.worker.mjs").exists()
+
+        if _has_assets(vendor_build) or _has_assets(third_party_build):
+            return
+
+        third_party_build.mkdir(parents=True, exist_ok=True)
+        base = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build"
+        targets = {
+            "pdf.mjs": third_party_build / "pdf.mjs",
+            "pdf.worker.mjs": third_party_build / "pdf.worker.mjs",
+        }
+        for name, target in targets.items():
+            if target.exists():
+                continue
+            try:
+                with urlopen(f"{base}/{name}", timeout=8) as src:
+                    target.write_bytes(src.read())
+            except (URLError, OSError, TimeoutError):
+                # Best-effort runtime bootstrap; host JS still surfaces explicit error if unavailable.
+                return
 
     # compatibility API used by app
     def set_selection_menu_handler(self, handler) -> None:

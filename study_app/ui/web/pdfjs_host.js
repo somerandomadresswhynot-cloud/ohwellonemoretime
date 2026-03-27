@@ -262,14 +262,17 @@ function installHostApi() {
 
 async function loadPdfJsModule() {
   const candidates = [
-    './vendor/pdfjs/build/pdf.mjs',
-    '../../../third_party/pdfjs/build/pdf.mjs',
+    { module: './vendor/pdfjs/build/pdf.mjs', worker: './vendor/pdfjs/build/pdf.worker.mjs' },
+    { module: '../../../third_party/pdfjs/build/pdf.mjs', worker: '../../../third_party/pdfjs/build/pdf.worker.mjs' },
+    { module: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.mjs', worker: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.mjs' },
   ];
   let lastErr = null;
   for (const candidate of candidates) {
     try {
-      const mod = await import(candidate);
-      const workerSrc = new URL(candidate.replace('pdf.mjs', 'pdf.worker.mjs'), import.meta.url).toString();
+      const mod = await import(candidate.module);
+      const workerSrc = candidate.worker.startsWith('http')
+        ? candidate.worker
+        : new URL(candidate.worker, import.meta.url).toString();
       mod.GlobalWorkerOptions.workerSrc = workerSrc;
       return { pdfjsLib: mod, TextLayer: mod.TextLayer };
     } catch (err) {
