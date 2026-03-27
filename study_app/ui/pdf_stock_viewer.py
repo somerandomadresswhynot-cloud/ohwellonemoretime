@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import urlopen
 
 from PySide6.QtCore import QObject, QUrl, Signal, Slot, Qt
 from PySide6.QtGui import QCursor
@@ -54,7 +52,7 @@ def project_page_rect_to_viewport(rect: dict, page_size: tuple[float, float], vi
     }
 
 
-class PdfJsBridge(QObject):
+class PdfStockBridge(QObject):
     selection_changed = Signal(str, dict)
     annotation_created = Signal(dict)
     annotation_deleted = Signal(str)
@@ -63,8 +61,7 @@ class PdfJsBridge(QObject):
 
     @Slot(str, str)
     def emit_selection_changed(self, selected_text: str, page_info_json: str = "{}") -> None:
-        info = self._loads(page_info_json)
-        self.selection_changed.emit(selected_text or "", info)
+        self.selection_changed.emit(selected_text or "", self._loads(page_info_json))
 
     @Slot(str)
     def emit_annotation_created(self, annotation_payload_json: str) -> None:
@@ -90,7 +87,7 @@ class PdfJsBridge(QObject):
             return {}
 
 
-class PdfJsViewer(QWidget):
+class PdfStockViewer(QWidget):
     def __init__(self):
         super().__init__()
         self.current_path = ""
@@ -102,24 +99,24 @@ class PdfJsViewer(QWidget):
         self._highlight_hit_handler = None
         self._tool = "select_text"
         self._pending_annotations: list[dict] = []
+        self._bridge_ready = False
 
         root = QVBoxLayout(self)
         if not QWebEngineView or not QWebChannel:
-            label = QLabel("PDF.js viewer unavailable (QtWebEngine missing).")
+            label = QLabel("PDF.js stock viewer unavailable (QtWebEngine missing).")
             label.setAlignment(Qt.AlignCenter)
             root.addWidget(label)
             self._web = None
             return
 
-        self._ensure_pdfjs_assets()
-
         self._web = QWebEngineView(self)
-        self._bridge = PdfJsBridge()
+        self._bridge = PdfStockBridge()
         self._channel = QWebChannel(self._web.page())
         self._channel.registerObject("pyBridge", self._bridge)
         self._web.page().setWebChannel(self._channel)
         self._web.setContextMenuPolicy(Qt.CustomContextMenu)
         self._web.customContextMenuRequested.connect(self._on_context_menu)
+        self._web.loadFinished.connect(self._on_viewer_loaded)
 
         self._bridge.selection_changed.connect(self._on_selection_changed)
         self._bridge.annotation_created.connect(self._on_annotation_created)
@@ -149,34 +146,43 @@ class PdfJsViewer(QWidget):
         controls.addStretch(1)
         root.addLayout(controls)
 
-        host_url = QUrl.fromLocalFile(str((Path(__file__).parent / "web" / "pdfjs_host.html").resolve()))
-        self._web.load(host_url)
+        viewer_html = Path(__file__).parent / "web" / "vendor" / "pdfjs" / "web" / "viewer.html"
+        if viewer_html.exists():
+            self._web.load(QUrl.fromLocalFile(str(viewer_html.resolve())))
+        else:
+            fallback = "<html><body><h3>Missing vendored PDF.js viewer assets.</h3></body></html>"
+            self._web.setHtml(fallback)
 
-    def _ensure_pdfjs_assets(self) -> None:
-        vendor_build = Path(__file__).parent / "web" / "vendor" / "pdfjs" / "build"
-        third_party_build = Path(__file__).resolve().parents[2] / "third_party" / "pdfjs" / "build"
-
-        def _has_assets(path: Path) -> bool:
-            return (path / "pdf.mjs").exists() and (path / "pdf.worker.mjs").exists()
-
-        if _has_assets(vendor_build) or _has_assets(third_party_build):
+    def _on_viewer_loaded(self, ok: bool) -> None:
+        if not ok or not self._web:
             return
-
-        third_party_build.mkdir(parents=True, exist_ok=True)
-        base = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build"
-        targets = {
-            "pdf.mjs": third_party_build / "pdf.mjs",
-            "pdf.worker.mjs": third_party_build / "pdf.worker.mjs",
-        }
-        for name, target in targets.items():
-            if target.exists():
-                continue
-            try:
-                with urlopen(f"{base}/{name}", timeout=8) as src:
-                    target.write_bytes(src.read())
-            except (URLError, OSError, TimeoutError):
-                # Best-effort runtime bootstrap; host JS still surfaces explicit error if unavailable.
-                return
+        base = Path(__file__).parent / "web"
+        css_url = QUrl.fromLocalFile(str((base / "pdfjs_bridge.css").resolve())).toString()
+        ann_url = QUrl.fromLocalFile(str((base / "pdfjs_annotations.js").resolve())).toString()
+        bridge_url = QUrl.fromLocalFile(str((base / "pdfjs_bridge.js").resolve())).toString()
+        js = """
+            (function(cfg){
+              function loadCss(href){
+                return new Promise((resolve,reject)=>{
+                  const l=document.createElement('link'); l.rel='stylesheet'; l.href=href;
+                  l.onload=()=>resolve(); l.onerror=()=>reject(new Error('css load failed: '+href));
+                  document.head.appendChild(l);
+                });
+              }
+              function loadScript(src){
+                return new Promise((resolve,reject)=>{
+                  const s=document.createElement('script'); s.src=src;
+                  s.onload=()=>resolve(); s.onerror=()=>reject(new Error('script load failed: '+src));
+                  document.head.appendChild(s);
+                });
+              }
+              return loadCss(cfg.css).then(()=>loadScript(cfg.annotations)).then(()=>loadScript(cfg.bridge)).then(()=>{
+                if (window.__ohwInstallBridge) return window.__ohwInstallBridge({pyBridgeObjectName:'pyBridge', timeoutMs: 15000});
+                throw new Error('bridge installer missing');
+              });
+            })(%s);
+        """ % json.dumps({"css": css_url, "annotations": ann_url, "bridge": bridge_url})
+        self._web.page().runJavaScript(js)
 
     # compatibility API used by app
     def set_selection_menu_handler(self, handler) -> None:
@@ -224,16 +230,8 @@ class PdfJsViewer(QWidget):
         _ = location
         self.go_to_page(page)
 
-
     def prime_path(self, path: str) -> None:
-        # Compatibility with the previous QtPdf viewer API.
-        # QWebEngine/PDF.js has no document cache hook here, so we just validate input.
-        if not path:
-            return
-        try:
-            _ = Path(path).exists()
-        except Exception:
-            return
+        _ = path
 
     def load_if_needed(self, path: str) -> None:
         if not path:
@@ -266,7 +264,6 @@ class PdfJsViewer(QWidget):
             })
         self.load_annotations(payload)
 
-    # required bridge API
     def open_pdf(self, file_path: str, initial_page: int | None = None) -> None:
         url = QUrl.fromLocalFile(str(Path(file_path).resolve())).toString()
         self._js_call("openPdf", url, initial_page)
@@ -313,6 +310,7 @@ class PdfJsViewer(QWidget):
         self._last_page = max(1, int(page_number or 1))
 
     def _on_viewer_ready(self, _capabilities: dict) -> None:
+        self._bridge_ready = True
         if self.current_path:
             self.open_pdf(self.current_path)
         if self._tool:
@@ -324,8 +322,8 @@ class PdfJsViewer(QWidget):
         if not self._web:
             return
         payload = json.dumps(args)
-        js = f"window.pdfHost && window.pdfHost.{fn}(...{payload});"
+        js = f"window.ohwPdfHost && window.ohwPdfHost.{fn}(...{payload});"
         self._web.page().runJavaScript(js)
 
 
-PersistentPdfViewer = PdfJsViewer
+PersistentPdfViewer = PdfStockViewer

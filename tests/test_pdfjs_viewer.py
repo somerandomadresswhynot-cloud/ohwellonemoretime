@@ -2,10 +2,10 @@ import os
 import unittest
 
 try:
-    from study_app.ui.pdfjs_viewer import PdfJsBridge, normalize_annotation_rect, project_page_rect_to_viewport
+    from study_app.ui.pdf_stock_viewer import PdfStockBridge, normalize_annotation_rect, project_page_rect_to_viewport
     _IMPORT_ERR = None
 except Exception as exc:
-    PdfJsBridge = None
+    PdfStockBridge = None
     normalize_annotation_rect = None
     project_page_rect_to_viewport = None
     _IMPORT_ERR = exc
@@ -14,7 +14,7 @@ except Exception as exc:
 @unittest.skipIf(_IMPORT_ERR is not None, f'PySide6/pdfjs viewer unavailable: {_IMPORT_ERR}')
 class PdfJsBridgeTests(unittest.TestCase):
     def test_bridge_selected_text_callback(self):
-        bridge = PdfJsBridge()
+        bridge = PdfStockBridge()
         seen = {}
         bridge.selection_changed.connect(lambda txt, info: seen.update({"txt": txt, "info": info}))
         bridge.emit_selection_changed("hello", '{"page_number":4,"page_index":3}')
@@ -47,7 +47,7 @@ class PdfJsViewerSmokeTests(unittest.TestCase):
     def test_widget_loads(self):
         try:
             from PySide6.QtWidgets import QApplication
-            from study_app.ui.pdfjs_viewer import PersistentPdfViewer
+            from study_app.ui.pdf_stock_viewer import PersistentPdfViewer
         except Exception:
             self.skipTest('PySide6 unavailable in this environment')
 

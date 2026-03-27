@@ -8,7 +8,7 @@ class PdfViewerAnnotationSmokeTests(unittest.TestCase):
         try:
             from PySide6.QtCore import Qt
             from PySide6.QtWidgets import QApplication
-            from study_app.ui.pdfjs_viewer import PersistentPdfViewer
+            from study_app.ui.pdf_stock_viewer import PersistentPdfViewer
         except Exception:
             self.skipTest('PySide6 unavailable in this environment')
 

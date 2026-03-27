@@ -1,43 +1,42 @@
-# PDF Viewer Migration (QtPdf ➜ PDF.js + QWebEngine)
+# PDF viewer migration (stock PDF.js generic viewer)
 
-## Why the old viewer was removed
-The prior `QtPdf/QPdfView` path could not reliably deliver native drag text selection + copy and stable annotation placement. The new viewer uses browser-native PDF.js text layers and a page-space annotation model to address those issues from first principles.
+## Why old attempts were removed
 
-## New subsystem
-- `study_app/ui/pdfjs_viewer.py` (PySide shell + `QWebEngineView` + `QWebChannel` bridge)
-- `study_app/ui/web/pdfjs_host.html`
-- `study_app/ui/web/pdfjs_host.js`
-- `study_app/ui/web/pdfjs_host.css`
-- `third_party/pdfjs/` (vendored dependency location)
+The previous custom host (`pdfjs_host.html/js/css`) reimplemented viewer behavior, added bootstrap/network fallback logic, and created integration complexity.
+This migration switches to the official PDF.js generic viewer and keeps app code as a thin adapter.
 
-## Bridge API
-Python -> JS:
-- `open_pdf(file_path, initial_page=None)`
-- `go_to_page(page_number)`
-- `set_zoom(mode_or_value)`
-- `set_tool(tool)`
-- `load_annotations(annotation_payload)`
-- `request_selected_text()`
-- `copy_selected_text()`
-- `clear_selection()`
+## New architecture
 
-JS -> Python:
-- `selection_changed(selected_text, page_info)`
-- `annotation_created(annotation_payload)`
-- `annotation_deleted(annotation_id)`
-- `page_changed(page_number)`
-- `viewer_ready(capabilities)`
+- `study_app/ui/pdf_stock_viewer.py`
+  - PySide6 `QWebEngineView` wrapper.
+  - Loads vendored `web/viewer.html`.
+  - Sets up `QWebChannel` and forwards events.
+- `study_app/ui/web/pdfjs_bridge.js`
+  - Thin stock-viewer bridge (`window.ohwPdfHost`) for Python->JS operations.
+- `study_app/ui/web/pdfjs_annotations.js`
+  - App-owned page-space area annotations + erase mode.
+- `study_app/ui/web/pdfjs_bridge.css`
+  - Minimal annotation-layer styling.
+
+## Required vendored assets
+
+Place official PDF.js generic build assets under package tree (no runtime downloads):
+
+- `study_app/ui/web/vendor/pdfjs/web/viewer.html`
+- `study_app/ui/web/vendor/pdfjs/web/viewer.js`
+- `study_app/ui/web/vendor/pdfjs/build/pdf.mjs`
+- `study_app/ui/web/vendor/pdfjs/build/pdf.worker.mjs`
+- plus other upstream files referenced by `viewer.html` (`viewer.css`, locale/cmaps/images, etc.)
 
 ## Manual verification checklist
-1. Open a text-based PDF source.
-2. Confirm default tool is **Select Text**.
-3. Drag-select text directly in viewer and copy (Ctrl/Cmd+C).
-4. Paste into pre-recall note.
-5. Switch to **Area**, drag rectangle annotation.
-6. Zoom in/out and scroll; annotation remains aligned.
-7. Switch to **Erase**, click annotation; it is deleted.
-8. Add post-recall note and paste copied text.
-9. Reopen same source/unit; annotation persists and remains aligned.
 
-## Dependency note
-This migration expects PDF.js assets under `third_party/pdfjs/build/` (not fetched at runtime).
+1. Launch app.
+2. Open source workspace.
+3. Open study queue unit.
+4. Verify PDF opens in stock viewer UI.
+5. Drag-select visible text and copy.
+6. Paste selection into pre/post note.
+7. Switch to Area mode and draw annotation.
+8. Zoom and scroll; annotation stays aligned.
+9. Switch to Erase mode and delete annotation.
+10. Reopen same source/unit and confirm annotations persist.

@@ -49,7 +49,7 @@ from study_app.services.queue_drift import should_rebuild_for_estimate_drift
 from study_app.services.runtime_estimator import RuntimeEstimationModel, build_runtime_estimation_model
 from study_app.domain.models import iso_utc, now_utc, parse_iso_to_utc
 from study_app.ui.dialogs import HintMarkdownDialog, OutlineEditorDialog, RecallNoteDialog, ReviewHistoryDialog, SourceMetadataDialog
-from study_app.ui.pdfjs_viewer import PersistentPdfViewer
+from study_app.ui.pdf_stock_viewer import PersistentPdfViewer
 from study_app.services.day_window import day_window_for_offset, is_valid_gmt_offset, normalized_gmt_offset, parse_gmt_offset
 from study_app.services.time_format import format_minutes_whole
 

@@ -1,10 +1,14 @@
-# Vendored PDF.js assets
+# Vendored stock PDF.js generic viewer
 
-Place upstream PDF.js distribution files here for packaged/offline builds:
+This directory is reserved for upstream PDF.js generic viewer assets copied into package scope.
 
+Required minimum files:
+
+- `web/viewer.html`
+- `web/viewer.js`
 - `build/pdf.mjs`
 - `build/pdf.worker.mjs`
 
-Source: https://github.com/mozilla/pdf.js (Apache-2.0).
+Copy all additional upstream assets referenced by `viewer.html` (for example `viewer.css`, locale/cmaps/images) so the viewer works offline.
 
-When these files are absent, the viewer falls back to `third_party/pdfjs/build/*` in a source checkout.
+License: Apache-2.0 (Mozilla PDF.js). Keep upstream LICENSE/NOTICE files with the vendored copy.
