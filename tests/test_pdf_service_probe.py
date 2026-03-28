@@ -41,6 +41,33 @@ class PdfServiceProbeTests(unittest.TestCase):
         self.assertEqual(calls['n'], 1)
         self.assertEqual(a, b)
 
+    def test_extract_page_range_text_normalizes_breaks(self):
+        svc = PdfService()
+
+        class _Reader:
+            def __init__(self, _path: str):
+                self.pages = [
+                    _FakePage("Hello wor-\nld\n\nNext line"),
+                    _FakePage("second page\nstarts"),
+                ]
+
+        with patch('study_app.pdf.pdf_service.PdfReader', _Reader):
+            out = svc.extract_page_range_text('/tmp/a.pdf', 1, 2)
+        self.assertIn("Hello world", out)
+        self.assertIn("Next line", out)
+        self.assertIn("second page starts", out)
+
+    def test_extract_page_text_single_page(self):
+        svc = PdfService()
+
+        class _Reader:
+            def __init__(self, _path: str):
+                self.pages = [_FakePage("one"), _FakePage("two")]
+
+        with patch('study_app.pdf.pdf_service.PdfReader', _Reader):
+            out = svc.extract_page_text('/tmp/a.pdf', 2)
+        self.assertEqual(out, "two")
+
 
 if __name__ == '__main__':
     unittest.main()

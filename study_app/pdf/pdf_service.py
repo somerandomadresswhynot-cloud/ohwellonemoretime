@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 try:
@@ -94,3 +95,51 @@ class PdfService:
         if isinstance(outline, list):
             walk(outline, 1)
         return out
+
+    def extract_page_text(self, path: str, page_number: int) -> str:
+        return self.extract_page_range_text(path, page_number, page_number)
+
+    def extract_page_range_text(self, path: str, start_page: int, end_page: int) -> str:
+        if PdfReader is None:
+            raise RuntimeError("pypdf is required for text extraction but is not installed")
+        reader = PdfReader(path)
+        total_pages = len(reader.pages)
+        if total_pages <= 0:
+            return ""
+        start = max(1, min(total_pages, int(start_page)))
+        end = max(start, min(total_pages, int(end_page)))
+        chunks: list[str] = []
+        for idx in range(start - 1, end):
+            raw = reader.pages[idx].extract_text() or ""
+            clean = self._normalize_extracted_text(raw)
+            if clean:
+                chunks.append(clean)
+        return "\n\n".join(chunks).strip()
+
+    def _normalize_extracted_text(self, text: str) -> str:
+        if not text:
+            return ""
+        out = text.replace("\r\n", "\n").replace("\r", "\n")
+        out = out.replace("\u00ad\n", "").replace("\u00ad", "")
+        out = re.sub(r"(?<=\w)-\n(?=\w)", "", out)
+        out = re.sub(r"[ \t]+\n", "\n", out)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        lines = out.split("\n")
+        merged: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                merged.append("")
+                continue
+            if not merged or not merged[-1]:
+                merged.append(stripped)
+                continue
+            prev = merged[-1]
+            should_join = (
+                prev and not prev.endswith((".", "!", "?", ":", ";"))
+                and stripped and stripped[0].islower()
+            )
+            merged[-1] = f"{prev} {stripped}" if should_join else f"{prev}\n{stripped}"
+        normalized = "\n".join(merged)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()

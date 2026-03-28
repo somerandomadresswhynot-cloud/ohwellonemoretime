@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QObject, QTimer, Qt
-from PySide6.QtGui import QClipboard, QCursor, QKeySequence
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
 try:
@@ -25,9 +25,6 @@ class EmbeddedPdfViewer(QWidget):
         self._pending_page: int | None = None
         self._pending_page_attempts = 0
         self._selection_menu_handler: Callable | None = None
-        self._last_copied_text = ""
-        self._copy_from_viewer_pending = False
-        self._clipboard_sync_in_progress = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -47,10 +44,6 @@ class EmbeddedPdfViewer(QWidget):
         self._viewer.setFocusPolicy(Qt.StrongFocus)
         self._viewer.setContextMenuPolicy(Qt.CustomContextMenu)
         self._viewer.customContextMenuRequested.connect(self._on_context_menu)
-        self._viewer.installEventFilter(self)
-        clipboard = QApplication.clipboard()
-        if clipboard is not None:
-            clipboard.dataChanged.connect(self._on_clipboard_changed)
 
         root.addWidget(self._viewer, 1)
 
@@ -87,46 +80,9 @@ class EmbeddedPdfViewer(QWidget):
 
     def selected_text(self) -> str:
         try:
-            clipboard_text = QApplication.clipboard().text() or ""
-            if clipboard_text:
-                self._last_copied_text = clipboard_text
-            return (clipboard_text or self._last_copied_text).strip()
+            return (QApplication.clipboard().text() or "").strip()
         except Exception:
             return ""
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming convention
-        if watched is self._viewer and event.type() == QEvent.KeyPress:
-            if event.matches(QKeySequence.Copy):
-                self._copy_from_viewer_pending = True
-                QTimer.singleShot(1200, self._clear_copy_pending_flag)
-        return super().eventFilter(watched, event)
-
-    def _clear_copy_pending_flag(self) -> None:
-        self._copy_from_viewer_pending = False
-
-    def _on_clipboard_changed(self) -> None:
-        if not self._viewer or self._clipboard_sync_in_progress:
-            return
-        if not (self._viewer.hasFocus() or self._copy_from_viewer_pending):
-            return
-        clipboard = QApplication.clipboard()
-        if clipboard is None:
-            return
-        text = clipboard.text() or ""
-        if not text:
-            return
-        self._last_copied_text = text
-        # Materialize copied text immediately in app-owned memory so very long selections
-        # are stable even if the embedded viewer virtualizes text layers while scrolling.
-        try:
-            self._clipboard_sync_in_progress = True
-            clipboard.setText(text, QClipboard.Clipboard)
-            try:
-                clipboard.setText(text, QClipboard.Selection)
-            except Exception:
-                pass
-        finally:
-            self._clipboard_sync_in_progress = False
 
     def prime_path(self, path: str) -> None:
         # Intentionally no-op for PDF.js viewer backend.
