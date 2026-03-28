@@ -537,11 +537,10 @@ class SourceWorkspace(QWidget):
         self.settings_repo = settings_repo
         self.pdf_service = pdf_service
         self._annotation_palette = [
-            ("Blue", "#2d9cdb"),
-            ("Purple", "#8b5cf6"),
-            ("Green", "#27ae60"),
-            ("Yellow", "#f1c40f"),
-            ("Red", "#e74c3c"),
+            ("Highlight yellow", "#f1c40f"),
+            ("Highlight green", "#27ae60"),
+            ("Highlight blue", "#2d9cdb"),
+            ("Highlight pink", "#ff4fa3"),
         ]
         self._annotation_tool = self.settings_repo.get_ui_state("pdf_annotation_tool", "select_text") or "select_text"
         self._annotation_color = self.settings_repo.get_ui_state("pdf_annotation_color", "#2d9cdb") or "#2d9cdb"
@@ -801,39 +800,25 @@ class SourceWorkspace(QWidget):
         return int(resolved) if resolved else page
 
     def _sync_pdf_overlay_highlights(self) -> None:
-        page = int(self.pdf.view_state().get("page", 1))
         overlays: list[dict] = []
-        text_marker_index = 0
         for h in self.highlight_repo.list_source_highlights(self.source_id):
-            anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
-            if int(h["page"]) != page:
+            try:
+                rects = json.loads(h["rects_json"] or "[]")
+            except Exception:
+                rects = []
+            if not isinstance(rects, list) or not rects:
                 continue
-            if anchor_type == "rect":
-                rects_raw = h["rects_json"] or "[]"
-                try:
-                    rects = json.loads(rects_raw)
-                except Exception:
-                    rects = []
-                if not isinstance(rects, list):
-                    rects = []
-                overlays.append({
+            overlays.append(
+                {
                     "id": int(h["id"]),
-                    "color": h["color"] or "#2d9cdb",
+                    "page_index": max(0, int(h["page_index"] if "page_index" in h.keys() else int(h["page"]) - 1)),
+                    "color_value": h["color"] or "#fff59d",
+                    "color_name": h["label"] or "",
                     "opacity": float(h["opacity"] or 0.35),
                     "rects": [r for r in rects if isinstance(r, dict)],
-                })
-                continue
-
-            # Graceful fallback for text anchors when glyph-quad geometry is unavailable.
-            marker_y = 0.03 + (text_marker_index * 0.035)
-            text_marker_index += 1
-            overlays.append({
-                "id": int(h["id"]),
-                "color": h["color"] or "#2d9cdb",
-                "opacity": min(0.9, max(0.2, float(h["opacity"] or 0.35))),
-                "rects": [{"x": 0.02, "y": min(0.95, marker_y), "w": 0.22, "h": 0.02}],
-            })
-        self.pdf.set_overlay_highlights(overlays)
+                }
+            )
+        self.pdf.set_text_highlights(overlays)
 
     def _on_doc_progress_page_requested(self, page: int) -> None:
         self.pdf.set_page(int(page))
@@ -1544,40 +1529,65 @@ class SourceWorkspace(QWidget):
     def _color_actions(self):
         return self._annotation_palette
 
-    def open_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
-        quote = (selected_text or "").strip()
+    def open_selection_menu(self, global_pos, selected_text: str, page: int, selection_details: dict | None = None) -> None:
+        selection_details = selection_details or {}
+        quote = (selection_details.get("selected_text") or selected_text or "").strip()
         if not quote:
             return
+        selected_page = int(selection_details.get("page") or page or 1)
         menu = QMenu(self)
         add_today_queue = menu.addAction("Add to today's queue")
-        add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(int(page)))
+        add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(selected_page))
         menu.addSeparator()
         quick_add = menu.addAction(f"Add highlight ({self._annotation_color})")
-        quick_add.triggered.connect(lambda: self._create_highlight(page, quote, self._annotation_color))
+        quick_add.triggered.connect(lambda: self._create_highlight(selected_page, quote, self._annotation_color, selection_details))
         add_menu = menu.addMenu("Highlight selection")
         for label, color in self._color_actions():
             act = add_menu.addAction(label)
-            act.triggered.connect(lambda _=False, c=color: self._create_highlight(page, quote, c))
+            act.triggered.connect(lambda _=False, c=color: self._create_highlight(selected_page, quote, c, selection_details))
         menu.addSeparator()
-        existing = self.highlight_repo.find_exact(self.source_id, page, quote)
+        existing = self.highlight_repo.find_exact(self.source_id, selected_page, quote)
         if existing:
             remove_act = menu.addAction("Remove matching highlight")
             remove_act.triggered.connect(lambda: self._remove_highlight(int(existing["id"])))
         menu.exec(global_pos)
 
-    def _create_highlight(self, page: int, quote: str, color: str) -> None:
+    def _create_highlight(self, page: int, quote: str, color: str, selection_details: dict | None = None) -> None:
         anchor = self._build_text_anchor_payload(quote)
-        self.highlight_repo.add_text_highlight(
-            self.source_id,
-            page,
-            quote,
-            "",
-            color,
-            text_prefix=anchor["text_prefix"],
-            text_exact=anchor["text_exact"],
-            text_suffix=anchor["text_suffix"],
-            opacity=self._annotation_opacity,
-        )
+        rects_by_page = []
+        if isinstance(selection_details, dict):
+            rects_by_page = selection_details.get("rects_by_page") or []
+        persisted = False
+        for page_entry in rects_by_page:
+            rects = page_entry.get("rects") if isinstance(page_entry, dict) else []
+            if not isinstance(rects, list) or not rects:
+                continue
+            highlight_page = int(page_entry.get("page") or page or 1)
+            self.highlight_repo.add_text_highlight(
+                source_id=self.source_id,
+                page=highlight_page,
+                quote_text=quote,
+                note="",
+                color=color,
+                text_prefix=anchor["text_prefix"],
+                text_exact=anchor["text_exact"],
+                text_suffix=anchor["text_suffix"],
+                opacity=self._annotation_opacity,
+                rects=[r for r in rects if isinstance(r, dict)],
+            )
+            persisted = True
+        if not persisted:
+            self.highlight_repo.add_text_highlight(
+                self.source_id,
+                page,
+                quote,
+                "",
+                color,
+                text_prefix=anchor["text_prefix"],
+                text_exact=anchor["text_exact"],
+                text_suffix=anchor["text_suffix"],
+                opacity=self._annotation_opacity,
+            )
         self.refresh_highlights()
 
     def _remove_highlight(self, highlight_id: int) -> None:
@@ -1868,11 +1878,10 @@ class StudyQueuePage(QWidget):
         self._queue_last_pdf_page = 1
         self._queue_recalculation_pending = False
         self._annotation_palette = [
-            ("Blue", "#2d9cdb"),
-            ("Purple", "#8b5cf6"),
-            ("Green", "#27ae60"),
-            ("Yellow", "#f1c40f"),
-            ("Red", "#e74c3c"),
+            ("Highlight yellow", "#f1c40f"),
+            ("Highlight green", "#27ae60"),
+            ("Highlight blue", "#2d9cdb"),
+            ("Highlight pink", "#ff4fa3"),
         ]
         self._annotation_tool = self.settings_repo.get_ui_state("pdf_annotation_tool", "select_text") or "select_text"
         self._annotation_color = self.settings_repo.get_ui_state("pdf_annotation_color", "#2d9cdb") or "#2d9cdb"
@@ -2498,34 +2507,74 @@ class StudyQueuePage(QWidget):
         else:
             self.queue_text_layer_hint.setText(f"Text layer: likely image-only (0/{sampled})")
 
-    def open_queue_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
+    def open_queue_selection_menu(self, global_pos, selected_text: str, page: int, selection_details: dict | None = None) -> None:
         source_id = self._active_source_id()
-        quote = (selected_text or "").strip()
+        selection_details = selection_details or {}
+        quote = (selection_details.get("selected_text") or selected_text or "").strip()
         if not source_id or not quote:
             return
-        anchor = self._queue_text_anchor_payload(quote)
+        selected_page = int(selection_details.get("page") or page or 1)
         menu = QMenu(self)
         quick = menu.addAction(f"Add highlight ({self._annotation_color})")
         quick.triggered.connect(
-            lambda: self.highlight_repo.add_text_highlight(
-                source_id,
-                page,
-                quote,
-                "",
-                self._annotation_color,
-                text_prefix=anchor["text_prefix"],
-                text_exact=anchor["text_exact"],
-                text_suffix=anchor["text_suffix"],
-                opacity=self._annotation_opacity,
+            lambda: self._create_queue_text_highlight(
+                source_id, selected_page, quote, self._annotation_color, selection_details
             )
         )
+        add_menu = menu.addMenu("Highlight selection")
+        for label, color in self._annotation_palette:
+            act = add_menu.addAction(label)
+            act.triggered.connect(
+                lambda _=False, c=color: self._create_queue_text_highlight(
+                    source_id, selected_page, quote, c, selection_details
+                )
+            )
         menu.addSeparator()
-        existing = self.highlight_repo.find_exact(source_id, page, quote)
+        existing = self.highlight_repo.find_exact(source_id, selected_page, quote)
         if existing:
             remove = menu.addAction("Remove matching highlight")
             remove.triggered.connect(lambda: self.highlight_repo.delete_highlight(int(existing["id"])))
         menu.exec(global_pos)
         self._sync_queue_pdf_overlays()
+
+    def _create_queue_text_highlight(
+        self, source_id: int, page: int, quote: str, color: str, selection_details: dict | None = None
+    ) -> None:
+        anchor = self._queue_text_anchor_payload(quote)
+        rects_by_page = []
+        if isinstance(selection_details, dict):
+            rects_by_page = selection_details.get("rects_by_page") or []
+        persisted = False
+        for page_entry in rects_by_page:
+            rects = page_entry.get("rects") if isinstance(page_entry, dict) else []
+            if not isinstance(rects, list) or not rects:
+                continue
+            highlight_page = int(page_entry.get("page") or page or 1)
+            self.highlight_repo.add_text_highlight(
+                source_id=source_id,
+                page=highlight_page,
+                quote_text=quote,
+                note="",
+                color=color,
+                text_prefix=anchor["text_prefix"],
+                text_exact=anchor["text_exact"],
+                text_suffix=anchor["text_suffix"],
+                opacity=self._annotation_opacity,
+                rects=[r for r in rects if isinstance(r, dict)],
+            )
+            persisted = True
+        if not persisted:
+            self.highlight_repo.add_text_highlight(
+                source_id,
+                page,
+                quote,
+                "",
+                color,
+                text_prefix=anchor["text_prefix"],
+                text_exact=anchor["text_exact"],
+                text_suffix=anchor["text_suffix"],
+                opacity=self._annotation_opacity,
+            )
 
     def _on_queue_area_rect_created(self, norm_rect: dict, page: int) -> None:
         source_id = self._active_source_id()
@@ -2549,36 +2598,27 @@ class StudyQueuePage(QWidget):
     def _sync_queue_pdf_overlays(self) -> None:
         source_id = self._active_source_id()
         if not source_id:
-            self.pdf.set_overlay_highlights([])
+            self.pdf.set_text_highlights([])
             return
-        page = int(self.pdf.view_state().get("page", 1))
         overlays: list[dict] = []
-        text_marker_index = 0
         for h in self.highlight_repo.list_source_highlights(source_id):
-            if int(h["page"]) != page:
+            try:
+                rects = json.loads(h["rects_json"] or "[]")
+            except Exception:
+                rects = []
+            if not isinstance(rects, list) or not rects:
                 continue
-            anchor_type = str(h["anchor_type"]) if "anchor_type" in h.keys() else "text"
-            if anchor_type == "rect":
-                try:
-                    rects = json.loads(h["rects_json"] or "[]")
-                except Exception:
-                    rects = []
-                overlays.append({
+            overlays.append(
+                {
                     "id": int(h["id"]),
-                    "color": h["color"] or "#2d9cdb",
+                    "page_index": max(0, int(h["page_index"] if "page_index" in h.keys() else int(h["page"]) - 1)),
+                    "color_value": h["color"] or "#fff59d",
+                    "color_name": h["label"] or "",
                     "opacity": float(h["opacity"] or 0.35),
                     "rects": [r for r in rects if isinstance(r, dict)],
-                })
-                continue
-            marker_y = 0.03 + (text_marker_index * 0.035)
-            text_marker_index += 1
-            overlays.append({
-                "id": int(h["id"]),
-                "color": h["color"] or "#2d9cdb",
-                "opacity": min(0.9, max(0.2, float(h["opacity"] or 0.35))),
-                "rects": [{"x": 0.02, "y": min(0.95, marker_y), "w": 0.22, "h": 0.02}],
-            })
-        self.pdf.set_overlay_highlights(overlays)
+                }
+            )
+        self.pdf.set_text_highlights(overlays)
 
     def _refresh_queue_outline_tree(self, source_id: int) -> None:
         rows = self.review_repo.db.conn.execute(
@@ -2797,7 +2837,7 @@ class StudyQueuePage(QWidget):
             self.active_unit = None
             self.title.setText("No unit selected")
             self.queue_doc_progress.set_data([], total_pages=1, current_page=1)
-            self.pdf.set_overlay_highlights([])
+            self.pdf.set_text_highlights([])
 
     def eventFilter(self, obj, event):
         if obj is self.list.viewport() and event.type() == QEvent.Resize:

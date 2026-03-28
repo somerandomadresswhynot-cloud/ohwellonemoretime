@@ -939,11 +939,13 @@ class HighlightRepo:
         text_suffix: str = "",
         opacity: float = 0.35,
         label: str = "",
+        rects: list[dict] | None = None,
     ) -> int:
         normalized_page = self._normalize_page(page)
         unit_id = self._resolve_unit_id(source_id, normalized_page)
         normalized_exact = self._normalize_text_anchor(text_exact or quote_text or "")
         normalized_quote = self._normalize_text_anchor(quote_text or "")
+        normalized_rects = [r for r in (rects or []) if isinstance(r, dict)]
         now_iso = utcnow_iso()
         cur = self.db.conn.execute(
             """INSERT INTO highlights(
@@ -959,7 +961,7 @@ class HighlightRepo:
                 text_prefix,
                 normalized_exact,
                 text_suffix,
-                "[]",
+                json.dumps(normalized_rects, separators=(",", ":")),
                 self._normalize_opacity(opacity),
                 label,
                 note,
@@ -1016,7 +1018,7 @@ class HighlightRepo:
         normalized_text = self._normalize_text_anchor(quote_text)
         return self.db.conn.execute(
             """SELECT * FROM highlights
-            WHERE source_id=? AND page=? AND anchor_type='text' AND (text_exact=? OR quote_text=?)
+            WHERE source_id=? AND page=? AND (text_exact=? OR quote_text=?)
             ORDER BY created_at DESC LIMIT 1""",
             (source_id, self._normalize_page(page), normalized_text, normalized_text),
         ).fetchone()
