@@ -21,7 +21,7 @@ class EmbeddedPdfViewer(QWidget):
         self.current_path = ""
         self._viewer = None
         self._last_page = 1
-        self._default_zoom_pct = 115
+        self._default_zoom_pct = self._compute_default_zoom_pct()
         self._last_zoom: int | str = self._default_zoom_pct
         self._selection_menu_handler: Callable | None = None
 
@@ -65,6 +65,18 @@ class EmbeddedPdfViewer(QWidget):
             controls.addWidget(w)
         controls.addStretch()
         root.addLayout(controls)
+
+    def _compute_default_zoom_pct(self) -> int:
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return 125
+        try:
+            dpr = float(screen.devicePixelRatio())
+        except Exception:
+            dpr = 1.0
+        if dpr >= 1.5:
+            return 115
+        return 125
 
     def _on_context_menu(self, _pos) -> None:
         if not self._selection_menu_handler:
