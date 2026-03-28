@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 try:
@@ -20,7 +22,12 @@ def run() -> None:
     if configure_global_stability:
         configure_global_stability()
 
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+    app_font = QFont("Segoe UI", 10)
+    app_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    app_font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    app.setFont(app_font)
     app.setStyleSheet(DARK_QSS)
 
     db = Database("study_app.db")

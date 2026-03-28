@@ -21,7 +21,8 @@ class EmbeddedPdfViewer(QWidget):
         self.current_path = ""
         self._viewer = None
         self._last_page = 1
-        self._last_zoom: int | str = "page-width"
+        self._default_zoom_pct = 115
+        self._last_zoom: int | str = self._default_zoom_pct
         self._selection_menu_handler: Callable | None = None
 
         root = QVBoxLayout(self)
@@ -50,7 +51,7 @@ class EmbeddedPdfViewer(QWidget):
         self.zoom_in_btn = QPushButton("+")
         self.zoom_pct = QSpinBox()
         self.zoom_pct.setRange(25, 400)
-        self.zoom_pct.setValue(100)
+        self.zoom_pct.setValue(self._default_zoom_pct)
         self.fit_width_btn = QPushButton("Fit Width")
         self.fit_page_btn = QPushButton("Fit Page")
 
@@ -116,7 +117,7 @@ class EmbeddedPdfViewer(QWidget):
             return
         self.current_path = path
         self._last_page = 1
-        self._last_zoom = "page-width"
+        self._last_zoom = self._default_zoom_pct
         self._viewer.load_pdf(path, page=1, zoom=self._last_zoom)
 
     def set_fit_mode(self) -> None:
