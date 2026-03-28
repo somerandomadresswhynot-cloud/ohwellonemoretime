@@ -6,17 +6,6 @@ import sys
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-try:
-    from pdfjs_viewer import configure_global_stability
-except Exception:  # pragma: no cover - optional runtime integration
-    configure_global_stability = None
-
-from study_app.persistence.database import Database
-from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
-from study_app.pdf.pdf_service import PdfService
-from study_app.ui.main_window import MainWindow
-from study_app.ui.theme import DARK_QSS
-
 
 def _configure_windows_webengine_fallback() -> None:
     if not sys.platform.startswith("win"):
@@ -31,6 +20,17 @@ def _configure_windows_webengine_fallback() -> None:
 
 def run() -> None:
     _configure_windows_webengine_fallback()
+
+    try:
+        from pdfjs_viewer import configure_global_stability
+    except Exception:  # pragma: no cover - optional runtime integration
+        configure_global_stability = None
+
+    from study_app.persistence.database import Database
+    from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo
+    from study_app.pdf.pdf_service import PdfService
+    from study_app.ui.main_window import MainWindow
+    from study_app.ui.theme import DARK_QSS
 
     if configure_global_stability:
         configure_global_stability()
