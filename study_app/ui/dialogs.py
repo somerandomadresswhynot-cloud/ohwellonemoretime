@@ -349,7 +349,15 @@ def _hint_editor_html() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
   <style>
-    body { margin:0; background:#0b1530; color:#dbe4ef; font-family:Inter,Segoe UI,Arial,sans-serif; }
+    body {
+      margin:0;
+      background:#0b1530;
+      color:#dbe4ef;
+      font-family:Inter,Segoe UI,Arial,sans-serif;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
     .editor-toolbar { background:#0d1a36; border:1px solid #25406f; border-bottom:0; padding:6px 6px; }
     .editor-toolbar a { color:#dbe8ff !important; }
     .editor-toolbar i { color:#dbe8ff !important; }

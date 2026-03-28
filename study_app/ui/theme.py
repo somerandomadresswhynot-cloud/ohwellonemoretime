@@ -1,5 +1,5 @@
 DARK_QSS = """
-QWidget { background:#121525; color:#dbe4ff; font-size:12px; }
+QWidget { background:#121525; color:#dbe4ff; font-family:"Segoe UI","Inter","Arial",sans-serif; font-size:12px; }
 QFrame.panel { background:#1a1f35; border:1px solid #2a3150; border-radius:6px; }
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QListWidget, QTreeWidget, QTableWidget {
     background:#11162b; border:1px solid #2c3558; border-radius:4px; padding:4px;

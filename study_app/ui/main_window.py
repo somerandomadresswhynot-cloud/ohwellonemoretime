@@ -1949,7 +1949,7 @@ class StudyQueuePage(QWidget):
         self.review_history_list.setMaximumHeight(130)
         self.review_history_list.setMinimumWidth(270)
         _enable_smooth_scroll(self.review_history_list)
-        self.review_history_list.setStyleSheet("QListWidget{font-size:11px;}")
+        self.review_history_list.setStyleSheet("QListWidget{font-size:12px;}")
         self.full_history_btn = QPushButton("View Full History")
         self.full_history_btn.clicked.connect(self.open_history)
 
@@ -2877,9 +2877,9 @@ class StudyQueuePage(QWidget):
         tile.setStyleSheet(
             f"#queueTile {{ border: 1px solid rgb({border[0]}, {border[1]}, {border[2]}); border-radius: 10px; padding: 8px; }}"
             "QLabel#tileTitle { font-size: 15px; font-weight: 600; color: #f2f5f7; }"
-            "QLabel#tileMeta { color: #9aa7b2; font-size: 11px; }"
-            "QLabel#badge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d8e1e8; background: #2b3440; }"
-            "QLabel#progressBadge { border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #332400; background: #d8b65a; }"
+            "QLabel#tileMeta { color: #9aa7b2; font-size: 12px; }"
+            "QLabel#badge { border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #d8e1e8; background: #2b3440; }"
+            "QLabel#progressBadge { border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #332400; background: #d8b65a; }"
         )
 
     def _build_queue_tile(
@@ -2920,7 +2920,7 @@ class StudyQueuePage(QWidget):
         mins.setObjectName("badge")
         if retention is None:
             retention_lbl = QLabel("new")
-            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d9e8ff; background: #22345a;")
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #d9e8ff; background: #22345a;")
             ret_pct = None
         else:
             ret_pct = max(1, min(99, int(round(retention * 100))))
@@ -2929,18 +2929,18 @@ class StudyQueuePage(QWidget):
         if ret_pct is None:
             pass
         elif ret_pct < 35:
-            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffd7d7; background: #5a2222;")
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #ffd7d7; background: #5a2222;")
         elif ret_pct < 60:
-            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffeecf; background: #5a4a22;")
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #ffeecf; background: #5a4a22;")
         else:
-            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d2f2dc; background: #1f4d32;")
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #d2f2dc; background: #1f4d32;")
 
         for w in [pages, mins, retention_lbl]:
             badge_row.addWidget(w)
         if is_done:
             done_badge = QLabel("Done")
             done_badge.setObjectName("progressBadge")
-            done_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #f4eddc; background: #5f5672;")
+            done_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #f4eddc; background: #5f5672;")
             badge_row.addWidget(done_badge)
         if progression_reason:
             label_map = {
@@ -2951,9 +2951,9 @@ class StudyQueuePage(QWidget):
             progress_badge = QLabel(progress_text)
             progress_badge.setObjectName("progressBadge")
             if progression_reason == "manual":
-                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #eef2ff; background: #3b2f6b;")
+                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #eef2ff; background: #3b2f6b;")
             elif progression_reason == "low_retention":
-                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #fff2df; background: #6a4a1e;")
+                progress_badge.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 11px; color: #fff2df; background: #6a4a1e;")
             badge_row.addWidget(progress_badge)
         badge_row.addStretch()
 
@@ -3144,7 +3144,7 @@ class StudyQueuePage(QWidget):
         left = QFrame(); left.setFrameShape(QFrame.HLine); left.setStyleSheet("color:#5d6880;")
         right = QFrame(); right.setFrameShape(QFrame.HLine); right.setStyleSheet("color:#5d6880;")
         label = QLabel("Done")
-        label.setStyleSheet("color:#d6c89b; font-size:11px; font-weight:600;")
+        label.setStyleSheet("color:#d6c89b; font-size:12px; font-weight:600;")
         line_l.addWidget(left, 1)
         line_l.addWidget(label, 0)
         line_l.addWidget(right, 6)
