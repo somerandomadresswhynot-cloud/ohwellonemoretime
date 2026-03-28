@@ -2707,7 +2707,9 @@ class StudyQueuePage(QWidget):
         self._update_rating_buttons_ui()
         self._refresh_note_previews()
         zoom = float(draft.get("pdf_zoom", self.settings_repo.get_ui_state("queue_pdf_zoom", "1.0") or "1.0"))
-        self.pdf.set_zoom(max(0.25, min(4.0, zoom)))
+        target_zoom = max(0.25, min(4.0, zoom))
+        if abs(float(self.pdf.zoom_factor()) - target_zoom) > 0.001:
+            self.pdf.set_zoom(target_zoom)
         self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
 
     def refresh(self):
@@ -3179,7 +3181,7 @@ class StudyQueuePage(QWidget):
             if path:
                 self.source_path_cache[self.active_unit.source_id] = path
         last_zoom = self.pdf.zoom_factor()
-        loaded_new_doc = self.pdf.load_if_needed(path)
+        self.pdf.load_if_needed(path)
         self.pdf.set_multi_page_mode()
         self._refresh_queue_text_layer_hint(path or "")
         zoom_setting = self.settings_repo.get_ui_state("queue_pdf_zoom", "")
@@ -3188,7 +3190,7 @@ class StudyQueuePage(QWidget):
         except Exception:
             target_zoom = float(last_zoom)
         target_zoom = max(0.25, min(4.0, target_zoom))
-        if loaded_new_doc or abs(float(self.pdf.zoom_factor()) - target_zoom) > 0.001:
+        if abs(float(self.pdf.zoom_factor()) - target_zoom) > 0.001:
             self.pdf.set_zoom(target_zoom)
         self._refresh_queue_outline_tree(self.active_unit.source_id)
         self.pdf.set_page(self.active_unit.start_page)

@@ -23,6 +23,7 @@ class EmbeddedPdfViewer(QWidget):
         self._last_page = 1
         self._last_zoom: int | str = "page-width"
         self._pending_page: int | None = None
+        self._pending_page_attempts = 0
         self._selection_menu_handler: Callable | None = None
 
         root = QVBoxLayout(self)
@@ -119,6 +120,7 @@ class EmbeddedPdfViewer(QWidget):
         self._last_page = 1
         self._last_zoom = "page-width"
         self._pending_page = None
+        self._pending_page_attempts = 0
         self._viewer.load_pdf(path, page=1, zoom=self._last_zoom)
         return True
 
@@ -135,18 +137,33 @@ class EmbeddedPdfViewer(QWidget):
         self._last_page = max(1, int(page))
         if self._viewer:
             self._pending_page = self._last_page
+            self._pending_page_attempts = 0
             self._viewer.goto_page(self._last_page)
-            # Some backends ignore an immediate goto while a fresh PDF load is still settling.
-            # Replaying shortly after keeps single-click navigation reliable.
+            # Some backends ignore immediate goto while a fresh PDF load is settling.
+            # Retry for a short window until the target page is confirmed.
             QTimer.singleShot(0, self._apply_pending_page)
-            QTimer.singleShot(120, self._apply_pending_page)
+            QTimer.singleShot(90, self._apply_pending_page)
 
     def _apply_pending_page(self) -> None:
         if not self._viewer or self._pending_page is None:
             return
         page = max(1, int(self._pending_page))
         self._viewer.goto_page(page)
-        self._pending_page = None
+        current_page = None
+        try:
+            current_page = int(self._viewer.get_current_page())
+        except Exception:
+            current_page = None
+        if current_page == page:
+            self._pending_page = None
+            self._pending_page_attempts = 0
+            return
+        self._pending_page_attempts += 1
+        if self._pending_page_attempts >= 12:
+            self._pending_page = None
+            self._pending_page_attempts = 0
+            return
+        QTimer.singleShot(90, self._apply_pending_page)
 
     def set_zoom(self, factor: float) -> None:
         zoom_pct = max(25, min(400, int(round(float(factor) * 100))))
