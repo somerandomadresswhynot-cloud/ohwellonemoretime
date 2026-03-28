@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import sys
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 try:
@@ -16,7 +18,20 @@ from study_app.ui.main_window import MainWindow
 from study_app.ui.theme import DARK_QSS
 
 
+def _configure_windows_webengine_fallback() -> None:
+    if not sys.platform.startswith("win"):
+        return
+
+    # WebEngine may fail GPU context creation on some Windows machines; force a
+    # software fallback and optionally enable diagnostics with:
+    # QT_LOGGING_RULES="qt.webenginecontext.debug=true;qt.webenginecore.debug=true"
+    QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+
+
 def run() -> None:
+    _configure_windows_webengine_fallback()
+
     if configure_global_stability:
         configure_global_stability()
 
