@@ -1539,11 +1539,8 @@ class SourceWorkspace(QWidget):
         add_today_queue = menu.addAction("Add to today's queue")
         add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(selected_page))
         menu.addSeparator()
-        quick_add = menu.addAction(f"Add highlight ({self._annotation_color})")
-        quick_add.triggered.connect(lambda: self._create_highlight(selected_page, quote, self._annotation_color, selection_details))
-        add_menu = menu.addMenu("Highlight selection")
         for label, color in self._color_actions():
-            act = add_menu.addAction(label)
+            act = menu.addAction(label)
             act.triggered.connect(lambda _=False, c=color: self._create_highlight(selected_page, quote, c, selection_details))
         menu.addSeparator()
         existing = self.highlight_repo.find_exact(self.source_id, selected_page, quote)
@@ -2515,15 +2512,8 @@ class StudyQueuePage(QWidget):
             return
         selected_page = int(selection_details.get("page") or page or 1)
         menu = QMenu(self)
-        quick = menu.addAction(f"Add highlight ({self._annotation_color})")
-        quick.triggered.connect(
-            lambda: self._create_queue_text_highlight(
-                source_id, selected_page, quote, self._annotation_color, selection_details
-            )
-        )
-        add_menu = menu.addMenu("Highlight selection")
         for label, color in self._annotation_palette:
-            act = add_menu.addAction(label)
+            act = menu.addAction(label)
             act.triggered.connect(
                 lambda _=False, c=color: self._create_queue_text_highlight(
                     source_id, selected_page, quote, c, selection_details
