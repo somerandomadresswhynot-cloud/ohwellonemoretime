@@ -3179,7 +3179,7 @@ class StudyQueuePage(QWidget):
             if path:
                 self.source_path_cache[self.active_unit.source_id] = path
         last_zoom = self.pdf.zoom_factor()
-        self.pdf.load_if_needed(path)
+        loaded_new_doc = self.pdf.load_if_needed(path)
         self.pdf.set_multi_page_mode()
         self._refresh_queue_text_layer_hint(path or "")
         zoom_setting = self.settings_repo.get_ui_state("queue_pdf_zoom", "")
@@ -3187,7 +3187,9 @@ class StudyQueuePage(QWidget):
             target_zoom = float(zoom_setting) if zoom_setting else float(last_zoom)
         except Exception:
             target_zoom = float(last_zoom)
-        self.pdf.set_zoom(max(0.25, min(4.0, target_zoom)))
+        target_zoom = max(0.25, min(4.0, target_zoom))
+        if loaded_new_doc or abs(float(self.pdf.zoom_factor()) - target_zoom) > 0.001:
+            self.pdf.set_zoom(target_zoom)
         self._refresh_queue_outline_tree(self.active_unit.source_id)
         self.pdf.set_page(self.active_unit.start_page)
         self._set_active_queue_outline_by_page(int(self.active_unit.start_page))
