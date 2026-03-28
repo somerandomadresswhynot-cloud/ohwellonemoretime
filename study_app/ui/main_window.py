@@ -2706,11 +2706,8 @@ class StudyQueuePage(QWidget):
         self._selected_rating = str(draft.get("selected_rating", "") or "") or None
         self._update_rating_buttons_ui()
         self._refresh_note_previews()
-        zoom = float(draft.get("pdf_zoom", self.settings_repo.get_ui_state("queue_pdf_zoom", "1.0") or "1.0"))
-        target_zoom = max(0.25, min(4.0, zoom))
-        if abs(float(self.pdf.zoom_factor()) - target_zoom) > 0.001:
-            self.pdf.set_zoom(target_zoom)
-        self.pdf.set_page(int(draft.get("pdf_page", self.active_unit.start_page)), tuple(draft.get("pdf_location", (0, 0))))
+        # Keep queue routing deterministic: selecting a unit should jump to its unit start page.
+        # Draft restore intentionally excludes PDF page/zoom restoration to avoid stale page-1 jumps.
 
     def refresh(self):
         self._queue_recalculation_pending = False
