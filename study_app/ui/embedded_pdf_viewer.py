@@ -99,6 +99,14 @@ class EmbeddedPdfViewer(QWidget):
         load_zoom = zoom if zoom is not None else self._last_zoom
         self._viewer.load_pdf(self.current_path, page=max(1, int(load_page)), zoom=load_zoom)
 
+    def set_multi_page_mode(self) -> None:
+        # PDF.js viewer handles continuous scrolling natively.
+        return
+
+    def set_single_page_mode(self) -> None:
+        # No explicit single-page API needed for current integration.
+        return
+
     def load_if_needed(self, path: str) -> None:
         if not self._viewer:
             return
