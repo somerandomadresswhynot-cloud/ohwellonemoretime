@@ -52,27 +52,34 @@ run_study_app.bat setup
 5. Open review history to edit notes or delete mistaken events.
 6. Restart app; data persists in SQLite.
 
-## PDF annotation modes (workspace)
+## Embedded PDF viewer migration (pdfjs-viewer-pyside6)
 
-Inside a source workspace, the PDF panel supports annotation tooling:
+The app now uses `pdfjs-viewer-pyside6` as the single embedded PDF viewer path.
 
-- **Select Text**: select text and right-click to add/remove text highlights.
-- **Area**: drag on the page to create a rectangular area highlight.
-- **Pan**: switch cursor for navigation-focused reading.
-- **Erase**: click an existing overlay highlight to remove it.
+### What changed
 
-Annotation toolbar state is persisted in `ui_state`:
+- The previous QtPdf (`QPdfView`) + custom overlay/annotation rendering stack was removed from the viewer module.
+- `study_app/ui/embedded_pdf_viewer.py` now wraps `pdfjs_viewer.PDFViewerWidget` with a minimal app-facing API.
+- `study_app/ui/pdf_viewer.py` is now only a compatibility re-export of the new wrapper.
+- Dependency constraints now align with the new widget (`PySide6>=6.10.0,!=6.10.1`, `pdfjs-viewer-pyside6>=1.1.2`).
 
-- `pdf_annotation_tool`
-- `pdf_annotation_color`
-- `pdf_annotation_opacity`
-- A lightweight **text-layer probe hint** (`Text layer: likely yes/no`) appears in annotation controls to help diagnose why text selection may not snap on some PDFs.
+### Scope in this replacement
 
-### Known limitations / fallback behavior
+- Supported and prioritized:
+  - open local PDFs
+  - page scrolling
+  - viewer-native zoom controls
+  - text selection + copy/paste behavior through the embedded PDF.js viewer
+- Legacy overlay-specific methods are intentionally no-ops in the wrapper so older call sites do not re-enable the removed overlay path.
 
-- `QPdfView` does not reliably expose text glyph quad geometry across Qt versions, so text highlight rendering uses a **fallback cue overlay** on the current page rather than exact text-shape painting.
-- Area highlight rectangles are currently normalized to the visible viewport and intended as a foundation for richer page-geometry anchoring in future updates.
-- UI interactions (drag, erase, context menu) are interactive behaviors; automated UI smoke coverage is best-effort and skipped when GUI dependencies are unavailable.
+### Manual verification checklist
+
+1. Launch app (`study-app`).
+2. Open a source workspace and a known text PDF.
+3. Select text with mouse drag, copy with `Ctrl+C`, and paste into recall note fields.
+4. Confirm scrolling and zoom work in the embedded viewer.
+5. Open Study Queue and verify the same PDF viewer behavior there.
+6. Confirm there is no old overlay shell/UI rendering over the PDF content.
 
 ## FSRS scheduler notes
 
