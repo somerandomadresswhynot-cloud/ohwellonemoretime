@@ -112,7 +112,7 @@ def test_retrievability_bounds():
     assert 0.99 <= r <= 1.0
 
 
-def test_first_successful_review_resurfaces_next_day_for_coarse_units():
+def test_no_reviews_uses_normal_fsrs_instead_of_forced_next_day():
     now = datetime(2026, 3, 10, 15, 45, tzinfo=timezone.utc)
     out = schedule_next_review(
         unit_row=_unit_row_without_fsrs(),
@@ -122,14 +122,64 @@ def test_first_successful_review_resurfaces_next_day_for_coarse_units():
         timezone_info=timezone.utc,
         desired_retention=0.9,
     )
+    assert out.scheduled_interval_days > 1.0
+    assert out.next_review_at == "2026-03-14T00:00:00+00:00"
+
+
+def test_first_hard_review_forces_next_day():
+    now = datetime(2026, 3, 20, 8, 30, tzinfo=timezone.utc)
+    history = [
+        {"ended_at": "2026-03-19T08:30:00+00:00", "rating": "hard"},
+    ]
+    out = schedule_next_review(
+        unit_row=_unit_row_without_fsrs(),
+        review_events=history,
+        now=now,
+        feedback="hard",
+        timezone_info=timezone.utc,
+        desired_retention=0.9,
+    )
     assert out.scheduled_interval_days == 1.0
-    assert out.next_review_at == "2026-03-11T00:00:00+00:00"
+    assert out.next_review_at == "2026-03-21T00:00:00+00:00"
 
 
-def test_second_successful_review_also_resurfaces_next_day_for_coarse_units():
+def test_first_good_review_forces_next_day():
     now = datetime(2026, 3, 20, 8, 30, tzinfo=timezone.utc)
     history = [
         {"ended_at": "2026-03-19T08:30:00+00:00", "rating": "with_effort"},
+    ]
+    out = schedule_next_review(
+        unit_row=_unit_row_without_fsrs(),
+        review_events=history,
+        now=now,
+        feedback="with_effort",
+        timezone_info=timezone.utc,
+        desired_retention=0.9,
+    )
+    assert out.scheduled_interval_days == 1.0
+
+
+def test_first_again_review_forces_next_day():
+    now = datetime(2026, 3, 20, 8, 30, tzinfo=timezone.utc)
+    history = [
+        {"ended_at": "2026-03-19T08:30:00+00:00", "rating": "skip"},
+    ]
+    out = schedule_next_review(
+        unit_row=_unit_row_without_fsrs(),
+        review_events=history,
+        now=now,
+        feedback="skip",
+        timezone_info=timezone.utc,
+        desired_retention=0.9,
+    )
+    assert out.scheduled_interval_days == 1.0
+
+
+def test_hard_then_easy_uses_normal_fsrs_path():
+    now = datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc)
+    history = [
+        {"ended_at": "2026-03-20T12:00:00+00:00", "rating": "hard"},
+        {"ended_at": "2026-03-27T12:00:00+00:00", "rating": "easy"},
     ]
     out = schedule_next_review(
         unit_row=_unit_row_without_fsrs(),
@@ -139,5 +189,55 @@ def test_second_successful_review_also_resurfaces_next_day_for_coarse_units():
         timezone_info=timezone.utc,
         desired_retention=0.9,
     )
-    assert out.scheduled_interval_days == 1.0
-    assert out.next_review_at == "2026-03-21T00:00:00+00:00"
+    assert out.scheduled_interval_days > 1.0
+
+
+def test_again_then_easy_uses_normal_fsrs_path():
+    now = datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc)
+    history = [
+        {"ended_at": "2026-03-20T12:00:00+00:00", "rating": "skip"},
+        {"ended_at": "2026-03-27T12:00:00+00:00", "rating": "easy"},
+    ]
+    out = schedule_next_review(
+        unit_row=_unit_row_without_fsrs(),
+        review_events=history,
+        now=now,
+        feedback="easy",
+        timezone_info=timezone.utc,
+        desired_retention=0.9,
+    )
+    assert out.scheduled_interval_days > 1.0
+
+
+def test_easy_then_easy_second_step_uses_normal_fsrs_path():
+    now = datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc)
+    history = [
+        {"ended_at": "2026-03-20T12:00:00+00:00", "rating": "easy"},
+        {"ended_at": "2026-03-27T12:00:00+00:00", "rating": "easy"},
+    ]
+    out = schedule_next_review(
+        unit_row=_unit_row_without_fsrs(),
+        review_events=history,
+        now=now,
+        feedback="easy",
+        timezone_info=timezone.utc,
+        desired_retention=0.9,
+    )
+    assert out.scheduled_interval_days > 1.0
+
+
+def test_regression_mixed_history_hard_then_easy_not_forced_next_day():
+    now = datetime(2026, 3, 31, 12, 0, tzinfo=timezone.utc)
+    history = [
+        {"ended_at": "2026-03-23T12:00:00+00:00", "rating": "hard"},
+        {"ended_at": "2026-03-30T12:00:00+00:00", "rating": "easy"},
+    ]
+    out = schedule_next_review(
+        unit_row=_unit_row_without_fsrs(),
+        review_events=history,
+        now=now,
+        feedback="easy",
+        timezone_info=timezone.utc,
+        desired_retention=0.9,
+    )
+    assert out.scheduled_interval_days > 1.0
