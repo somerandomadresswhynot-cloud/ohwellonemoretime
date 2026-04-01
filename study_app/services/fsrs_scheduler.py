@@ -213,6 +213,16 @@ def should_force_next_day_for_first_review(review_history: list) -> bool:
     return len(review_history) == 1
 
 
+def _coarse_unit_policy_interval(raw_interval_days: float, grade: FSRSGrade, prior_review_count: int) -> float:
+    # Backward-compatible shim for older call sites that still pass
+    # (grade, prior_review_count). The current policy is rating-agnostic:
+    # force next day only when there is exactly one review in full history.
+    history_len = max(0, int(prior_review_count)) + 1
+    if should_force_next_day_for_first_review([None] * history_len):
+        return 1.0
+    return float(raw_interval_days)
+
+
 def schedule_next_review(
     unit_row,
     review_events,
