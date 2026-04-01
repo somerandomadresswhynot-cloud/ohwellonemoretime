@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QTextOption
 from PySide6.QtWebEngineWidgets import QWebEngineView
+from shiboken6 import isValid
 
 from study_app.services.outline_service import parse_outline_text
 
@@ -350,13 +351,13 @@ class HintMarkdownDialog(QDialog):
         if self._web_cleaned_up:
             return
         self._web_cleaned_up = True
-        if self.web is None:
+        if self.web is None or not isValid(self.web):
             return
-        page = self.web.page()
-        if page is not None:
-            self.web.setPage(None)
-            page.deleteLater()
+        # Avoid explicit page teardown: QWebEngineView owns its page, and detaching
+        # can already destroy the page object. Calling deleteLater on a stale wrapper
+        # then raises "Internal C++ object ... already deleted".
         self.web.deleteLater()
+        self.web = None
 
 
 def _hint_editor_html() -> str:
