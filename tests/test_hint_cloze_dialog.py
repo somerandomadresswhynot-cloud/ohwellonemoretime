@@ -4,7 +4,7 @@ pytest.importorskip('PySide6')
 pytest.importorskip('PySide6.QtWebEngineWidgets')
 
 from PySide6.QtWidgets import QApplication
-from study_app.ui.dialogs import HintMarkdownDialog, _cloze_validation_messages, _extract_cloze_segments
+from study_app.ui.dialogs import HintMarkdownDialog, RecallNoteDialog, _cloze_validation_messages, _extract_cloze_segments
 
 
 @pytest.fixture(scope='module')
@@ -33,5 +33,17 @@ def test_dialog_has_open_source_editor_controls(app):
         assert dlg.reveal_all_btn.text()
         assert dlg.hide_all_btn.text()
         assert dlg.toggle_all_btn.text()
+    finally:
+        dlg.close()
+
+
+def test_recall_note_dialog_emits_text_changed_signal(app):
+    dlg = RecallNoteDialog('Pre', 'start')
+    seen = []
+    try:
+        dlg.text_changed.connect(seen.append)
+        dlg.editor.setPlainText('updated')
+        dlg._emit_debounced_change()
+        assert seen[-1] == 'updated'
     finally:
         dlg.close()
