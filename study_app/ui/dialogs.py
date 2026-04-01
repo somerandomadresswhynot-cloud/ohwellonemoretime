@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QTextOption
 from PySide6.QtWebEngineWidgets import QWebEngineView
+from shiboken6 import isValid
 
 from study_app.services.outline_service import parse_outline_text
 
@@ -350,13 +351,17 @@ class HintMarkdownDialog(QDialog):
         if self._web_cleaned_up:
             return
         self._web_cleaned_up = True
-        if self.web is None:
+        if self.web is None or not isValid(self.web):
             return
-        page = self.web.page()
-        if page is not None:
+        try:
+            page = self.web.page()
+        except RuntimeError:
+            page = None
+        if page is not None and isValid(page):
             self.web.setPage(None)
             page.deleteLater()
         self.web.deleteLater()
+        self.web = None
 
 
 def _hint_editor_html() -> str:
