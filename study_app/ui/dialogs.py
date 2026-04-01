@@ -232,6 +232,7 @@ class HintMarkdownDialog(QDialog):
         self.resize(920, 700)
         self._value = text or ""
         self._keep_on_top = True
+        self._web_cleaned_up = False
         self._parent_for_filter = parent if hasattr(parent, "installEventFilter") else None
         self.web = QWebEngineView()
         self.make_cloze_btn = QPushButton("Cloze")
@@ -294,7 +295,13 @@ class HintMarkdownDialog(QDialog):
 
     def closeEvent(self, event) -> None:
         self._set_parent_filter_enabled(False)
+        self._cleanup_webengine()
         super().closeEvent(event)
+
+    def done(self, result: int) -> None:
+        self._set_parent_filter_enabled(False)
+        self._cleanup_webengine()
+        super().done(result)
 
     def eventFilter(self, watched, event):
         if watched is self._parent_for_filter and self._keep_on_top and event.type() == QEvent.WindowActivate:
@@ -338,6 +345,18 @@ class HintMarkdownDialog(QDialog):
             self._parent_for_filter.installEventFilter(self)
             return
         self._parent_for_filter.removeEventFilter(self)
+
+    def _cleanup_webengine(self) -> None:
+        if self._web_cleaned_up:
+            return
+        self._web_cleaned_up = True
+        if self.web is None:
+            return
+        page = self.web.page()
+        if page is not None:
+            self.web.setPage(None)
+            page.deleteLater()
+        self.web.deleteLater()
 
 
 def _hint_editor_html() -> str:

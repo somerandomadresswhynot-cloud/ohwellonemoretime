@@ -207,15 +207,20 @@ def replay_history_into_state(review_events: Iterable, params: FSRSParameters = 
     return state
 
 
+def should_force_next_day_for_first_review(review_history: list) -> bool:
+    # Special-case only the first completed review in a unit's history.
+    # Once history has 0 or >=2 records, use normal FSRS interval unchanged.
+    return len(review_history) == 1
+
+
 def _coarse_unit_policy_interval(raw_interval_days: float, grade: FSRSGrade, prior_review_count: int) -> float:
-    if grade == FSRSGrade.AGAIN:
-        return max(0.03, raw_interval_days)
-    # Coarse chapter/section units benefit from a quick early reinforcement pass.
-    # Keep FSRS as the core interval engine, but cap the first successful jump so
-    # resurfacing doesn't disappear for multiple days right after first exposure.
-    if prior_review_count <= 1:
-        return min(max(1.0, raw_interval_days), 1.0)
-    return max(1.0, raw_interval_days)
+    # Backward-compatible shim for older call sites that still pass
+    # (grade, prior_review_count). The current policy is rating-agnostic:
+    # force next day only when there is exactly one review in full history.
+    history_len = max(0, int(prior_review_count)) + 1
+    if should_force_next_day_for_first_review([None] * history_len):
+        return 1.0
+    return float(raw_interval_days)
 
 
 def schedule_next_review(
@@ -228,6 +233,7 @@ def schedule_next_review(
     params: FSRSParameters = DEFAULT_FSRS_PARAMETERS,
 ) -> SchedulingResult:
     row = unit_row if isinstance(unit_row, dict) else dict(unit_row)
+    history = list(review_events)
     grade = grade_from_feedback(feedback)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -248,16 +254,15 @@ def schedule_next_review(
             prior_state = None
 
     if prior_state is None:
-        prior_state = replay_history_into_state(review_events, params)
+        prior_state = replay_history_into_state(history, params)
 
     elapsed = 0.0
     if prior_state is not None:
         elapsed = max(0.0, (now - prior_state.last_review_at).total_seconds() / 86400.0)
 
-    prior_review_count = int(prior_state.review_count) if prior_state is not None else 0
     new_state, review_retrievability = next_state_from_review(prior_state, elapsed, grade, params, reviewed_at=now)
     raw_interval = interval_for_target_retention(new_state, desired_retention, params)
-    scheduled_interval = _coarse_unit_policy_interval(raw_interval, grade, prior_review_count=prior_review_count)
+    scheduled_interval = 1.0 if should_force_next_day_for_first_review(history) else raw_interval
     due_dt = now + timedelta(days=scheduled_interval)
     due_dt = _round_due_to_local_day_start_utc(due_dt, timezone_info)
 

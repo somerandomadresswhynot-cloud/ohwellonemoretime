@@ -90,6 +90,6 @@ The app now uses `pdfjs-viewer-pyside6` as the single embedded PDF viewer path.
   - `hard` -> Hard (successful but difficult)
   - `with_effort` -> Good
   - `easy` -> Easy
-- The raw interval is computed from desired retention (default `0.90`), then a policy layer clamps successful recalls to at least the next day for coarse-grained chapter/section review.
+- The raw interval is computed from desired retention (default `0.90`). A policy override forces the next review to exactly 1 day only when a unit has exactly one prior review event in history; all other history lengths use normal FSRS output.
 - Due timestamps are finally rounded to local day start for storage consistency.
 - Parameter optimization is intentionally not included yet; the insertion point is `DEFAULT_FSRS_PARAMETERS` / injected `FSRSParameters` in `fsrs_scheduler.py`.
