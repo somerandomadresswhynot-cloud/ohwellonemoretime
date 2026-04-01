@@ -353,13 +353,9 @@ class HintMarkdownDialog(QDialog):
         self._web_cleaned_up = True
         if self.web is None or not isValid(self.web):
             return
-        try:
-            page = self.web.page()
-        except RuntimeError:
-            page = None
-        if page is not None and isValid(page):
-            self.web.setPage(None)
-            page.deleteLater()
+        # Avoid explicit page teardown: QWebEngineView owns its page, and detaching
+        # can already destroy the page object. Calling deleteLater on a stale wrapper
+        # then raises "Internal C++ object ... already deleted".
         self.web.deleteLater()
         self.web = None
 
