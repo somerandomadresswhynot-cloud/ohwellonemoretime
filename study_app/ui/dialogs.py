@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import QEvent, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -149,6 +149,8 @@ class ReviewHistoryDialog(QDialog):
 
 
 class RecallNoteDialog(QDialog):
+    text_changed = Signal(str)
+
     def __init__(self, title: str, text: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -156,12 +158,22 @@ class RecallNoteDialog(QDialog):
         self.editor = QTextEdit()
         self.editor.setPlainText(text or "")
         self.editor.setAcceptRichText(False)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(700)
+        self._debounce_timer.timeout.connect(self._emit_debounced_change)
+        self.editor.textChanged.connect(lambda: self._debounce_timer.start())
+        buttons = QDialogButtonBox(QDialogButtonBox.Close | QDialogButtonBox.Cancel)
+        close_btn = buttons.button(QDialogButtonBox.Close)
+        if close_btn:
+            close_btn.clicked.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay = QVBoxLayout(self)
         lay.addWidget(self.editor)
         lay.addWidget(buttons)
+
+    def _emit_debounced_change(self) -> None:
+        self.text_changed.emit(self.value())
 
     def value(self) -> str:
         return self.editor.toPlainText()
@@ -226,6 +238,7 @@ def _cloze_validation_messages(markdown_text: str) -> list[str]:
 
 class HintMarkdownDialog(QDialog):
     keep_on_top_changed = Signal(bool)
+    markdown_changed = Signal(str)
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
@@ -255,11 +268,15 @@ class HintMarkdownDialog(QDialog):
             "QPushButton:hover{background:#2a4678;border-color:#4063a0;}"
             "QPushButton:pressed{background:#1b2d4e;}"
         )
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        save_btn = buttons.button(QDialogButtonBox.Save)
+        self._change_poll_timer = QTimer(self)
+        self._change_poll_timer.setInterval(900)
+        self._change_poll_timer.timeout.connect(self._poll_markdown_change)
+        self._last_emitted_value = self._value
+        buttons = QDialogButtonBox(QDialogButtonBox.Close | QDialogButtonBox.Cancel)
+        save_btn = buttons.button(QDialogButtonBox.Close)
         cancel_btn = buttons.button(QDialogButtonBox.Cancel)
         if save_btn:
-            save_btn.setText("Save Hint")
+            save_btn.setText("Close")
             save_btn.setStyleSheet("background:#1e7f68;border:1px solid #2ea387;color:#effff9;font-weight:600;padding:6px 14px;border-radius:6px;")
         if cancel_btn:
             cancel_btn.setStyleSheet("background:#1f3155;border:1px solid #35527f;color:#d8e7ff;padding:6px 14px;border-radius:6px;")
@@ -314,13 +331,29 @@ class HintMarkdownDialog(QDialog):
             return
         payload = json.dumps(self._value)
         self.web.page().runJavaScript(f"window.setMarkdown({payload});")
+        self._change_poll_timer.start()
 
     def _save_from_web(self) -> None:
         self.web.page().runJavaScript("window.getMarkdown();", self._on_markdown_ready)
 
     def _on_markdown_ready(self, value) -> None:
         self._value = str(value or "")
+        if self._value != self._last_emitted_value:
+            self._last_emitted_value = self._value
+            self.markdown_changed.emit(self._value)
         self.accept()
+
+    def _poll_markdown_change(self) -> None:
+        if not self.web:
+            return
+        self.web.page().runJavaScript("window.getMarkdown();", self._on_polled_markdown_ready)
+
+    def _on_polled_markdown_ready(self, value) -> None:
+        current = str(value or "")
+        if current == self._last_emitted_value:
+            return
+        self._last_emitted_value = current
+        self.markdown_changed.emit(current)
 
     def value(self) -> str:
         return self._value
@@ -351,6 +384,7 @@ class HintMarkdownDialog(QDialog):
         if self._web_cleaned_up:
             return
         self._web_cleaned_up = True
+        self._change_poll_timer.stop()
         if self.web is None or not isValid(self.web):
             return
         # Avoid explicit page teardown: QWebEngineView owns its page, and detaching

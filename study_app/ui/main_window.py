@@ -3324,14 +3324,18 @@ class StudyQueuePage(QWidget):
 
     def edit_pre_note(self) -> None:
         dlg = RecallNoteDialog("Pre-recall Note", self.pre_note_text, self)
+        dlg.text_changed.connect(self._on_pre_note_live_changed)
         if dlg.exec():
             self.pre_note_text = dlg.value()
+            self._save_current_draft()
             self._refresh_note_previews()
 
     def edit_post_note(self) -> None:
         dlg = RecallNoteDialog("Post-recall Note", self.post_note_text, self)
+        dlg.text_changed.connect(self._on_post_note_live_changed)
         if dlg.exec():
             self.post_note_text = dlg.value()
+            self._save_current_draft()
             self._refresh_note_previews()
 
     def edit_hint(self) -> None:
@@ -3344,6 +3348,7 @@ class StudyQueuePage(QWidget):
         dlg = HintMarkdownDialog(self.hint_markdown_text, self)
         dlg.set_keep_on_top(self._hint_keep_on_top)
         dlg.keep_on_top_changed.connect(self._on_hint_keep_on_top_changed)
+        dlg.markdown_changed.connect(self._on_hint_markdown_live_changed)
         dlg.accepted.connect(self._save_hint_from_dialog)
         dlg.finished.connect(self._on_hint_dialog_finished)
         self._hint_dialog = dlg
@@ -3359,6 +3364,24 @@ class StudyQueuePage(QWidget):
         self.hint_markdown_text = self._hint_dialog.value()
         self.review_repo.save_unit_hint_markdown(self.active_unit.unit_id, self.hint_markdown_text)
         self.hint_last_changed_at = self.review_repo.unit_hint_last_changed_at(self.active_unit.unit_id)
+        self._refresh_note_previews()
+
+    def _on_hint_markdown_live_changed(self, markdown: str) -> None:
+        if not self.active_unit:
+            return
+        self.hint_markdown_text = str(markdown or "")
+        self.review_repo.save_unit_hint_markdown(self.active_unit.unit_id, self.hint_markdown_text)
+        self.hint_last_changed_at = self.review_repo.unit_hint_last_changed_at(self.active_unit.unit_id)
+        self._refresh_note_previews()
+
+    def _on_pre_note_live_changed(self, text: str) -> None:
+        self.pre_note_text = str(text or "")
+        self._save_current_draft()
+        self._refresh_note_previews()
+
+    def _on_post_note_live_changed(self, text: str) -> None:
+        self.post_note_text = str(text or "")
+        self._save_current_draft()
         self._refresh_note_previews()
 
     def _on_hint_dialog_finished(self, _result: int) -> None:
