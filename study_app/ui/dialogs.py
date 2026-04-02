@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QTextOption
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from shiboken6 import isValid
 
 from study_app.services.outline_service import parse_outline_text
 
@@ -247,7 +246,6 @@ class HintMarkdownDialog(QDialog):
         self._value = text or ""
         self._is_loaded = False
         self._keep_on_top = True
-        self._web_cleaned_up = False
         self._parent_for_filter = parent if hasattr(parent, "installEventFilter") else None
         self.web = QWebEngineView()
         self.make_cloze_btn = QPushButton("Cloze")
@@ -314,12 +312,10 @@ class HintMarkdownDialog(QDialog):
 
     def closeEvent(self, event) -> None:
         self._set_parent_filter_enabled(False)
-        self._cleanup_webengine()
         super().closeEvent(event)
 
     def done(self, result: int) -> None:
         self._set_parent_filter_enabled(False)
-        self._cleanup_webengine()
         super().done(result)
 
     def eventFilter(self, watched, event):
@@ -389,20 +385,6 @@ class HintMarkdownDialog(QDialog):
             self._parent_for_filter.installEventFilter(self)
             return
         self._parent_for_filter.removeEventFilter(self)
-
-    def _cleanup_webengine(self) -> None:
-        if self._web_cleaned_up:
-            return
-        self._web_cleaned_up = True
-        self._change_poll_timer.stop()
-        if self.web is None or not isValid(self.web):
-            return
-        # Avoid explicit page teardown: QWebEngineView owns its page, and detaching
-        # can already destroy the page object. Calling deleteLater on a stale wrapper
-        # then raises "Internal C++ object ... already deleted".
-        self.web.deleteLater()
-        self.web = None
-
 
 def _hint_editor_html() -> str:
     return """
