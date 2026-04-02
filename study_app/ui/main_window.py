@@ -1928,6 +1928,7 @@ class StudyQueuePage(QWidget):
         self.pre_note_btn.clicked.connect(self.edit_pre_note)
         self.hint_btn.clicked.connect(self.edit_hint)
         self.post_note_btn.clicked.connect(self.edit_post_note)
+        QTimer.singleShot(0, self._warm_hint_dialog)
         self.pdf = PersistentPdfViewer()
         self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
         self.pdf.set_area_created_handler(self._on_queue_area_rect_created)
@@ -3341,17 +3342,13 @@ class StudyQueuePage(QWidget):
     def edit_hint(self) -> None:
         if not self.active_unit:
             return
-        if self._hint_dialog and self._hint_dialog.isVisible():
-            self._hint_dialog.raise_()
-            self._hint_dialog.activateWindow()
-            return
-        dlg = HintMarkdownDialog(self.hint_markdown_text, self)
+        dlg = self._ensure_hint_dialog()
         dlg.set_keep_on_top(self._hint_keep_on_top)
-        dlg.keep_on_top_changed.connect(self._on_hint_keep_on_top_changed)
-        dlg.markdown_changed.connect(self._on_hint_markdown_live_changed)
-        dlg.accepted.connect(self._save_hint_from_dialog)
-        dlg.finished.connect(self._on_hint_dialog_finished)
-        self._hint_dialog = dlg
+        dlg.set_value(self.hint_markdown_text)
+        if dlg.isVisible():
+            dlg.raise_()
+            dlg.activateWindow()
+            return
         self._set_hint_editing_controls_locked(True)
         dlg.show()
 
@@ -3386,7 +3383,21 @@ class StudyQueuePage(QWidget):
 
     def _on_hint_dialog_finished(self, _result: int) -> None:
         self._set_hint_editing_controls_locked(False)
-        self._hint_dialog = None
+
+    def _warm_hint_dialog(self) -> None:
+        self._ensure_hint_dialog()
+
+    def _ensure_hint_dialog(self) -> HintMarkdownDialog:
+        if self._hint_dialog is not None:
+            return self._hint_dialog
+        dlg = HintMarkdownDialog("", self)
+        dlg.set_keep_on_top(self._hint_keep_on_top)
+        dlg.keep_on_top_changed.connect(self._on_hint_keep_on_top_changed)
+        dlg.markdown_changed.connect(self._on_hint_markdown_live_changed)
+        dlg.accepted.connect(self._save_hint_from_dialog)
+        dlg.finished.connect(self._on_hint_dialog_finished)
+        self._hint_dialog = dlg
+        return dlg
 
     def _set_hint_editing_controls_locked(self, locked: bool) -> None:
         if locked:
