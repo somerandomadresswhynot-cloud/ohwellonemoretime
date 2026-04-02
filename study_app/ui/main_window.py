@@ -596,6 +596,8 @@ class SourceWorkspace(QWidget):
         btn_jump.clicked.connect(self.jump_to_selected)
         btn_unit_actions = QPushButton("Unit Actions ▾")
         btn_unit_actions.clicked.connect(self.open_unit_actions_menu)
+        btn_copy_tools = QPushButton("Copy/Text Tools ▾")
+        btn_copy_tools.clicked.connect(self.open_copy_text_tools_menu)
         btn_add_today = QPushButton("Add for Today's Queue")
         btn_add_today.setObjectName("accent")
         btn_add_today.clicked.connect(self.add_selected_for_today_queue)
@@ -642,7 +644,7 @@ class SourceWorkspace(QWidget):
         color_row.addWidget(self.text_layer_hint)
         color_row.addStretch()
 
-        c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addStretch()
+        c_top = QHBoxLayout(); c_top.addWidget(self.zoom); c_top.addWidget(btn_jump); c_top.addWidget(btn_unit_actions); c_top.addWidget(btn_copy_tools); c_top.addStretch()
         pdf_row = QHBoxLayout(); pdf_row.addWidget(self.pdf, 1)
         c_l = QVBoxLayout(); c_l.addLayout(c_top); c_l.addLayout(color_row); c_l.addWidget(self.page_label); c_l.addLayout(pdf_row, 1); c_l.addWidget(self.doc_progress)
 
@@ -1541,14 +1543,102 @@ class SourceWorkspace(QWidget):
         )
         self.refresh_highlights()
 
+    def _source_pdf_path(self) -> str:
+        return str(getattr(self.source, "file_path", "") or "")
+
+    def _copy_text_to_clipboard(self, text: str, success_title: str = "Copied") -> None:
+        clean = (text or "").strip()
+        if not clean:
+            QMessageBox.information(self, "No text", "No text was extracted.")
+            return
+        QApplication.clipboard().setText(clean)
+        QMessageBox.information(self, success_title, f"Copied {len(clean)} characters.")
+
+    def _prompt_page_range(self, default_page: int) -> tuple[int, int] | None:
+        total_pages = max(1, int(getattr(self.source, "page_count", 1) or 1))
+        start, ok = QInputDialog.getInt(self, "Copy page range", "Start page", max(1, min(total_pages, int(default_page or 1))), 1, total_pages)
+        if not ok:
+            return None
+        end, ok2 = QInputDialog.getInt(self, "Copy page range", "End page", start, start, total_pages)
+        if not ok2:
+            return None
+        return start, end
+
+    def copy_current_page_text_stable(self) -> None:
+        path = self._source_pdf_path()
+        if not path:
+            return
+        page = max(1, int(self.pdf.view_state().get("page", 1)))
+        text = self.pdf_service.extract_page_text(path, page)
+        self._copy_text_to_clipboard(text, "Copied page text")
+
+    def copy_page_range_text_stable(self) -> None:
+        path = self._source_pdf_path()
+        if not path:
+            return
+        page = max(1, int(self.pdf.view_state().get("page", 1)))
+        chosen = self._prompt_page_range(page)
+        if not chosen:
+            return
+        start, end = chosen
+        text = self.pdf_service.extract_page_range_text(path, start, end)
+        self._copy_text_to_clipboard(text, "Copied page-range text")
+
+    def copy_selected_text_stable(self, selected_text: str = "", page: int | None = None) -> None:
+        quote = (selected_text or "").strip()
+        if quote and len(quote) <= 500 and quote.count("\n") <= 8:
+            self._copy_text_to_clipboard(quote, "Copied selection")
+            return
+        path = self._source_pdf_path()
+        if not path:
+            return
+        suggested_page = max(1, int(page or self.pdf.view_state().get("page", 1)))
+        QMessageBox.information(
+            self,
+            "Stable copy",
+            "Long/cross-page selections in the embedded viewer can be unreliable.\n"
+            "Choose a page range for stable direct PDF extraction.",
+        )
+        chosen = self._prompt_page_range(suggested_page)
+        if not chosen:
+            return
+        start, end = chosen
+        text = self.pdf_service.extract_page_range_text(path, start, end)
+        self._copy_text_to_clipboard(text, "Copied stable selection")
+
+    def open_copy_text_tools_menu(self) -> None:
+        menu = QMenu(self)
+        copy_current = menu.addAction("Copy current page text")
+        copy_range = menu.addAction("Copy page range text")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == copy_current:
+            self.copy_current_page_text_stable()
+        elif chosen == copy_range:
+            self.copy_page_range_text_stable()
+
     def _color_actions(self):
         return self._annotation_palette
 
     def open_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         quote = (selected_text or "").strip()
-        if not quote:
-            return
         menu = QMenu(self)
+        if quote:
+            copy_native = menu.addAction("Copy selected text (native)")
+            copy_native.triggered.connect(lambda: self._copy_text_to_clipboard(quote, "Copied selection"))
+            copy_stable = menu.addAction("Copy selected text (stable)")
+            copy_stable.triggered.connect(lambda: self.copy_selected_text_stable(quote, page))
+            if len(quote) > 500 or quote.count("\n") > 8:
+                menu.addSeparator()
+                hint = menu.addAction("ℹ Long/cross-page selection: stable copy is recommended")
+                hint.setEnabled(False)
+        copy_current = menu.addAction("Copy current page text")
+        copy_current.triggered.connect(self.copy_current_page_text_stable)
+        copy_range = menu.addAction("Copy page range text")
+        copy_range.triggered.connect(self.copy_page_range_text_stable)
+        if not quote:
+            menu.exec(global_pos)
+            return
+        menu.addSeparator()
         add_today_queue = menu.addAction("Add to today's queue")
         add_today_queue.triggered.connect(lambda: self._add_page_to_today_queue(int(page)))
         menu.addSeparator()
@@ -1925,9 +2015,11 @@ class StudyQueuePage(QWidget):
         self.pre_note_btn = QPushButton("Edit Pre-recall Note")
         self.hint_btn = QPushButton("Hint")
         self.post_note_btn = QPushButton("Edit Post-recall Note")
+        self.copy_tools_btn = QPushButton("Copy/Text Tools ▾")
         self.pre_note_btn.clicked.connect(self.edit_pre_note)
         self.hint_btn.clicked.connect(self.edit_hint)
         self.post_note_btn.clicked.connect(self.edit_post_note)
+        self.copy_tools_btn.clicked.connect(self.open_queue_copy_text_tools_menu)
         self.pdf = PersistentPdfViewer()
         self.pdf.set_selection_menu_handler(self.open_queue_selection_menu)
         self.pdf.set_area_created_handler(self._on_queue_area_rect_created)
@@ -2032,6 +2124,7 @@ class StudyQueuePage(QWidget):
         self.pre_note_btn.setMinimumHeight(32)
         self.hint_btn.setMinimumHeight(32)
         self.post_note_btn.setMinimumHeight(32)
+        self.copy_tools_btn.setMinimumHeight(32)
         self.queue_outline_tree.setMinimumHeight(210)
         self.queue_outline_tree.setMaximumHeight(230)
         self.review_history_list.setMinimumHeight(96)
@@ -2050,6 +2143,7 @@ class StudyQueuePage(QWidget):
         notes_col.addWidget(self.pre_note_btn)
         notes_col.addWidget(self.hint_btn)
         notes_col.addWidget(self.post_note_btn)
+        notes_col.addWidget(self.copy_tools_btn)
         notes_col.addStretch()
         timer_section_l.addLayout(notes_col, 1)
         left_controls_col.addWidget(timer_notes_section)
@@ -2498,32 +2592,182 @@ class StudyQueuePage(QWidget):
         else:
             self.queue_text_layer_hint.setText(f"Text layer: likely image-only (0/{sampled})")
 
+    def _active_pdf_path(self) -> str:
+        source_id = self._active_source_id()
+        if not source_id:
+            return ""
+        src = self.source_repo.get(source_id)
+        return str(getattr(src, "file_path", "") or "")
+
+    def _active_page_count(self) -> int:
+        source_id = self._active_source_id()
+        if not source_id:
+            return 1
+        src = self.source_repo.get(source_id)
+        return max(1, int(getattr(src, "page_count", 1) or 1))
+
+    def _queue_copy_to_clipboard(self, text: str, title: str = "Copied") -> bool:
+        clean = (text or "").strip()
+        if not clean:
+            QMessageBox.information(self, "No text", "No text was extracted.")
+            return False
+        QApplication.clipboard().setText(clean)
+        QMessageBox.information(self, title, f"Copied {len(clean)} characters.")
+        return True
+
+    def _prompt_queue_page_range(self, default_page: int) -> tuple[int, int] | None:
+        total_pages = self._active_page_count()
+        start, ok = QInputDialog.getInt(self, "Copy page range", "Start page", max(1, min(total_pages, int(default_page or 1))), 1, total_pages)
+        if not ok:
+            return None
+        end, ok2 = QInputDialog.getInt(self, "Copy page range", "End page", start, start, total_pages)
+        if not ok2:
+            return None
+        return start, end
+
+    def copy_queue_current_page_text(self) -> None:
+        path = self._active_pdf_path()
+        if not path:
+            return
+        page = max(1, int(self.pdf.view_state().get("page", 1)))
+        text = self.pdf_service.extract_page_text(path, page)
+        self._queue_copy_to_clipboard(text, "Copied page text")
+
+    def copy_queue_page_range_text(self) -> None:
+        path = self._active_pdf_path()
+        if not path:
+            return
+        page = max(1, int(self.pdf.view_state().get("page", 1)))
+        chosen = self._prompt_queue_page_range(page)
+        if not chosen:
+            return
+        start, end = chosen
+        text = self.pdf_service.extract_page_range_text(path, start, end)
+        self._queue_copy_to_clipboard(text, "Copied page-range text")
+
+    def copy_queue_selected_text_stable(self, selected_text: str = "", page: int | None = None) -> str:
+        quote = (selected_text or "").strip()
+        if quote and len(quote) <= 500 and quote.count("\n") <= 8:
+            self._queue_copy_to_clipboard(quote, "Copied selection")
+            return quote
+        path = self._active_pdf_path()
+        if not path:
+            return ""
+        suggested_page = max(1, int(page or self.pdf.view_state().get("page", 1)))
+        QMessageBox.information(
+            self,
+            "Stable copy",
+            "Long/cross-page selection in embedded PDF view can be unreliable.\nChoose page range for stable extraction.",
+        )
+        chosen = self._prompt_queue_page_range(suggested_page)
+        if not chosen:
+            return ""
+        start, end = chosen
+        text = self.pdf_service.extract_page_range_text(path, start, end)
+        self._queue_copy_to_clipboard(text, "Copied stable selection")
+        return (text or "").strip()
+
+    def _append_text_to_recall_note(self, target: str, text: str) -> None:
+        chunk = (text or "").strip()
+        if not chunk:
+            return
+        if target == "pre":
+            self.pre_note_text = f"{self.pre_note_text}\n\n{chunk}".strip() if self.pre_note_text.strip() else chunk
+        else:
+            self.post_note_text = f"{self.post_note_text}\n\n{chunk}".strip() if self.post_note_text.strip() else chunk
+        self._refresh_note_previews()
+
+    def send_queue_text_to_note(self, text: str) -> None:
+        chunk = (text or "").strip()
+        if not chunk:
+            QMessageBox.information(self, "No text", "No text to send to notes.")
+            return
+        target, ok = QInputDialog.getItem(self, "Send to note", "Target", ["Pre-recall note", "Post-recall note"], 0, False)
+        if not ok:
+            return
+        self._append_text_to_recall_note("pre" if target.startswith("Pre") else "post", chunk)
+
+    def send_queue_page_range_to_note(self) -> None:
+        path = self._active_pdf_path()
+        if not path:
+            return
+        page = max(1, int(self.pdf.view_state().get("page", 1)))
+        chosen_pages = self._prompt_queue_page_range(page)
+        if not chosen_pages:
+            return
+        start, end = chosen_pages
+        self.send_queue_text_to_note(self.pdf_service.extract_page_range_text(path, start, end))
+
+    def send_queue_current_page_to_note(self) -> None:
+        path = self._active_pdf_path()
+        if not path:
+            return
+        page = max(1, int(self.pdf.view_state().get("page", 1)))
+        self.send_queue_text_to_note(self.pdf_service.extract_page_text(path, page))
+
+    def open_queue_copy_text_tools_menu(self) -> None:
+        menu = QMenu(self)
+        copy_current = menu.addAction("Copy current page text")
+        copy_range = menu.addAction("Copy page range text")
+        send_current = menu.addAction("Send current page text to note")
+        send_range = menu.addAction("Send page-range text to note")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == copy_current:
+            self.copy_queue_current_page_text()
+        elif chosen == copy_range:
+            self.copy_queue_page_range_text()
+        elif chosen == send_current:
+            self.send_queue_current_page_to_note()
+        elif chosen == send_range:
+            self.send_queue_page_range_to_note()
+
     def open_queue_selection_menu(self, global_pos, selected_text: str, page: int) -> None:
         source_id = self._active_source_id()
         quote = (selected_text or "").strip()
-        if not source_id or not quote:
+        if not source_id:
             return
-        anchor = self._queue_text_anchor_payload(quote)
         menu = QMenu(self)
-        quick = menu.addAction(f"Add highlight ({self._annotation_color})")
-        quick.triggered.connect(
-            lambda: self.highlight_repo.add_text_highlight(
-                source_id,
-                page,
-                quote,
-                "",
-                self._annotation_color,
-                text_prefix=anchor["text_prefix"],
-                text_exact=anchor["text_exact"],
-                text_suffix=anchor["text_suffix"],
-                opacity=self._annotation_opacity,
+        if quote:
+            copy_native = menu.addAction("Copy selected text (native)")
+            copy_native.triggered.connect(lambda: self._queue_copy_to_clipboard(quote, "Copied selection"))
+            copy_stable = menu.addAction("Copy selected text (stable)")
+            copy_stable.triggered.connect(lambda: self.copy_queue_selected_text_stable(quote, page))
+            send_sel = menu.addAction("Send selected text to pre/post recall note")
+            send_sel.triggered.connect(lambda: self.send_queue_text_to_note(self.copy_queue_selected_text_stable(quote, page)))
+            if len(quote) > 500 or quote.count("\n") > 8:
+                menu.addSeparator()
+                hint = menu.addAction("ℹ Long/cross-page selection: use stable copy")
+                hint.setEnabled(False)
+            menu.addSeparator()
+            anchor = self._queue_text_anchor_payload(quote)
+            quick = menu.addAction(f"Add highlight ({self._annotation_color})")
+            quick.triggered.connect(
+                lambda: self.highlight_repo.add_text_highlight(
+                    source_id,
+                    page,
+                    quote,
+                    "",
+                    self._annotation_color,
+                    text_prefix=anchor["text_prefix"],
+                    text_exact=anchor["text_exact"],
+                    text_suffix=anchor["text_suffix"],
+                    opacity=self._annotation_opacity,
+                )
             )
-        )
+        copy_current = menu.addAction("Copy current page text")
+        copy_current.triggered.connect(self.copy_queue_current_page_text)
+        copy_range = menu.addAction("Copy page range text")
+        copy_range.triggered.connect(self.copy_queue_page_range_text)
+        send_current = menu.addAction("Send current page text to note")
+        send_current.triggered.connect(self.send_queue_current_page_to_note)
+        send_range = menu.addAction("Send page-range text to note")
+        send_range.triggered.connect(self.send_queue_page_range_to_note)
         menu.addSeparator()
-        existing = self.highlight_repo.find_exact(source_id, page, quote)
-        if existing:
-            remove = menu.addAction("Remove matching highlight")
-            remove.triggered.connect(lambda: self.highlight_repo.delete_highlight(int(existing["id"])))
+        if quote:
+            existing = self.highlight_repo.find_exact(source_id, page, quote)
+            if existing:
+                remove = menu.addAction("Remove matching highlight")
+                remove.triggered.connect(lambda: self.highlight_repo.delete_highlight(int(existing["id"])))
         menu.exec(global_pos)
         self._sync_queue_pdf_overlays()
 
