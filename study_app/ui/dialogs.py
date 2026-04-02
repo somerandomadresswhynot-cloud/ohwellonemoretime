@@ -245,6 +245,7 @@ class HintMarkdownDialog(QDialog):
         self.setWindowTitle("Hint")
         self.resize(920, 700)
         self._value = text or ""
+        self._is_loaded = False
         self._keep_on_top = True
         self._web_cleaned_up = False
         self._parent_for_filter = parent if hasattr(parent, "installEventFilter") else None
@@ -329,6 +330,7 @@ class HintMarkdownDialog(QDialog):
     def _on_loaded(self, ok: bool) -> None:
         if not ok:
             return
+        self._is_loaded = True
         payload = json.dumps(self._value)
         self.web.page().runJavaScript(f"window.setMarkdown({payload});")
         self._change_poll_timer.start()
@@ -357,6 +359,14 @@ class HintMarkdownDialog(QDialog):
 
     def value(self) -> str:
         return self._value
+
+    def set_value(self, text: str) -> None:
+        self._value = str(text or "")
+        self._last_emitted_value = self._value
+        if not self._is_loaded or not self.web:
+            return
+        payload = json.dumps(self._value)
+        self.web.page().runJavaScript(f"window.setMarkdown({payload});")
 
     def keep_on_top(self) -> bool:
         return bool(self._keep_on_top)
