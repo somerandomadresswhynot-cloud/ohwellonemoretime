@@ -535,7 +535,7 @@ def _hint_editor_html() -> str:
         'link', 'image', 'code', '|',
         'preview', 'side-by-side', 'fullscreen'
       ],
-      renderingConfig: { singleLineBreaks: false },
+      renderingConfig: { singleLineBreaks: true },
       previewRender: function(text) {
         let clozeIndex = 0;
         const replaced = text.replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(_m, g1) {
@@ -547,6 +547,9 @@ def _hint_editor_html() -> str:
         return marked.parse(replaced);
       }
     });
+    if (typeof editor.isSideBySideActive === 'function' && !editor.isSideBySideActive()) {
+      editor.toggleSideBySide();
+    }
     document.addEventListener('contextmenu', function(ev) {
       const target = ev.target;
       if (!target || !target.classList || !target.classList.contains('cloze-box')) {
