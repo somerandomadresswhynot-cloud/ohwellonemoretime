@@ -547,8 +547,8 @@ def _hint_editor_html() -> str:
         return marked.parse(replaced);
       }
     });
-    if (typeof editor.isSideBySideActive === 'function' && !editor.isSideBySideActive()) {
-      editor.toggleSideBySide();
+    if (typeof editor.isPreviewActive === 'function' && !editor.isPreviewActive()) {
+      editor.togglePreview();
     }
     document.addEventListener('contextmenu', function(ev) {
       const target = ev.target;
