@@ -22,6 +22,7 @@ from PySide6.QtGui import QTextOption
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from study_app.services.outline_service import parse_outline_text
+from study_app.services.cloze_utils import replace_nth_cloze
 
 
 class SourceMetadataDialog(QDialog):
@@ -235,6 +236,10 @@ def _cloze_validation_messages(markdown_text: str) -> list[str]:
     return messages
 
 
+def _replace_nth_cloze(markdown_text: str, cloze_index: int) -> str:
+    return replace_nth_cloze(markdown_text, cloze_index)
+
+
 class HintMarkdownDialog(QDialog):
     keep_on_top_changed = Signal(bool)
     markdown_changed = Signal(str)
@@ -256,10 +261,10 @@ class HintMarkdownDialog(QDialog):
         self.reveal_all_btn.setToolTip("Reveal all clozes in rendered preview")
         self.hide_all_btn.setToolTip("Hide all clozes in rendered preview")
         self.toggle_all_btn.setToolTip("Toggle all clozes in rendered preview")
-        self.make_cloze_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.wrapSelectionCloze();"))
-        self.reveal_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(true);"))
-        self.hide_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(false);"))
-        self.toggle_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.toggleAllClozes();"))
+        self.make_cloze_btn.clicked.connect(self._on_make_cloze_clicked)
+        self.reveal_all_btn.clicked.connect(self._on_reveal_all_clicked)
+        self.hide_all_btn.clicked.connect(self._on_hide_all_clicked)
+        self.toggle_all_btn.clicked.connect(self._on_toggle_all_clicked)
         self.setStyleSheet(
             "QDialog{background:#0b1530;color:#dbe4ef;}"
             "QLabel#hintTitle{color:#e7efff;font-size:13px;font-weight:600;}"
@@ -385,6 +390,41 @@ class HintMarkdownDialog(QDialog):
             self._parent_for_filter.installEventFilter(self)
             return
         self._parent_for_filter.removeEventFilter(self)
+
+    def _run_editor_action(self, function_name: str, retries: int = 12) -> None:
+        if not self.web:
+            return
+        fn = str(function_name or "").strip()
+        if not fn:
+            return
+        script = (
+            "(function(){"
+            f"if (typeof {fn} !== 'function') return false;"
+            f"{fn}();"
+            "return true;"
+            "})();"
+        )
+
+        def _callback(ok) -> None:
+            if bool(ok):
+                return
+            if retries <= 0:
+                return
+            QTimer.singleShot(120, lambda: self._run_editor_action(fn, retries=retries - 1))
+
+        self.web.page().runJavaScript(script, _callback)
+
+    def _on_make_cloze_clicked(self) -> None:
+        self._run_editor_action("window.wrapSelectionCloze")
+
+    def _on_reveal_all_clicked(self) -> None:
+        self._run_editor_action("window.setAllClozesReveal")
+
+    def _on_hide_all_clicked(self) -> None:
+        self._run_editor_action("window.setAllClozesHide")
+
+    def _on_toggle_all_clicked(self) -> None:
+        self._run_editor_action("window.toggleAllClozes")
 
 def _hint_editor_html() -> str:
     return """
@@ -602,6 +642,8 @@ def _hint_editor_html() -> str:
         }
       }
     };
+    window.setAllClozesReveal = function() { window.setAllClozes(true); };
+    window.setAllClozesHide = function() { window.setAllClozes(false); };
     window.toggleAllClozes = function() {
       const anyHidden = document.querySelector('.cloze-hidden') !== null;
       window.setAllClozes(anyHidden);
