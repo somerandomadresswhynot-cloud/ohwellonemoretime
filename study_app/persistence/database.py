@@ -138,6 +138,14 @@ CREATE TABLE IF NOT EXISTS ui_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS unit_queue_postponements (
+    unit_id INTEGER PRIMARY KEY,
+    postponed_until TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
+);
 """
 
 INDEXES = """
@@ -158,6 +166,9 @@ ON review_events(unit_id, deleted_at);
 
 CREATE INDEX IF NOT EXISTS idx_unit_hint_revisions_unit_changed
 ON unit_hint_revisions(unit_id, changed_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_unit_queue_postponements_until
+ON unit_queue_postponements(postponed_until);
 """
 
 
@@ -199,6 +210,7 @@ class Database:
             self.conn.execute("ALTER TABLE highlights ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
         self._backfill_highlight_annotation_fields()
         self._ensure_fsrs_columns()
+        self._ensure_postponement_table()
         self.conn.commit()
         self._ensure_scheduling_constraints()
         self._ensure_indexes()
@@ -266,6 +278,19 @@ class Database:
 
     def _ensure_indexes(self) -> None:
         self.conn.executescript(INDEXES)
+
+    def _ensure_postponement_table(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS unit_queue_postponements (
+                unit_id INTEGER PRIMARY KEY,
+                postponed_until TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
+            )
+            """
+        )
 
     def _table_sql(self, table_name: str) -> str:
         row = self.conn.execute(

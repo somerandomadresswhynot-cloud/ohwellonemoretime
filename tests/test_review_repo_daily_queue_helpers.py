@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import timedelta
 
 from study_app.persistence.database import Database
 from study_app.persistence.repositories import OutlineRepo, ReviewRepo, SourceRepo
@@ -86,6 +87,39 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         node_row = self.db.conn.execute("SELECT queue_enabled FROM outline_nodes WHERE id=?", (node_id,)).fetchone()
         self.assertEqual(int(unit_row["queue_enabled"]), 0)
         self.assertEqual(int(node_row["queue_enabled"]), 0)
+
+    def test_postponed_reviewed_unit_is_excluded_from_due_units(self):
+        unit_id = int(self.units[0]["id"])
+        ended_at = "2026-03-20T10:05:00+00:00"
+        payload = {
+            "started_at": ended_at,
+            "ended_at": ended_at,
+            "elapsed_seconds": 30,
+            "rating": "with_effort",
+            "pre_note": "",
+            "post_note": "",
+        }
+        stats = {
+            "last_review_at": ended_at,
+            "review_count": 1,
+            "ease_factor": 2.5,
+            "avg_rating": 3.0,
+        }
+        self.review_repo.record_review(unit_id, payload, stats)
+        due_now = {int(u.unit_id) for u in self.review_repo.due_units("2026-03-23T12:00:00+00:00")}
+        self.assertIn(unit_id, due_now)
+
+        changed = self.review_repo.postpone_unit_for(unit_id, timedelta(days=30))
+        self.assertTrue(changed)
+        due_after_postpone = {int(u.unit_id) for u in self.review_repo.due_units("2026-03-23T12:00:00+00:00")}
+        self.assertNotIn(unit_id, due_after_postpone)
+
+    def test_postponed_new_unit_is_excluded_from_new_units(self):
+        unit_id = int(self.units[0]["id"])
+        self.assertIn(unit_id, {int(u.unit_id) for u in self.review_repo.new_units("2026-03-23T12:00:00+00:00")})
+        changed = self.review_repo.postpone_unit_for(unit_id, timedelta(days=2))
+        self.assertTrue(changed)
+        self.assertNotIn(unit_id, {int(u.unit_id) for u in self.review_repo.new_units("2026-03-23T12:00:00+00:00")})
 
     def test_missed_due_items_resurface_later(self):
         unit_id = int(self.units[0]['id'])

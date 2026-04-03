@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
-from study_app.domain.models import Source, UnitView, iso_utc, parse_iso_to_utc, utcnow_iso
+from study_app.domain.models import Source, UnitView, iso_utc, now_utc, parse_iso_to_utc, utcnow_iso
 from study_app.persistence.database import Database
 from study_app.services.fsrs_scheduler import (
     DEFAULT_FSRS_PARAMETERS,
@@ -209,9 +209,13 @@ class ReviewRepo:
             JOIN sources s ON s.id=u.source_id
             LEFT JOIN node_path ON node_path.node_id=u.node_id
             WHERE s.is_active=1 AND u.queue_enabled=1
+              AND NOT EXISTS (
+                  SELECT 1 FROM unit_queue_postponements qp
+                  WHERE qp.unit_id=u.id AND qp.postponed_until > ?
+              )
             """ + source_where + """
             ORDER BY u.id ASC""",
-            params,
+            [now_iso, *params],
         ).fetchall()
         unit_ids = [int(r["id"]) for r in rows]
         events_by_unit: dict[int, list[dict]] = defaultdict(list)
@@ -281,7 +285,8 @@ class ReviewRepo:
         by_id = {int(u.unit_id): u for u in out}
         return [by_id[uid] for uid in cleaned if uid in by_id]
 
-    def new_units(self) -> list[UnitView]:
+    def new_units(self, now_iso: str | None = None) -> list[UnitView]:
+        now_value = str(now_iso or utcnow_iso())
         rows = self.db.conn.execute(
             """WITH RECURSIVE node_path(node_id, path) AS (
                 SELECT n.id, n.title
@@ -302,7 +307,12 @@ class ReviewRepo:
                   SELECT 1 FROM review_events re
                   WHERE re.unit_id=u.id AND re.deleted_at IS NULL
               )
+              AND NOT EXISTS (
+                  SELECT 1 FROM unit_queue_postponements qp
+                  WHERE qp.unit_id=u.id AND qp.postponed_until > ?
+              )
             ORDER BY s.title ASC, u.start_page ASC, u.id ASC""",
+            (now_value,),
         ).fetchall()
         return [UnitView(
             unit_id=r["id"], node_id=r["node_id"], source_id=r["source_id"], source_title=r["source_title"],
@@ -487,6 +497,42 @@ class ReviewRepo:
         self.db.conn.execute("UPDATE outline_nodes SET queue_enabled=? WHERE id=?", (int(enabled), node_id))
         self.db.conn.commit()
         return True
+
+    def postpone_unit_for(self, unit_id: int, delta: timedelta) -> bool:
+        if int(delta.total_seconds()) <= 0:
+            return False
+        now = now_utc()
+        until_iso = iso_utc(now + delta)
+        now_iso = iso_utc(now)
+        row = self.db.conn.execute("SELECT id FROM units WHERE id=?", (int(unit_id),)).fetchone()
+        if not row:
+            return False
+        self.db.conn.execute(
+            """
+            INSERT INTO unit_queue_postponements(unit_id, postponed_until, created_at, updated_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(unit_id) DO UPDATE SET
+                postponed_until=excluded.postponed_until,
+                updated_at=excluded.updated_at
+            """,
+            (int(unit_id), until_iso, now_iso, now_iso),
+        )
+        self.db.conn.commit()
+        return True
+
+    def active_postponed_unit_ids(self, unit_ids: list[int], now_iso: str) -> set[int]:
+        cleaned = [int(uid) for uid in unit_ids if uid is not None]
+        if not cleaned:
+            return set()
+        placeholders = ",".join("?" for _ in cleaned)
+        rows = self.db.conn.execute(
+            f"""SELECT unit_id
+            FROM unit_queue_postponements
+            WHERE postponed_until > ?
+              AND unit_id IN ({placeholders})""",
+            [str(now_iso), *cleaned],
+        ).fetchall()
+        return {int(r["unit_id"]) for r in rows}
 
     def avg_elapsed_seconds_for_unit(self, unit_id: int) -> float | None:
         row = self.db.conn.execute(
