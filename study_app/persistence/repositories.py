@@ -474,6 +474,20 @@ class ReviewRepo:
             start_page=row["start_page"], end_page=row["end_page"], queue_enabled=bool(row["queue_enabled"]),
             next_review_at=row["next_review_at"], last_review_at=row["last_review_at"], review_count=row["review_count"], avg_rating=row["avg_rating"],
         )
+
+    def set_unit_queue_enabled(self, unit_id: int, enabled: bool) -> bool:
+        row = self.db.conn.execute(
+            "SELECT node_id FROM units WHERE id=?",
+            (int(unit_id),),
+        ).fetchone()
+        if not row:
+            return False
+        node_id = int(row["node_id"])
+        self.db.conn.execute("UPDATE units SET queue_enabled=? WHERE id=?", (int(enabled), int(unit_id)))
+        self.db.conn.execute("UPDATE outline_nodes SET queue_enabled=? WHERE id=?", (int(enabled), node_id))
+        self.db.conn.commit()
+        return True
+
     def avg_elapsed_seconds_for_unit(self, unit_id: int) -> float | None:
         row = self.db.conn.execute(
             """SELECT AVG(elapsed_seconds) AS avg_elapsed

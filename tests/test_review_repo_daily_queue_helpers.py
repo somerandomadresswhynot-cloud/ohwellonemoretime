@@ -75,6 +75,18 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         self.assertIsNotNone(unit)
         self.assertEqual(int(unit.unit_id), unit_id)
 
+    def test_set_unit_queue_enabled_updates_unit_and_outline_node(self):
+        unit_id = int(self.units[0]["id"])
+        node_id = int(self.units[0]["node_id"])
+
+        changed = self.review_repo.set_unit_queue_enabled(unit_id, False)
+        self.assertTrue(changed)
+
+        unit_row = self.db.conn.execute("SELECT queue_enabled FROM units WHERE id=?", (unit_id,)).fetchone()
+        node_row = self.db.conn.execute("SELECT queue_enabled FROM outline_nodes WHERE id=?", (node_id,)).fetchone()
+        self.assertEqual(int(unit_row["queue_enabled"]), 0)
+        self.assertEqual(int(node_row["queue_enabled"]), 0)
+
     def test_missed_due_items_resurface_later(self):
         unit_id = int(self.units[0]['id'])
         payload = {

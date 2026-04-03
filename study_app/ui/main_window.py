@@ -2389,6 +2389,14 @@ class StudyQueuePage(QWidget):
         self.refresh()
         return True
 
+    def remove_unit_from_queue(self, unit_id: int) -> bool:
+        if not self.review_repo.set_unit_queue_enabled(int(unit_id), False):
+            return False
+        self.remove_unit_from_today_queue(int(unit_id))
+        self._invalidate_analytics_cache()
+        self.refresh()
+        return True
+
     def open_queue_item_context_menu(self, pos) -> None:
         item = self.list.itemAt(pos)
         if not item:
@@ -2400,11 +2408,14 @@ class StudyQueuePage(QWidget):
         unit, _reason = self.display_units[idx]
         menu = QMenu(self)
         jump = menu.addAction("Open in Reader")
+        disable = menu.addAction("Remove from Queue")
         remove = menu.addAction("Remove from Today's Queue")
         chosen = menu.exec(self.list.viewport().mapToGlobal(pos))
         if chosen == jump:
             self.list.setCurrentRow(row)
             self.jump_to_active_unit()
+        elif chosen == disable:
+            self.remove_unit_from_queue(int(unit.unit_id))
         elif chosen == remove:
             self.remove_unit_from_today_queue(int(unit.unit_id))
 
