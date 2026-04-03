@@ -544,7 +544,7 @@ def _hint_editor_html() -> str:
           clozeIndex += 1;
           return '<span class=\"cloze-box cloze-hidden\" data-answer=\"' + encodeURIComponent(g1) + '\" data-cloze-idx=\"' + idx + '\" data-width-px=\"' + widthPx + '\" style=\"width:' + widthPx + 'px\">▇▇▇</span>';
         });
-        return marked.parse(replaced);
+        return marked.parse(replaced, { breaks: true, gfm: true });
       }
     });
     if (typeof editor.isPreviewActive === 'function' && !editor.isPreviewActive()) {
