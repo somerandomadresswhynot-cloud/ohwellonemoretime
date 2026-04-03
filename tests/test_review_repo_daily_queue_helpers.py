@@ -121,6 +121,15 @@ class ReviewRepoDailyQueueHelpersTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertNotIn(unit_id, {int(u.unit_id) for u in self.review_repo.new_units("2026-03-23T12:00:00+00:00")})
 
+    def test_clear_unit_postponement_restores_new_unit_visibility(self):
+        unit_id = int(self.units[0]["id"])
+        changed = self.review_repo.postpone_unit_for(unit_id, timedelta(days=2))
+        self.assertTrue(changed)
+        self.assertIn(unit_id, self.review_repo.active_postponed_unit_ids([unit_id], "2026-03-23T12:00:00+00:00"))
+        self.review_repo.clear_unit_postponement(unit_id)
+        self.assertNotIn(unit_id, self.review_repo.active_postponed_unit_ids([unit_id], "2026-03-23T12:00:00+00:00"))
+        self.assertIn(unit_id, {int(u.unit_id) for u in self.review_repo.new_units("2026-03-23T12:00:00+00:00")})
+
     def test_missed_due_items_resurface_later(self):
         unit_id = int(self.units[0]['id'])
         payload = {

@@ -2286,6 +2286,10 @@ class StudyQueuePage(QWidget):
             today_window["start_utc_iso"],
             today_window["next_start_utc_iso"],
         )
+        if reviewed_today_ordered:
+            postponed_reviewed = self.review_repo.active_postponed_unit_ids(reviewed_today_ordered, now_iso)
+            if postponed_reviewed:
+                reviewed_today_ordered = [rid for rid in reviewed_today_ordered if int(rid) not in postponed_reviewed]
         if planned_ids:
             saved_minutes = snapshot.get("daily_minutes")
             reviewed_today = self.review_repo.review_summary_between(
@@ -2375,6 +2379,7 @@ class StudyQueuePage(QWidget):
         unit = self.review_repo.first_unit_for_source_page(int(source_id), int(page))
         if not unit:
             return False
+        self.review_repo.clear_unit_postponement(int(unit.unit_id))
         snapshot = self._load_today_queue_snapshot()
         unit_ids = list(snapshot["unit_ids"])
         manual_unit_ids = list(snapshot.get("manual_unit_ids", []))
@@ -2389,7 +2394,7 @@ class StudyQueuePage(QWidget):
         self.refresh()
         return True
 
-    def remove_unit_from_today_queue(self, unit_id: int) -> bool:
+    def remove_unit_from_today_queue(self, unit_id: int, refresh_ui: bool = True) -> bool:
         snapshot = self._load_today_queue_snapshot()
         unit_ids = [int(uid) for uid in snapshot.get("unit_ids", [])]
         if int(unit_id) not in unit_ids:
@@ -2400,13 +2405,14 @@ class StudyQueuePage(QWidget):
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
         self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_ids)
         self._invalidate_analytics_cache()
-        self.refresh()
+        if refresh_ui:
+            self.refresh()
         return True
 
     def remove_unit_from_queue(self, unit_id: int) -> bool:
         if not self.review_repo.set_unit_queue_enabled(int(unit_id), False):
             return False
-        self.remove_unit_from_today_queue(int(unit_id))
+        self.remove_unit_from_today_queue(int(unit_id), refresh_ui=False)
         self._invalidate_analytics_cache()
         self.refresh()
         return True
@@ -2414,7 +2420,7 @@ class StudyQueuePage(QWidget):
     def postpone_unit_from_queue(self, unit_id: int, delta: timedelta) -> bool:
         if not self.review_repo.postpone_unit_for(int(unit_id), delta):
             return False
-        self.remove_unit_from_today_queue(int(unit_id))
+        self.remove_unit_from_today_queue(int(unit_id), refresh_ui=False)
         self._invalidate_analytics_cache()
         self.refresh()
         return True

@@ -520,6 +520,10 @@ class ReviewRepo:
         self.db.conn.commit()
         return True
 
+    def clear_unit_postponement(self, unit_id: int) -> None:
+        self.db.conn.execute("DELETE FROM unit_queue_postponements WHERE unit_id=?", (int(unit_id),))
+        self.db.conn.commit()
+
     def active_postponed_unit_ids(self, unit_ids: list[int], now_iso: str) -> set[int]:
         cleaned = [int(uid) for uid in unit_ids if uid is not None]
         if not cleaned:
