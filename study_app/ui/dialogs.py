@@ -252,6 +252,10 @@ class HintMarkdownDialog(QDialog):
         self.reveal_all_btn = QPushButton("Reveal All")
         self.hide_all_btn = QPushButton("Hide All")
         self.toggle_all_btn = QPushButton("Toggle All")
+        self.make_cloze_btn.setEnabled(False)
+        self.reveal_all_btn.setEnabled(False)
+        self.hide_all_btn.setEnabled(False)
+        self.toggle_all_btn.setEnabled(False)
         self.make_cloze_btn.setToolTip("Wrap selected text as {{c::...}}")
         self.reveal_all_btn.setToolTip("Reveal all clozes in rendered preview")
         self.hide_all_btn.setToolTip("Hide all clozes in rendered preview")
@@ -327,6 +331,10 @@ class HintMarkdownDialog(QDialog):
         if not ok:
             return
         self._is_loaded = True
+        self.make_cloze_btn.setEnabled(True)
+        self.reveal_all_btn.setEnabled(True)
+        self.hide_all_btn.setEnabled(True)
+        self.toggle_all_btn.setEnabled(True)
         payload = json.dumps(self._value)
         self.web.page().runJavaScript(f"window.setMarkdown({payload});")
         self._change_poll_timer.start()
@@ -475,8 +483,25 @@ def _hint_editor_html() -> str:
     });
     window.wrapSelectionCloze = function() {
       const cm = editor.codemirror;
-      const selected = cm.getSelection();
-      if (!selected || !selected.trim()) return;
+      let selected = cm.getSelection();
+      if (!selected || !selected.trim()) {
+        const pos = cm.getCursor();
+        const lineText = cm.getLine(pos.line) || '';
+        let start = pos.ch;
+        let end = pos.ch;
+        while (start > 0 && /[^\\s]/.test(lineText[start - 1])) {
+          start -= 1;
+        }
+        while (end < lineText.length && /[^\\s]/.test(lineText[end])) {
+          end += 1;
+        }
+        selected = lineText.slice(start, end);
+        if (!selected || !selected.trim()) return;
+        cm.setSelection({ line: pos.line, ch: start }, { line: pos.line, ch: end });
+      }
+      if (selected.startsWith('{{c::') && selected.endsWith('}}')) {
+        return;
+      }
       cm.replaceSelection('{{c::' + selected + '}}');
     };
     window.setAllClozes = function(reveal) {
