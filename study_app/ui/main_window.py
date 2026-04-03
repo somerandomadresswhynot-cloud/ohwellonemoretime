@@ -2266,12 +2266,30 @@ class StudyQueuePage(QWidget):
     def _resolve_today_queue_ids(self, due_units: list, daily_minutes: int, strict_sources: set[int]) -> tuple[list[int], bool]:
         snapshot = self._load_today_queue_snapshot()
         planned_ids = list(snapshot["unit_ids"])
+        now_iso = iso_utc(now_utc())
+        postponed_ids = self.review_repo.active_postponed_unit_ids(planned_ids, now_iso)
+        if postponed_ids:
+            manual_ids = [int(uid) for uid in snapshot.get("manual_unit_ids", [])]
+            planned_ids = [int(uid) for uid in planned_ids if int(uid) not in postponed_ids]
+            manual_ids = [int(uid) for uid in manual_ids if int(uid) not in postponed_ids]
+            self._store_today_queue_snapshot(
+                planned_ids,
+                daily_minutes,
+                manual_unit_ids=manual_ids,
+                projected_seconds=self._projected_seconds_for_ids(planned_ids),
+                estimator_signature=self._runtime_model_signature(),
+                last_rebuild_reason="drop_postponed",
+            )
         due_ids_in_order = [int(u.unit_id) for u in due_units]
         today_window = self._today_window()
         reviewed_today_ordered = self.review_repo.reviewed_unit_ids_between_ordered(
             today_window["start_utc_iso"],
             today_window["next_start_utc_iso"],
         )
+        if reviewed_today_ordered:
+            postponed_reviewed = self.review_repo.active_postponed_unit_ids(reviewed_today_ordered, now_iso)
+            if postponed_reviewed:
+                reviewed_today_ordered = [rid for rid in reviewed_today_ordered if int(rid) not in postponed_reviewed]
         if planned_ids:
             saved_minutes = snapshot.get("daily_minutes")
             reviewed_today = self.review_repo.review_summary_between(
@@ -2361,6 +2379,7 @@ class StudyQueuePage(QWidget):
         unit = self.review_repo.first_unit_for_source_page(int(source_id), int(page))
         if not unit:
             return False
+        self.review_repo.clear_unit_postponement(int(unit.unit_id))
         snapshot = self._load_today_queue_snapshot()
         unit_ids = list(snapshot["unit_ids"])
         manual_unit_ids = list(snapshot.get("manual_unit_ids", []))
@@ -2375,7 +2394,7 @@ class StudyQueuePage(QWidget):
         self.refresh()
         return True
 
-    def remove_unit_from_today_queue(self, unit_id: int) -> bool:
+    def remove_unit_from_today_queue(self, unit_id: int, refresh_ui: bool = True) -> bool:
         snapshot = self._load_today_queue_snapshot()
         unit_ids = [int(uid) for uid in snapshot.get("unit_ids", [])]
         if int(unit_id) not in unit_ids:
@@ -2386,8 +2405,53 @@ class StudyQueuePage(QWidget):
         daily_minutes = int(self.settings_repo.get("daily_minutes", "90"))
         self._store_today_queue_snapshot(unit_ids, daily_minutes, manual_unit_ids=manual_ids)
         self._invalidate_analytics_cache()
+        if refresh_ui:
+            self.refresh()
+        return True
+
+    def remove_unit_from_queue(self, unit_id: int) -> bool:
+        if not self.review_repo.set_unit_queue_enabled(int(unit_id), False):
+            return False
+        self.remove_unit_from_today_queue(int(unit_id), refresh_ui=False)
+        self._invalidate_analytics_cache()
         self.refresh()
         return True
+
+    def postpone_unit_from_queue(self, unit_id: int, delta: timedelta) -> bool:
+        if not self.review_repo.postpone_unit_for(int(unit_id), delta):
+            return False
+        self.remove_unit_from_today_queue(int(unit_id), refresh_ui=False)
+        self._invalidate_analytics_cache()
+        self.refresh()
+        return True
+
+    def _style_queue_context_menu(self, menu: QMenu) -> None:
+        menu.setStyleSheet(
+            "QMenu {"
+            "  background:#141c2b;"
+            "  border:1px solid #30405b;"
+            "  border-radius:10px;"
+            "  padding:6px;"
+            "}"
+            "QMenu::item {"
+            "  padding:7px 14px;"
+            "  margin:2px 4px;"
+            "  border-radius:7px;"
+            "  color:#dce7f7;"
+            "}"
+            "QMenu::item:selected {"
+            "  background:#2a3f69;"
+            "}"
+            "QMenu::item:pressed {"
+            "  background:#22314f;"
+            "  padding-left:16px;"
+            "}"
+            "QMenu::separator {"
+            "  height:1px;"
+            "  background:#3a4964;"
+            "  margin:6px 8px;"
+            "}"
+        )
 
     def open_queue_item_context_menu(self, pos) -> None:
         item = self.list.itemAt(pos)
@@ -2399,14 +2463,34 @@ class StudyQueuePage(QWidget):
             return
         unit, _reason = self.display_units[idx]
         menu = QMenu(self)
+        self._style_queue_context_menu(menu)
+        menu.addSection("Unit actions")
         jump = menu.addAction("Open in Reader")
-        remove = menu.addAction("Remove from Today's Queue")
+        menu.addSeparator()
+        menu.addSection("Queue options")
+        disable = menu.addAction("Remove from Queue")
+        postpone_menu = menu.addMenu("Postpone for")
+        postpone_1h = postpone_menu.addAction("1h")
+        postpone_1d = postpone_menu.addAction("1d")
+        postpone_7d = postpone_menu.addAction("7d")
+        postpone_14d = postpone_menu.addAction("14d")
+        postpone_30d = postpone_menu.addAction("30d")
         chosen = menu.exec(self.list.viewport().mapToGlobal(pos))
         if chosen == jump:
             self.list.setCurrentRow(row)
             self.jump_to_active_unit()
-        elif chosen == remove:
-            self.remove_unit_from_today_queue(int(unit.unit_id))
+        elif chosen == disable:
+            self.remove_unit_from_queue(int(unit.unit_id))
+        elif chosen == postpone_1h:
+            self.postpone_unit_from_queue(int(unit.unit_id), timedelta(hours=1))
+        elif chosen == postpone_1d:
+            self.postpone_unit_from_queue(int(unit.unit_id), timedelta(days=1))
+        elif chosen == postpone_7d:
+            self.postpone_unit_from_queue(int(unit.unit_id), timedelta(days=7))
+        elif chosen == postpone_14d:
+            self.postpone_unit_from_queue(int(unit.unit_id), timedelta(days=14))
+        elif chosen == postpone_30d:
+            self.postpone_unit_from_queue(int(unit.unit_id), timedelta(days=30))
 
     def _resize_pdf_by_delta(self, delta: int):
         current = self.pdf.minimumHeight()
