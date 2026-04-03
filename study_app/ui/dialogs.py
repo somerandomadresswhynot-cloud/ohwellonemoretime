@@ -252,10 +252,6 @@ class HintMarkdownDialog(QDialog):
         self.reveal_all_btn = QPushButton("Reveal All")
         self.hide_all_btn = QPushButton("Hide All")
         self.toggle_all_btn = QPushButton("Toggle All")
-        self.make_cloze_btn.setEnabled(False)
-        self.reveal_all_btn.setEnabled(False)
-        self.hide_all_btn.setEnabled(False)
-        self.toggle_all_btn.setEnabled(False)
         self.make_cloze_btn.setToolTip("Wrap selected text as {{c::...}}")
         self.reveal_all_btn.setToolTip("Reveal all clozes in rendered preview")
         self.hide_all_btn.setToolTip("Hide all clozes in rendered preview")
@@ -331,10 +327,6 @@ class HintMarkdownDialog(QDialog):
         if not ok:
             return
         self._is_loaded = True
-        self.make_cloze_btn.setEnabled(True)
-        self.reveal_all_btn.setEnabled(True)
-        self.hide_all_btn.setEnabled(True)
-        self.toggle_all_btn.setEnabled(True)
         payload = json.dumps(self._value)
         self.web.page().runJavaScript(f"window.setMarkdown({payload});")
         self._change_poll_timer.start()
@@ -428,21 +420,70 @@ def _hint_editor_html() -> str:
     .cloze-box { display:inline-block; vertical-align:baseline; white-space:nowrap; overflow:hidden; text-overflow:clip; border-radius:4px; padding:0 4px; cursor:pointer; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .cloze-hidden { background:#33425f; color:transparent; }
     .cloze-shown { background:#1f7a3d; color:#ecffef; }
+    .cloze-menu {
+      position:absolute;
+      display:none;
+      flex-direction:column;
+      z-index:9999;
+      border:1px solid #345389;
+      border-radius:8px;
+      overflow:hidden;
+      background:#122546;
+      box-shadow:0 8px 22px rgba(0,0,0,0.35);
+    }
+    .cloze-menu button {
+      border:0;
+      color:#e8f0ff;
+      background:#122546;
+      text-align:left;
+      padding:8px 12px;
+      cursor:pointer;
+    }
+    .cloze-menu button:hover { background:#223a64; }
   </style>
 </head>
 <body>
   <textarea id="editor-root"></textarea>
+  <div id="cloze-menu" class="cloze-menu">
+    <button type="button" id="cloze-menu-toggle">Reveal/Hide</button>
+    <button type="button" id="cloze-menu-uncloze">Make normal text</button>
+  </div>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
   <script>
     const measureCanvas = document.createElement('canvas');
     const measureCtx = measureCanvas.getContext('2d');
     const clozeFont = '600 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    const clozeMenu = document.getElementById('cloze-menu');
+    const clozeMenuToggle = document.getElementById('cloze-menu-toggle');
+    const clozeMenuUncloze = document.getElementById('cloze-menu-uncloze');
+    let clozeMenuTarget = null;
+    function hideClozeMenu() {
+      clozeMenu.style.display = 'none';
+      clozeMenuTarget = null;
+    }
+    function showClozeMenu(target, x, y) {
+      clozeMenuTarget = target;
+      clozeMenu.style.left = x + 'px';
+      clozeMenu.style.top = y + 'px';
+      clozeMenu.style.display = 'flex';
+    }
     function clozeWidthPx(value) {
       measureCtx.font = clozeFont;
       const text = value || '';
       const measured = Math.ceil(measureCtx.measureText(text).width);
       return Math.max(42, measured + 14);
+    }
+    function replaceNthClozeWithText(markdown, targetIndex) {
+      let idx = 0;
+      return (markdown || '').replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(match, g1) {
+        if (idx === targetIndex) {
+          idx += 1;
+          return g1;
+        }
+        idx += 1;
+        return match;
+      });
     }
     let editor = new EasyMDE({
       element: document.getElementById('editor-root'),
@@ -456,11 +497,31 @@ def _hint_editor_html() -> str:
       ],
       renderingConfig: { singleLineBreaks: false },
       previewRender: function(text) {
+        let clozeIndex = 0;
         const replaced = text.replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(_m, g1) {
           const widthPx = clozeWidthPx(g1);
-          return '<span class=\"cloze-box cloze-hidden\" data-answer=\"' + encodeURIComponent(g1) + '\" data-width-px=\"' + widthPx + '\" style=\"width:' + widthPx + 'px\">▇▇▇</span>';
+          const idx = clozeIndex;
+          clozeIndex += 1;
+          return '<span class=\"cloze-box cloze-hidden\" data-answer=\"' + encodeURIComponent(g1) + '\" data-cloze-idx=\"' + idx + '\" data-width-px=\"' + widthPx + '\" style=\"width:' + widthPx + 'px\">▇▇▇</span>';
         });
         return marked.parse(replaced);
+      }
+    });
+    document.addEventListener('contextmenu', function(ev) {
+      const target = ev.target;
+      if (!target || !target.classList || !target.classList.contains('cloze-box')) {
+        hideClozeMenu();
+        return;
+      }
+      ev.preventDefault();
+      showClozeMenu(target, ev.pageX, ev.pageY);
+    });
+    document.addEventListener('click', function(ev) {
+      if (clozeMenu.style.display === 'none') {
+        return;
+      }
+      if (!clozeMenu.contains(ev.target)) {
+        hideClozeMenu();
       }
     });
     document.addEventListener('click', function(ev) {
@@ -480,6 +541,26 @@ def _hint_editor_html() -> str:
         target.classList.remove('cloze-shown');
         target.classList.add('cloze-hidden');
       }
+    });
+    clozeMenuToggle.addEventListener('click', function() {
+      if (!clozeMenuTarget) return;
+      if (clozeMenuTarget.classList.contains('cloze-hidden')) {
+        clozeMenuTarget.click();
+      } else if (clozeMenuTarget.classList.contains('cloze-shown')) {
+        clozeMenuTarget.click();
+      }
+      hideClozeMenu();
+    });
+    clozeMenuUncloze.addEventListener('click', function() {
+      if (!clozeMenuTarget) return;
+      const idx = parseInt(clozeMenuTarget.getAttribute('data-cloze-idx') || '-1', 10);
+      if (idx < 0) {
+        hideClozeMenu();
+        return;
+      }
+      const updated = replaceNthClozeWithText(editor.value(), idx);
+      editor.value(updated);
+      hideClozeMenu();
     });
     window.wrapSelectionCloze = function() {
       const cm = editor.codemirror;
