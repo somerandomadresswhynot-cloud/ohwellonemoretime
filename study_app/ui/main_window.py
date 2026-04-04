@@ -39,7 +39,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from study_app.persistence.repositories import HighlightRepo, OutlineRepo, ReviewRepo, SettingsRepo, SourceRepo, _derive_due_at_from_events
+from study_app.persistence.repositories import (
+    EVENT_AGAIN,
+    EVENT_TO_STABILIZING,
+    EVENT_LEARNING_SUBMIT,
+    HighlightRepo,
+    OutlineRepo,
+    ReviewRepo,
+    SettingsRepo,
+    SourceRepo,
+    _derive_due_at_from_events,
+    derive_unit_mode_and_due,
+)
 from study_app.pdf.pdf_service import PdfService
 from study_app.services.outline_service import entries_to_text
 from study_app.services.queue_planner import plan_session_queue
@@ -1913,6 +1924,7 @@ class StudyQueuePage(QWidget):
         self.pre_note_text = ""
         self.post_note_text = ""
         self._selected_rating: str | None = None
+        self._current_mode: str = "learning"
         self.hint_markdown_text = ""
         self.hint_last_changed_at: str | None = None
         self._hint_dialog: HintMarkdownDialog | None = None
@@ -1956,13 +1968,24 @@ class StudyQueuePage(QWidget):
 
         ratings = QGridLayout()
         ratings.setSpacing(8)
+        learning_actions = QHBoxLayout()
+        learning_actions.setSpacing(8)
+        self.learning_submit_btn = QPushButton("Submit")
+        self.learning_submit_btn.setMinimumHeight(36)
+        self.learning_submit_btn.clicked.connect(lambda: self.record_learning_action(EVENT_LEARNING_SUBMIT))
+        self.to_stabilizing_btn = QPushButton("To Stabilizing")
+        self.to_stabilizing_btn.setMinimumHeight(36)
+        self.to_stabilizing_btn.clicked.connect(lambda: self.record_learning_action(EVENT_TO_STABILIZING))
+        learning_actions.addWidget(self.learning_submit_btn)
+        learning_actions.addWidget(self.to_stabilizing_btn)
+        learning_actions.addStretch()
         self._rating_buttons: dict[str, QPushButton] = {}
-        rating_pos = [("Easy", "easy", 0, 0), ("With Effort", "with_effort", 0, 1), ("Hard", "hard", 1, 0), ("Skip", "skip", 1, 1)]
+        rating_pos = [("Again", "again", 0, 0), ("Hard", "hard", 0, 1), ("With Effort", "with_effort", 1, 0), ("Easy", "easy", 1, 1)]
         self._rating_button_base_styles = {
             "easy": "background:#24503f; border:1px solid #2e7257; color:#d5f4e4;",
             "with_effort": "background:#564b2a; border:1px solid #86743a; color:#fff0cc;",
             "hard": "background:#5a3036; border:1px solid #8a4a54; color:#ffdbe0;",
-            "skip": "background:#3a435d; border:1px solid #4c5877; color:#dbe4ff;",
+            "again": "background:#3a435d; border:1px solid #4c5877; color:#dbe4ff;",
         }
         for label, r, row, col in rating_pos:
             b = QPushButton(label)
@@ -2058,6 +2081,7 @@ class StudyQueuePage(QWidget):
         srs_section = QWidget()
         srs_section_l = QVBoxLayout(srs_section)
         srs_section_l.setContentsMargins(0, 0, 0, 0)
+        srs_section_l.addLayout(learning_actions)
         srs_section_l.addLayout(ratings)
         left_controls_col.addWidget(srs_section)
 
@@ -2131,7 +2155,11 @@ class StudyQueuePage(QWidget):
         self.rate(rating)
 
     def _update_rating_buttons_ui(self) -> None:
+        learning_mode = self._current_mode == "learning"
+        self.learning_submit_btn.setVisible(learning_mode)
+        self.to_stabilizing_btn.setVisible(learning_mode)
         for key, btn in self._rating_buttons.items():
+            btn.setVisible(not learning_mode)
             selected = (key == self._selected_rating)
             btn.blockSignals(True)
             btn.setChecked(selected)
@@ -2673,6 +2701,8 @@ class StudyQueuePage(QWidget):
             ORDER BY order_index""",
             (source_id,),
         ).fetchall()
+        unit_ids = [int(r["id"]) for r in rows]
+        history_by_unit = self.review_repo.review_history_for_units(unit_ids)
         self.queue_outline_tree.clear()
         self._queue_outline_items = {}
         self._queue_outline_rows_by_id = {int(r["id"]): r for r in rows}
@@ -2815,10 +2845,17 @@ class StudyQueuePage(QWidget):
         )
         self.units = self.review_repo.unit_views_by_ids(planned_ids)
         self._queue_history_by_unit = self.review_repo.review_history_for_units([int(u.unit_id) for u in self.units])
+        self._queue_mode_by_unit: dict[int, str] = {}
+        self._queue_due_by_unit: dict[int, str | None] = {}
         for unit in self.units:
             history = self._queue_history_by_unit.get(int(unit.unit_id), [])
-            unit.review_count = len(history)
+            derived = derive_unit_mode_and_due(history)
+            self._queue_mode_by_unit[int(unit.unit_id)] = str(derived.get("mode") or "learning")
+            self._queue_due_by_unit[int(unit.unit_id)] = derived.get("due_at")
+            fsrs_count = sum(1 for ev in history if str(ev.get("event_kind") or "") == "fsrs_review" and str(ev.get("fsrs_grade") or "") in {"hard", "with_effort", "easy"})
+            unit.review_count = fsrs_count
             unit.last_review_at = str(history[-1]["ended_at"]) if history else None
+            unit.next_review_at = derived.get("due_at")
         todo_units = [u for u in self.units if int(u.unit_id) not in completed_today]
         done_units = [u for u in self.units if int(u.unit_id) in completed_today]
         ordered_units = todo_units + done_units
@@ -2858,6 +2895,7 @@ class StudyQueuePage(QWidget):
                 u,
                 est_seconds,
                 retention,
+                mode=self._queue_mode_by_unit.get(int(u.unit_id), "learning"),
                 progression_reason=reason,
                 is_done=is_done,
                 actual_seconds=done_elapsed_by_unit.get(int(u.unit_id)),
@@ -2911,14 +2949,18 @@ class StudyQueuePage(QWidget):
 
     def _estimate_retention(self, unit) -> float | None:
         history = self._queue_history_by_unit.get(int(unit.unit_id), [])
-        if not history:
+        derived = derive_unit_mode_and_due(history)
+        if str(derived.get("mode")) != "review":
+            return None
+        active_fsrs = list(derived.get("active_fsrs_events") or [])
+        if not active_fsrs:
             return None
         now = now_utc()
         try:
-            last_review_at = parse_iso_to_utc(str(history[-1]["ended_at"]))
+            last_review_at = parse_iso_to_utc(str(active_fsrs[-1]["ended_at"]))
         except Exception:
             return None
-        due_iso = _derive_due_at_from_events(history)
+        due_iso = derived.get("due_at")
         interval_days = 1.0
         if due_iso:
             try:
@@ -2971,6 +3013,7 @@ class StudyQueuePage(QWidget):
         unit,
         est_seconds: float,
         retention: float | None,
+        mode: str = "learning",
         progression_reason: str | None = None,
         is_done: bool = False,
         actual_seconds: float | None = None,
@@ -3002,8 +3045,12 @@ class StudyQueuePage(QWidget):
         else:
             mins = QLabel(self._format_estimated_time(est_seconds))
         mins.setObjectName("badge")
-        if retention is None:
-            retention_lbl = QLabel("new")
+        if mode == "stabilizing":
+            retention_lbl = QLabel("stabilizing")
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffeecf; background: #5a4a22;")
+            ret_pct = None
+        elif retention is None:
+            retention_lbl = QLabel("learning")
             retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d9e8ff; background: #22345a;")
             ret_pct = None
         else:
@@ -3179,17 +3226,24 @@ class StudyQueuePage(QWidget):
         for u in rows:
             state = "unstarted"
             ret = None
-            if u["review_count"] > 0:
+            history = history_by_unit.get(int(u["id"]), [])
+            derived = derive_unit_mode_and_due(history)
+            mode = str(derived.get("mode") or "learning")
+            if mode == "stabilizing":
                 state = "learning"
-                ret = retention_estimate(u, now)
-                nr = u["next_review_at"]
-                if nr:
-                    try:
-                        next_dt = parse_iso_to_utc(nr)
-                        if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
-                            state = "mastered"
-                    except Exception:
-                        pass
+            elif mode == "review":
+                state = "learning"
+                active_fsrs = list(derived.get("active_fsrs_events") or [])
+                if active_fsrs:
+                    ret = retention_estimate(u, now)
+                    nr = derived.get("due_at")
+                    if nr:
+                        try:
+                            next_dt = parse_iso_to_utc(str(nr))
+                            if ret >= 0.9 and (next_dt - now) >= timedelta(days=180):
+                                state = "mastered"
+                        except Exception:
+                            pass
             segs.append({
                 "title": u["title"],
                 "start_page": int(u["start_page"]),
@@ -3243,6 +3297,7 @@ class StudyQueuePage(QWidget):
             return
         if mapped_idx < 0 or mapped_idx >= len(self.display_units):
             self.active_unit = None
+            self._current_mode = "learning"
             self.hint_markdown_text = ""
             self.hint_last_changed_at = None
             self._refresh_note_previews()
@@ -3255,6 +3310,9 @@ class StudyQueuePage(QWidget):
             self.review_history_list.clear()
             return
         self.active_unit = self.display_units[mapped_idx][0]
+        history = self._queue_history_by_unit.get(int(self.active_unit.unit_id), [])
+        derived = derive_unit_mode_and_due(history)
+        self._current_mode = str(derived.get("mode") or "learning")
         self.title.setText(f"{self.active_unit.source_title} — {self.active_unit.title}")
         path = self.source_path_cache.get(self.active_unit.source_id)
         if not path:
@@ -3281,6 +3339,7 @@ class StudyQueuePage(QWidget):
         self.hint_markdown_text = self.review_repo.unit_hint_markdown(self.active_unit.unit_id)
         self.hint_last_changed_at = self.review_repo.unit_hint_last_changed_at(self.active_unit.unit_id)
         self._refresh_note_previews()
+        self._update_rating_buttons_ui()
         self._refresh_queue_history_panel()
         self._queue_last_pdf_page = int(self.pdf.view_state().get("page", self.active_unit.start_page))
         self._refresh_queue_doc_progress(self._queue_last_pdf_page)
@@ -3327,11 +3386,16 @@ class StudyQueuePage(QWidget):
     def rate(self, rating: str):
         if not self.active_unit:
             return
+        if rating == "again":
+            self.record_learning_action(EVENT_AGAIN)
+            return
         self._selected_rating = rating
         self._update_rating_buttons_ui()
         now = now_utc()
         unit_row = self.review_repo.unit_by_id(self.active_unit.unit_id)
-        history = self.review_repo.events_for_unit_chronological(self.active_unit.unit_id)
+        history = [dict(ev) for ev in self.review_repo.events_for_unit_chronological(self.active_unit.unit_id)]
+        derived = derive_unit_mode_and_due(history)
+        active_fsrs_history = list(derived.get("active_fsrs_events") or [])
         # Keep scheduling aligned with the explicit app timezone setting used for "today" boundaries.
         tzinfo = parse_gmt_offset(normalized_gmt_offset(self.settings_repo.get("timezone_gmt_offset", "+00:00")))
         try:
@@ -3340,7 +3404,7 @@ class StudyQueuePage(QWidget):
             desired_retention = 0.9
         fsrs_result = schedule_next_review(
             unit_row=unit_row,
-            review_events=history,
+            review_events=active_fsrs_history,
             now=now,
             feedback=rating,
             timezone_info=tzinfo,
@@ -3356,7 +3420,7 @@ class StudyQueuePage(QWidget):
             "post_note": self.post_note_text,
         }
         count = unit_row["review_count"] + 1
-        avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2, "skip": 1}[rating]) / count
+        avg = ((unit_row["avg_rating"] * unit_row["review_count"]) + {"easy": 5, "with_effort": 3, "hard": 2}[rating]) / count
         unit_stats = {
             "last_review_at": iso_utc(now),
             "review_count": count,
@@ -3377,6 +3441,27 @@ class StudyQueuePage(QWidget):
         self.reset_timer()
         self.pre_note_text = ""
         self.post_note_text = ""
+        self._refresh_note_previews()
+        self.refresh()
+
+    def record_learning_action(self, event_kind: str) -> None:
+        if not self.active_unit:
+            return
+        now = now_utc()
+        payload = {
+            "started_at": iso_utc(self.started_at or now),
+            "ended_at": iso_utc(now),
+            "elapsed_seconds": self.timer_seconds,
+            "pre_note": self.pre_note_text,
+            "post_note": self.post_note_text,
+        }
+        self.review_repo.record_learning_event(self.active_unit.unit_id, payload, event_kind=event_kind)
+        self._invalidate_analytics_cache()
+        self.unit_drafts.pop(self.active_unit.unit_id, None)
+        self.reset_timer()
+        self.pre_note_text = ""
+        self.post_note_text = ""
+        self._selected_rating = None
         self._refresh_note_previews()
         self.refresh()
 
@@ -3510,7 +3595,15 @@ class StudyQueuePage(QWidget):
         for ev in events:
             ended = str(ev["ended_at"] or "")
             day = ended[:10] if len(ended) >= 10 else ended
-            text = f"• {day} · {ev['rating']} · {ev['elapsed_seconds']}s"
+            kind = str(ev["event_kind"] or "")
+            grade = str(ev["fsrs_grade"] or "")
+            if kind == "fsrs_review":
+                label = f"fsrs:{grade or ev['rating']}"
+            elif kind:
+                label = kind
+            else:
+                label = str(ev["rating"])
+            text = f"• {day} · {label} · {ev['elapsed_seconds']}s"
             self.review_history_list.addItem(text)
 
 
@@ -3671,7 +3764,7 @@ class StatisticsPage(QWidget):
         self.rating_bars: dict[str, QProgressBar] = {}
         self.rating_labels: dict[str, QLabel] = {}
         for key, label in [
-            ("skip", "Skip"),
+            ("again", "Again"),
             ("hard", "Hard"),
             ("with_effort", "Partially Recalled"),
             ("easy", "Easily Recalled"),
@@ -3704,11 +3797,20 @@ class StatisticsPage(QWidget):
         self.refresh()
 
     def _rating_breakdown(self, rows: list[dict]) -> dict[str, int]:
-        counts = {"easy": 0, "with_effort": 0, "hard": 0, "skip": 0}
+        counts = {"easy": 0, "with_effort": 0, "hard": 0, "again": 0}
         for r in rows:
-            rating = str(r["rating"] or "")
-            if rating in counts:
-                counts[rating] += 1
+            kind = str(r["event_kind"] or "")
+            grade = str(r["fsrs_grade"] or "")
+            if kind == "again":
+                counts["again"] += 1
+            elif kind == "fsrs_review" and grade in {"hard", "with_effort", "easy"}:
+                counts[grade] += 1
+            elif not kind:
+                rating = str(r["rating"] or "")
+                if rating == "skip":
+                    counts["again"] += 1
+                elif rating in {"hard", "with_effort", "easy"}:
+                    counts[rating] += 1
         return counts
 
     def _streak_days(self, day_hits: set[str]) -> int:
@@ -3730,7 +3832,7 @@ class StatisticsPage(QWidget):
         since_month = iso_utc(now - timedelta(days=31))
 
         recent_rows = conn.execute(
-            "SELECT ended_at,elapsed_seconds,rating FROM review_events WHERE deleted_at IS NULL AND ended_at>=? ORDER BY ended_at ASC",
+            "SELECT ended_at,elapsed_seconds,rating,event_kind,fsrs_grade FROM review_events WHERE deleted_at IS NULL AND ended_at>=? ORDER BY ended_at ASC",
             (since_month,),
         ).fetchall()
 

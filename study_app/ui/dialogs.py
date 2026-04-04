@@ -115,7 +115,15 @@ class ReviewHistoryDialog(QDialog):
         for ev in self.events:
             ended = str(ev["ended_at"] or "")
             day = ended[:10] if len(ended) >= 10 else ended
-            item = QListWidgetItem(f"#{ev['id']} {day} {ev['rating']} {ev['elapsed_seconds']}s")
+            kind = str(ev["event_kind"] or "")
+            grade = str(ev["fsrs_grade"] or "")
+            if kind == "fsrs_review":
+                label = f"fsrs:{grade or ev['rating']}"
+            elif kind:
+                label = kind
+            else:
+                label = str(ev["rating"])
+            item = QListWidgetItem(f"#{ev['id']} {day} {label} {ev['elapsed_seconds']}s")
             item.setData(256, ev)
             self.list.addItem(item)
         if self.list.count():

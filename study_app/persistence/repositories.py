@@ -17,12 +17,109 @@ from study_app.services.fsrs_scheduler import (
     replay_history_into_state,
 )
 
+EVENT_LEARNING_SUBMIT = "learning_submit"
+EVENT_TO_STABILIZING = "to_stabilizing"
+EVENT_AGAIN = "again"
+EVENT_FSRS_REVIEW = "fsrs_review"
+RESET_EVENT_KINDS = {EVENT_TO_STABILIZING, EVENT_AGAIN}
+FSRS_GRADES = {"hard", "with_effort", "easy"}
+
+
+def _event_kind(row: dict) -> str:
+    kind = str(row.get("event_kind") or "").strip()
+    if kind:
+        return kind
+    rating = str(row.get("rating") or "").strip()
+    if rating == "skip":
+        return EVENT_AGAIN
+    return EVENT_FSRS_REVIEW
+
+
+def _event_fsrs_grade(row: dict) -> str | None:
+    grade = str(row.get("fsrs_grade") or "").strip()
+    if grade in FSRS_GRADES:
+        return grade
+    rating = str(row.get("rating") or "").strip()
+    if rating in FSRS_GRADES:
+        return rating
+    return None
+
+
+def _next_day_due_from_anchor(anchor_iso: str) -> str | None:
+    try:
+        anchor_dt = parse_iso_to_utc(str(anchor_iso))
+    except Exception:
+        return None
+    due_dt = anchor_dt + timedelta(days=1)
+    due_dt = _round_due_to_local_day_start_utc(due_dt, None)
+    return iso_utc(due_dt)
+
+
+def _active_fsrs_events_after_reset(events: list[dict]) -> list[dict]:
+    if not events:
+        return []
+    ordered = sorted(events, key=lambda r: (str(r.get("ended_at") or ""), int(r.get("id") or 0)))
+    last_reset_idx = -1
+    for idx, ev in enumerate(ordered):
+        if _event_kind(ev) in RESET_EVENT_KINDS:
+            last_reset_idx = idx
+    out: list[dict] = []
+    for ev in ordered[last_reset_idx + 1 :]:
+        if _event_kind(ev) != EVENT_FSRS_REVIEW:
+            continue
+        grade = _event_fsrs_grade(ev)
+        if grade not in FSRS_GRADES:
+            continue
+        out.append({"ended_at": str(ev["ended_at"]), "rating": grade})
+    return out
+
+
+def derive_unit_mode_and_due(events: list[dict]) -> dict:
+    ordered = sorted(events, key=lambda r: (str(r.get("ended_at") or ""), int(r.get("id") or 0)))
+    last_learning = None
+    last_reset = None
+    for ev in ordered:
+        kind = _event_kind(ev)
+        if kind == EVENT_LEARNING_SUBMIT:
+            last_learning = str(ev.get("ended_at") or "")
+        if kind in RESET_EVENT_KINDS:
+            last_reset = str(ev.get("ended_at") or "")
+    active_fsrs = _active_fsrs_events_after_reset(ordered)
+    if active_fsrs:
+        return {
+            "mode": "review",
+            "due_at": _derive_due_at_from_events(active_fsrs),
+            "active_fsrs_events": active_fsrs,
+            "last_anchor_at": str(active_fsrs[-1]["ended_at"]),
+        }
+    if last_reset:
+        return {
+            "mode": "stabilizing",
+            "due_at": _next_day_due_from_anchor(last_reset),
+            "active_fsrs_events": [],
+            "last_anchor_at": last_reset,
+        }
+    if last_learning:
+        return {
+            "mode": "learning",
+            "due_at": _next_day_due_from_anchor(last_learning),
+            "active_fsrs_events": [],
+            "last_anchor_at": last_learning,
+        }
+    return {"mode": "learning", "due_at": None, "active_fsrs_events": [], "last_anchor_at": None}
+
 
 def _derive_due_at_from_events(events: list[dict]) -> str | None:
-    if not events:
+    normalized = []
+    for ev in events:
+        rating = str(ev.get("rating") or "").strip()
+        if rating not in FSRS_GRADES:
+            continue
+        normalized.append({"ended_at": str(ev["ended_at"]), "rating": rating})
+    if not normalized:
         return None
     try:
-        state = replay_history_into_state(events, DEFAULT_FSRS_PARAMETERS)
+        state = replay_history_into_state(normalized, DEFAULT_FSRS_PARAMETERS)
     except Exception:
         return None
     if state is None:
@@ -222,7 +319,7 @@ class ReviewRepo:
         if unit_ids:
             placeholders = ",".join("?" for _ in unit_ids)
             event_rows = self.db.conn.execute(
-                f"""SELECT unit_id, ended_at, rating
+                f"""SELECT id, unit_id, ended_at, rating, event_kind, fsrs_grade
                 FROM review_events
                 WHERE deleted_at IS NULL AND unit_id IN ({placeholders})
                 ORDER BY unit_id ASC, ended_at ASC, id ASC""",
@@ -230,8 +327,11 @@ class ReviewRepo:
             ).fetchall()
             for ev in event_rows:
                 events_by_unit[int(ev["unit_id"])].append({
+                    "id": int(ev["id"]),
                     "ended_at": ev["ended_at"],
                     "rating": ev["rating"],
+                    "event_kind": ev["event_kind"] if "event_kind" in ev.keys() else "",
+                    "fsrs_grade": ev["fsrs_grade"] if "fsrs_grade" in ev.keys() else None,
                 })
         out: list[UnitView] = []
         for r in rows:
@@ -239,8 +339,9 @@ class ReviewRepo:
             unit_events = events_by_unit.get(unit_id, [])
             if not unit_events:
                 continue
+            derived = derive_unit_mode_and_due(unit_events)
             last_review_at = unit_events[-1]["ended_at"] if unit_events else None
-            due_at_iso = _derive_due_at_from_events(unit_events)
+            due_at_iso = derived.get("due_at")
             if not _is_due_now(due_at_iso, now_iso):
                 continue
             out.append(UnitView(
@@ -586,6 +687,10 @@ class ReviewRepo:
             FROM review_events re
             JOIN units u ON u.id=re.unit_id
             WHERE re.deleted_at IS NULL
+              AND (
+                re.event_kind='fsrs_review'
+                OR (COALESCE(trim(re.event_kind), '')='' AND re.rating IN ('hard','with_effort','easy'))
+              )
             ORDER BY re.unit_id ASC, re.ended_at ASC, re.id ASC"""
         ).fetchall()
         out: list[dict] = []
@@ -609,7 +714,7 @@ class ReviewRepo:
             return {}
         placeholders = ",".join("?" for _ in cleaned)
         rows = self.db.conn.execute(
-            f"""SELECT unit_id, ended_at, rating
+            f"""SELECT id, unit_id, ended_at, rating, event_kind, fsrs_grade
             FROM review_events
             WHERE deleted_at IS NULL AND unit_id IN ({placeholders})
             ORDER BY unit_id ASC, ended_at ASC, id ASC""",
@@ -618,8 +723,11 @@ class ReviewRepo:
         out: dict[int, list[dict]] = defaultdict(list)
         for row in rows:
             out[int(row["unit_id"])].append({
+                "id": int(row["id"]),
                 "ended_at": str(row["ended_at"]),
                 "rating": str(row["rating"]),
+                "event_kind": str(row["event_kind"] or ""),
+                "fsrs_grade": (str(row["fsrs_grade"]) if row["fsrs_grade"] else None),
             })
         return dict(out)
 
@@ -638,14 +746,16 @@ class ReviewRepo:
 
     def add_event(self, unit_id: int, payload: dict) -> int:
         cur = self.db.conn.execute(
-            """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,pre_note,post_note,interval_days,next_review_at)
-            VALUES(?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,event_kind,fsrs_grade,pre_note,post_note,interval_days,next_review_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 unit_id,
                 payload["started_at"],
                 payload["ended_at"],
                 payload["elapsed_seconds"],
-                payload["rating"],
+                payload.get("rating", ""),
+                payload.get("event_kind", EVENT_FSRS_REVIEW),
+                payload.get("fsrs_grade"),
                 payload["pre_note"],
                 payload["post_note"],
                 0.0,
@@ -655,48 +765,76 @@ class ReviewRepo:
         self.db.conn.commit()
         return int(cur.lastrowid)
 
-    def record_review(self, unit_id: int, payload: dict, unit_stats: dict) -> int:
+    def _record_unit_event(self, unit_id: int, payload: dict, unit_stats: dict | None = None) -> int:
+        event_kind = str(payload.get("event_kind") or EVENT_FSRS_REVIEW)
+        fsrs_grade = payload.get("fsrs_grade")
+        rating_value = payload.get("rating")
+        if rating_value is None:
+            rating_value = fsrs_grade if fsrs_grade else event_kind
+        if fsrs_grade and fsrs_grade not in FSRS_GRADES:
+            raise ValueError(f"Unsupported fsrs_grade '{fsrs_grade}'")
         with self.db.conn:
             cur = self.db.conn.execute(
-                """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,pre_note,post_note,interval_days,next_review_at)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
+                """INSERT INTO review_events(unit_id,started_at,ended_at,elapsed_seconds,rating,event_kind,fsrs_grade,pre_note,post_note,interval_days,next_review_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     unit_id,
                     payload["started_at"],
                     payload["ended_at"],
                     payload["elapsed_seconds"],
-                    payload["rating"],
+                    rating_value,
+                    event_kind,
+                    fsrs_grade,
                     payload["pre_note"],
                     payload["post_note"],
                     0.0,
                     payload["ended_at"],
                 ),
             )
-            update_cur = self.db.conn.execute(
-                """UPDATE units
-                SET last_review_at=?,review_count=?,ease_factor=?,avg_rating=?,
-                    fsrs_difficulty=?,fsrs_stability=?,fsrs_last_review_at=?,fsrs_last_grade=?,fsrs_review_count=?,fsrs_lapse_count=?,
-                    fsrs_state_version=?,fsrs_due_retention_used=?
-                WHERE id=?""",
-                (
-                    unit_stats["last_review_at"],
-                    unit_stats["review_count"],
-                    unit_stats["ease_factor"],
-                    unit_stats["avg_rating"],
-                    unit_stats.get("fsrs_difficulty"),
-                    unit_stats.get("fsrs_stability"),
-                    unit_stats.get("fsrs_last_review_at"),
-                    unit_stats.get("fsrs_last_grade"),
-                    unit_stats.get("fsrs_review_count"),
-                    unit_stats.get("fsrs_lapse_count"),
-                    unit_stats.get("fsrs_state_version"),
-                    unit_stats.get("fsrs_due_retention_used"),
-                    unit_id,
-                ),
-            )
-            if update_cur.rowcount != 1:
-                raise RuntimeError(f"Expected to update exactly one unit row for unit_id={unit_id}")
+            if unit_stats is not None:
+                update_cur = self.db.conn.execute(
+                    """UPDATE units
+                    SET last_review_at=?,review_count=?,ease_factor=?,avg_rating=?,
+                        fsrs_difficulty=?,fsrs_stability=?,fsrs_last_review_at=?,fsrs_last_grade=?,fsrs_review_count=?,fsrs_lapse_count=?,
+                        fsrs_state_version=?,fsrs_due_retention_used=?
+                    WHERE id=?""",
+                    (
+                        unit_stats["last_review_at"],
+                        unit_stats["review_count"],
+                        unit_stats["ease_factor"],
+                        unit_stats["avg_rating"],
+                        unit_stats.get("fsrs_difficulty"),
+                        unit_stats.get("fsrs_stability"),
+                        unit_stats.get("fsrs_last_review_at"),
+                        unit_stats.get("fsrs_last_grade"),
+                        unit_stats.get("fsrs_review_count"),
+                        unit_stats.get("fsrs_lapse_count"),
+                        unit_stats.get("fsrs_state_version"),
+                        unit_stats.get("fsrs_due_retention_used"),
+                        unit_id,
+                    ),
+                )
+                if update_cur.rowcount != 1:
+                    raise RuntimeError(f"Expected to update exactly one unit row for unit_id={unit_id}")
+            else:
+                self._recompute_unit_from_active_history(int(unit_id))
             return int(cur.lastrowid)
+
+    def record_learning_event(self, unit_id: int, payload: dict, event_kind: str) -> int:
+        if event_kind not in {EVENT_LEARNING_SUBMIT, EVENT_TO_STABILIZING, EVENT_AGAIN}:
+            raise ValueError(f"Unsupported non-FSRS event kind '{event_kind}'")
+        event_payload = dict(payload)
+        event_payload["event_kind"] = event_kind
+        event_payload["fsrs_grade"] = None
+        event_payload["rating"] = event_kind
+        return self._record_unit_event(unit_id, event_payload, unit_stats=None)
+
+    def record_review(self, unit_id: int, payload: dict, unit_stats: dict) -> int:
+        event_payload = dict(payload)
+        fsrs_grade = event_payload.get("rating")
+        event_payload["event_kind"] = EVENT_FSRS_REVIEW
+        event_payload["fsrs_grade"] = fsrs_grade
+        return self._record_unit_event(unit_id, event_payload, unit_stats=unit_stats)
 
     def update_unit_stats(self, unit_id: int, data: dict) -> None:
         self.db.conn.execute(
@@ -760,19 +898,61 @@ class ReviewRepo:
             )
             return
 
-        ratings = {"easy": 5.0, "with_effort": 3.0, "hard": 2.0, "skip": 1.0}
-        count = len(events)
-        avg_rating = sum(ratings.get(str(ev["rating"]), 3.0) for ev in events) / max(1, count)
-        last_review_at = str(events[-1]["ended_at"])
-        lightweight_history = [{"ended_at": str(ev["ended_at"]), "rating": str(ev["rating"])} for ev in events]
-        due_iso = _derive_due_at_from_events(lightweight_history)
+        fsrs_events = _active_fsrs_events_after_reset([dict(ev) for ev in events])
+        ratings = {"easy": 5.0, "with_effort": 3.0, "hard": 2.0}
+        count = len(fsrs_events)
+        avg_rating = (
+            sum(ratings.get(str(ev["rating"]), 3.0) for ev in fsrs_events) / max(1, count)
+            if count > 0
+            else 0.0
+        )
+        all_ordered = sorted([dict(ev) for ev in events], key=lambda r: (str(r.get("ended_at") or ""), int(r.get("id") or 0)))
+        last_event_at = str(all_ordered[-1]["ended_at"])
+        last_review_at = str(fsrs_events[-1]["ended_at"]) if fsrs_events else None
+        derived = derive_unit_mode_and_due(all_ordered)
+        due_iso = derived.get("due_at")
         interval_days = 0.0
-        if due_iso:
+        if due_iso and last_event_at:
             try:
-                interval_days = max(0.0, (parse_iso_to_utc(due_iso) - parse_iso_to_utc(last_review_at)).total_seconds() / 86400.0)
+                interval_days = max(0.0, (parse_iso_to_utc(due_iso) - parse_iso_to_utc(last_event_at)).total_seconds() / 86400.0)
             except Exception:
                 interval_days = 0.0
-        fsrs_state = replay_history_into_state(lightweight_history, DEFAULT_FSRS_PARAMETERS)
+        fsrs_state = replay_history_into_state(fsrs_events, DEFAULT_FSRS_PARAMETERS) if fsrs_events else None
+        self.db.conn.execute(
+            """UPDATE units
+            SET last_review_at=?,
+                next_review_at=?,
+                review_count=?,
+                ease_factor=2.5,
+                interval_days=?,
+                avg_rating=?,
+                fsrs_difficulty=?,
+                fsrs_stability=?,
+                fsrs_last_review_at=?,
+                fsrs_last_grade=?,
+                fsrs_review_count=?,
+                fsrs_lapse_count=?,
+                fsrs_state_version=?,
+                fsrs_due_retention_used=?
+            WHERE id=?""",
+            (
+                last_review_at,
+                due_iso,
+                int(count),
+                float(interval_days),
+                float(avg_rating),
+                (fsrs_state.difficulty if fsrs_state is not None else None),
+                (fsrs_state.stability if fsrs_state is not None else None),
+                (iso_utc(fsrs_state.last_review_at) if fsrs_state is not None else None),
+                (int(fsrs_state.last_grade) if fsrs_state is not None else None),
+                (int(fsrs_state.review_count) if fsrs_state is not None else None),
+                (int(fsrs_state.lapse_count) if fsrs_state is not None else None),
+                (int(fsrs_state.state_version) if fsrs_state is not None else None),
+                0.9 if fsrs_state is not None else None,
+                unit_id_int,
+            ),
+        )
+
     def unit_hint_markdown(self, unit_id: int) -> str:
         row = self.db.conn.execute("SELECT hint_markdown FROM units WHERE id=?", (int(unit_id),)).fetchone()
         if not row:
@@ -849,44 +1029,6 @@ class ReviewRepo:
             "SELECT * FROM unit_hint_revisions WHERE id=?",
             (int(revision_id),),
         ).fetchone()
-
-    def soft_delete_event(self, event_id: int) -> None:
-        before = self.db.conn.execute("SELECT * FROM review_events WHERE id=?", (event_id,)).fetchone()
-        self.db.conn.execute("UPDATE review_events SET deleted_at=? WHERE id=?", (utcnow_iso(), event_id))
-        self.db.conn.execute(
-            """UPDATE units
-            SET last_review_at=?,
-                next_review_at=?,
-                review_count=?,
-                ease_factor=2.5,
-                interval_days=?,
-                avg_rating=?,
-                fsrs_difficulty=?,
-                fsrs_stability=?,
-                fsrs_last_review_at=?,
-                fsrs_last_grade=?,
-                fsrs_review_count=?,
-                fsrs_lapse_count=?,
-                fsrs_state_version=?,
-                fsrs_due_retention_used=?
-            WHERE id=?""",
-            (
-                last_review_at,
-                due_iso,
-                int(count),
-                float(interval_days),
-                float(avg_rating),
-                (fsrs_state.difficulty if fsrs_state is not None else None),
-                (fsrs_state.stability if fsrs_state is not None else None),
-                (iso_utc(fsrs_state.last_review_at) if fsrs_state is not None else None),
-                (int(fsrs_state.last_grade) if fsrs_state is not None else None),
-                (int(fsrs_state.review_count) if fsrs_state is not None else None),
-                (int(fsrs_state.lapse_count) if fsrs_state is not None else None),
-                (int(fsrs_state.state_version) if fsrs_state is not None else None),
-                0.9 if fsrs_state is not None else None,
-                unit_id_int,
-            ),
-        )
 
     def soft_delete_event(self, event_id: int) -> None:
         before = self.db.conn.execute("SELECT * FROM review_events WHERE id=?", (event_id,)).fetchone()

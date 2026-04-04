@@ -37,13 +37,15 @@ class DatabaseConstraintTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 db.conn.execute(
                     """INSERT INTO review_events(
-                        unit_id, started_at, ended_at, elapsed_seconds, rating, pre_note, post_note, interval_days, next_review_at, deleted_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        unit_id, started_at, ended_at, elapsed_seconds, rating, event_kind, fsrs_grade, pre_note, post_note, interval_days, next_review_at, deleted_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         unit_id,
                         "2026-01-01T10:00:00+00:00",
                         "2026-01-01T10:03:00+00:00",
                         -5,
+                        "easy",
+                        "fsrs_review",
                         "easy",
                         "",
                         "",
@@ -56,13 +58,15 @@ class DatabaseConstraintTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 db.conn.execute(
                     """INSERT INTO review_events(
-                        unit_id, started_at, ended_at, elapsed_seconds, rating, pre_note, post_note, interval_days, next_review_at, deleted_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        unit_id, started_at, ended_at, elapsed_seconds, rating, event_kind, fsrs_grade, pre_note, post_note, interval_days, next_review_at, deleted_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         unit_id,
                         "2026-01-01T10:00:00+00:00",
                         "2026-01-01T10:03:00+00:00",
                         180,
+                        "invalid",
+                        "fsrs_review",
                         "invalid",
                         "",
                         "",
@@ -196,13 +200,15 @@ class DatabaseConstraintTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 upgraded.conn.execute(
                     """INSERT INTO review_events(
-                        unit_id, started_at, ended_at, elapsed_seconds, rating, pre_note, post_note, interval_days, next_review_at, deleted_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        unit_id, started_at, ended_at, elapsed_seconds, rating, event_kind, fsrs_grade, pre_note, post_note, interval_days, next_review_at, deleted_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         unit_id,
                         "2026-01-01T10:00:00+00:00",
                         "2026-01-01T10:03:00+00:00",
                         -1,
+                        "easy",
+                        "fsrs_review",
                         "easy",
                         "",
                         "",
