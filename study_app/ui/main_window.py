@@ -49,6 +49,7 @@ from study_app.persistence.repositories import (
     SettingsRepo,
     SourceRepo,
     _derive_due_at_from_events,
+    derive_next_session_bucket,
     derive_unit_mode_and_due,
 )
 from study_app.pdf.pdf_service import PdfService
@@ -126,10 +127,12 @@ def _store_session_queue_snapshot(
 
 def _model_signature(model: RuntimeEstimationModel) -> str:
     payload = {
-        "base": round(float(model.global_base_minutes_per_page), 5),
-        "stages": {k: round(float(v), 4) for k, v in sorted(model.stage_factors.items())},
-        "stale": {k: round(float(v), 4) for k, v in sorted(model.stale_bucket_factors.items())},
-        "source_count": len(model.source_factors),
+        "global": {k: round(float(v), 3) for k, v in sorted(model.global_seconds_per_page_by_bucket.items())},
+        "source_count": len(model.source_seconds_per_page_by_bucket),
+        "source_obs": {
+            str(sid): int(sum(bucket_counts.values()))
+            for sid, bucket_counts in sorted(model.source_bucket_observation_counts.items())
+        },
         "obs_count": int(model.debug.get("observation_count", 0)),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -1507,24 +1510,23 @@ class SourceWorkspace(QWidget):
 
         start_page = int(_read("start_page", 1) or 1)
         end_page = int(_read("end_page", start_page) or start_page)
-        pages = max(1, (end_page - start_page) + 1)
-        fallback_per_page = float(self.settings_repo.get("fallback_review_seconds_per_page", "60"))
-        fallback_per_unit = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
-        if int(_read("review_count", 0) or 0) == 0:
-            return max(1.0, pages * fallback_per_page, fallback_per_unit)
-
         unit_id = int(_read("unit_id", _read("id", 0)) or 0)
-        if unit_id > 0:
-            unit_avg = self.review_repo.avg_elapsed_seconds_for_unit(unit_id)
-            if unit_avg is not None:
-                return float(unit_avg)
-        source_avg = self.review_repo.avg_elapsed_seconds_for_source(self.source_id)
-        if source_avg is not None:
-            return float(source_avg)
-        global_avg = self.review_repo.avg_elapsed_seconds_global()
-        if global_avg is not None:
-            return float(global_avg)
-        return max(1.0, pages * fallback_per_page, fallback_per_unit)
+        model = getattr(self, "_runtime_estimation_model", None)
+        if model is None:
+            model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
+            self._runtime_estimation_model = model
+        history = self.review_repo.review_history_for_units([unit_id]).get(unit_id, []) if unit_id > 0 else []
+        bucket = derive_next_session_bucket(history)
+        unit_proxy = type(
+            "UnitProxy",
+            (),
+            {
+                "source_id": int(_read("source_id", self.source_id) or self.source_id),
+                "start_page": start_page,
+                "end_page": end_page,
+            },
+        )()
+        return model.estimate_unit_seconds(unit_proxy, next_session_bucket=bucket, source_id=int(_read("source_id", self.source_id) or self.source_id))
 
     def add_highlight_from_clipboard(self):
         cb = QApplication.clipboard()
@@ -2826,6 +2828,7 @@ class StudyQueuePage(QWidget):
 
     def refresh(self):
         self._queue_recalculation_pending = False
+        self._projected_time_cache = {}
         self._runtime_estimation_model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
         due_units = self.review_repo.due_units(iso_utc(now_utc()))
         source_modes = {s.id: s.learning_mode for s in self.source_repo.list_sources()}
@@ -2847,11 +2850,13 @@ class StudyQueuePage(QWidget):
         self._queue_history_by_unit = self.review_repo.review_history_for_units([int(u.unit_id) for u in self.units])
         self._queue_mode_by_unit: dict[int, str] = {}
         self._queue_due_by_unit: dict[int, str | None] = {}
+        self._queue_is_new_by_unit: dict[int, bool] = {}
         for unit in self.units:
             history = self._queue_history_by_unit.get(int(unit.unit_id), [])
             derived = derive_unit_mode_and_due(history)
             self._queue_mode_by_unit[int(unit.unit_id)] = str(derived.get("mode") or "learning")
             self._queue_due_by_unit[int(unit.unit_id)] = derived.get("due_at")
+            self._queue_is_new_by_unit[int(unit.unit_id)] = len(history) == 0
             fsrs_count = sum(1 for ev in history if str(ev.get("event_kind") or "") == "fsrs_review" and str(ev.get("fsrs_grade") or "") in {"hard", "with_effort", "easy"})
             unit.review_count = fsrs_count
             unit.last_review_at = str(history[-1]["ended_at"]) if history else None
@@ -2865,13 +2870,17 @@ class StudyQueuePage(QWidget):
         self._queue_last_pdf_page = 1
         total_planned = len(planned_ids)
         completed_count = len(done_units)
-        due_count = sum(1 for u in todo_units if int(u.review_count or 0) > 0)
-        new_count = max(0, len(todo_units) - due_count)
+        review_count = sum(1 for u in todo_units if self._queue_mode_by_unit.get(int(u.unit_id)) == "review")
+        stabilizing_count = sum(1 for u in todo_units if self._queue_mode_by_unit.get(int(u.unit_id)) == "stabilizing")
+        new_count = sum(1 for u in todo_units if self._queue_mode_by_unit.get(int(u.unit_id)) == "learning" and self._queue_is_new_by_unit.get(int(u.unit_id), False))
+        learning_count = sum(1 for u in todo_units if self._queue_mode_by_unit.get(int(u.unit_id)) == "learning" and not self._queue_is_new_by_unit.get(int(u.unit_id), False))
         regenerated_text = " · rebuilt for today" if regenerated else ""
         self.queue_banner.setText(
             f"Today's fixed queue: {len(todo_units)} to do + {completed_count} done / {total_planned} planned"
             + (f" · {completed_count} done" if completed_count else "")
-            + (f" · {due_count} review" if due_count else "")
+            + (f" · {review_count} review" if review_count else "")
+            + (f" · {stabilizing_count} stabilizing" if stabilizing_count else "")
+            + (f" · {learning_count} learning" if learning_count else "")
             + (f" · {new_count} new" if new_count else "")
             + (f" · {len(manual_unit_ids)} manual" if manual_unit_ids else "")
             + regenerated_text
@@ -2896,6 +2905,7 @@ class StudyQueuePage(QWidget):
                 est_seconds,
                 retention,
                 mode=self._queue_mode_by_unit.get(int(u.unit_id), "learning"),
+                is_new=self._queue_is_new_by_unit.get(int(u.unit_id), False),
                 progression_reason=reason,
                 is_done=is_done,
                 actual_seconds=done_elapsed_by_unit.get(int(u.unit_id)),
@@ -2945,7 +2955,20 @@ class StudyQueuePage(QWidget):
         if model is None:
             model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
             self._runtime_estimation_model = model
-        return model.estimate_unit_seconds(unit, now_utc())
+        unit_id = int(getattr(unit, "unit_id", 0) or 0)
+        cache = getattr(self, "_projected_time_cache", None)
+        if cache is None:
+            cache = {}
+            self._projected_time_cache = cache
+        if unit_id in cache:
+            return float(cache[unit_id]["seconds"])
+        history = self._queue_history_by_unit.get(unit_id) if hasattr(self, "_queue_history_by_unit") else None
+        if history is None:
+            history = self.review_repo.review_history_for_units([unit_id]).get(unit_id, [])
+        bucket = derive_next_session_bucket(history)
+        details = model.estimate_unit_seconds_with_details(unit, next_session_bucket=bucket, source_id=int(getattr(unit, "source_id", 0) or 0))
+        cache[unit_id] = details
+        return float(details["seconds"])
 
     def _estimate_retention(self, unit) -> float | None:
         history = self._queue_history_by_unit.get(int(unit.unit_id), [])
@@ -3014,6 +3037,7 @@ class StudyQueuePage(QWidget):
         est_seconds: float,
         retention: float | None,
         mode: str = "learning",
+        is_new: bool = False,
         progression_reason: str | None = None,
         is_done: bool = False,
         actual_seconds: float | None = None,
@@ -3048,6 +3072,10 @@ class StudyQueuePage(QWidget):
         if mode == "stabilizing":
             retention_lbl = QLabel("stabilizing")
             retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #ffeecf; background: #5a4a22;")
+            ret_pct = None
+        elif mode == "learning" and is_new:
+            retention_lbl = QLabel("new")
+            retention_lbl.setStyleSheet("border-radius: 8px; padding: 2px 8px; font-size: 10px; color: #d9e8ff; background: #22345a;")
             ret_pct = None
         elif retention is None:
             retention_lbl = QLabel("learning")
@@ -3701,7 +3729,10 @@ class SettingsPage(QWidget):
         if model is None:
             model = _build_runtime_model_for_request(self.review_repo, self.settings_repo)
             self._runtime_estimation_model = model
-        return model.estimate_unit_seconds(unit, now_utc())
+        unit_id = int(getattr(unit, "unit_id", 0) or 0)
+        history = self.review_repo.review_history_for_units([unit_id]).get(unit_id, [])
+        bucket = derive_next_session_bucket(history)
+        return model.estimate_unit_seconds(unit, next_session_bucket=bucket, source_id=int(getattr(unit, "source_id", 0) or 0))
 
 
 class StatisticsPage(QWidget):
@@ -3878,7 +3909,15 @@ class StatisticsPage(QWidget):
         if not sample_units:
             sample_units = self.review_repo.new_units()
         if sample_units:
-            avg_secs = sum(model.estimate_unit_seconds(u, now) for u in sample_units) / max(1, len(sample_units))
+            histories = self.review_repo.review_history_for_units([int(u.unit_id) for u in sample_units])
+            avg_secs = sum(
+                model.estimate_unit_seconds(
+                    u,
+                    next_session_bucket=derive_next_session_bucket(histories.get(int(u.unit_id), [])),
+                    source_id=int(u.source_id),
+                )
+                for u in sample_units
+            ) / max(1, len(sample_units))
         else:
             avg_secs = float(self.settings_repo.get("fallback_review_seconds_per_unit", "90"))
         est_units = max(1, int((daily_minutes * 60) / max(1.0, float(avg_secs))))

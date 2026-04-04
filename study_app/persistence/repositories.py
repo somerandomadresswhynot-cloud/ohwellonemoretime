@@ -23,6 +23,16 @@ EVENT_AGAIN = "again"
 EVENT_FSRS_REVIEW = "fsrs_review"
 RESET_EVENT_KINDS = {EVENT_TO_STABILIZING, EVENT_AGAIN}
 FSRS_GRADES = {"hard", "with_effort", "easy"}
+TIME_BUCKET_FIRST_ENCOUNTER = "first_encounter"
+TIME_BUCKET_LEARNING_REPEAT = "learning_repeat"
+TIME_BUCKET_STABILIZING_RECALL = "stabilizing_recall"
+TIME_BUCKET_MATURE_REVIEW = "mature_review"
+TIME_BUCKETS = (
+    TIME_BUCKET_FIRST_ENCOUNTER,
+    TIME_BUCKET_LEARNING_REPEAT,
+    TIME_BUCKET_STABILIZING_RECALL,
+    TIME_BUCKET_MATURE_REVIEW,
+)
 
 
 def _event_kind(row: dict) -> str:
@@ -107,6 +117,30 @@ def derive_unit_mode_and_due(events: list[dict]) -> dict:
             "last_anchor_at": last_learning,
         }
     return {"mode": "learning", "due_at": None, "active_fsrs_events": [], "last_anchor_at": None}
+
+
+def derive_next_session_bucket(events: list[dict]) -> str:
+    if not events:
+        return TIME_BUCKET_FIRST_ENCOUNTER
+    derived = derive_unit_mode_and_due(events)
+    mode = str(derived.get("mode") or "learning")
+    if mode == "review":
+        return TIME_BUCKET_MATURE_REVIEW
+    if mode == "stabilizing":
+        return TIME_BUCKET_STABILIZING_RECALL
+    has_learning = any(_event_kind(ev) == EVENT_LEARNING_SUBMIT for ev in events)
+    return TIME_BUCKET_LEARNING_REPEAT if has_learning else TIME_BUCKET_FIRST_ENCOUNTER
+
+
+def classify_event_time_bucket(event: dict, prior_events: list[dict]) -> str | None:
+    kind = _event_kind(event)
+    if kind == EVENT_LEARNING_SUBMIT:
+        return TIME_BUCKET_FIRST_ENCOUNTER if not prior_events else TIME_BUCKET_LEARNING_REPEAT
+    if kind in RESET_EVENT_KINDS:
+        return TIME_BUCKET_STABILIZING_RECALL
+    if kind == EVENT_FSRS_REVIEW and _event_fsrs_grade(event) in FSRS_GRADES:
+        return TIME_BUCKET_MATURE_REVIEW
+    return None
 
 
 def _derive_due_at_from_events(events: list[dict]) -> str | None:
@@ -683,14 +717,12 @@ class ReviewRepo:
                 u.end_page,
                 re.ended_at,
                 re.elapsed_seconds,
-                re.rating
+                re.rating,
+                re.event_kind,
+                re.fsrs_grade
             FROM review_events re
             JOIN units u ON u.id=re.unit_id
             WHERE re.deleted_at IS NULL
-              AND (
-                re.event_kind='fsrs_review'
-                OR (COALESCE(trim(re.event_kind), '')='' AND re.rating IN ('hard','with_effort','easy'))
-              )
             ORDER BY re.unit_id ASC, re.ended_at ASC, re.id ASC"""
         ).fetchall()
         out: list[dict] = []
@@ -704,6 +736,8 @@ class ReviewRepo:
                 "ended_at": row["ended_at"],
                 "elapsed_seconds": row["elapsed_seconds"],
                 "rating": row["rating"],
+                "event_kind": str(row["event_kind"] or ""),
+                "fsrs_grade": (str(row["fsrs_grade"]) if row["fsrs_grade"] else None),
                 "page_count": max(1, (end_page - start_page) + 1),
             })
         return out
