@@ -3182,6 +3182,8 @@ class StudyQueuePage(QWidget):
             ORDER BY u.start_page, u.title""",
             (self.active_unit.source_id,),
         ).fetchall()
+        unit_ids = [int(r["id"]) for r in rows]
+        history_by_unit = self.review_repo.review_history_for_units(unit_ids)
         outline_rows = self.review_repo.db.conn.execute(
             """SELECT id,parent_id,title,depth,start_page
             FROM outline_nodes
