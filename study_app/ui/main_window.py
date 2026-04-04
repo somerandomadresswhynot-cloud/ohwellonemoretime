@@ -3486,7 +3486,10 @@ class StudyQueuePage(QWidget):
     def _set_hint_editing_controls_locked(self, locked: bool) -> None:
         if locked:
             self._hint_temporarily_disabled_buttons = []
+            hint_dialog = self._hint_dialog
             for btn in self.findChildren(QPushButton):
+                if hint_dialog is not None and btn.window() is hint_dialog:
+                    continue
                 if not btn.isEnabled():
                     continue
                 btn.setEnabled(False)

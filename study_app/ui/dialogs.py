@@ -22,6 +22,7 @@ from PySide6.QtGui import QTextOption
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from study_app.services.outline_service import parse_outline_text
+from study_app.services.cloze_utils import replace_nth_cloze
 
 
 class SourceMetadataDialog(QDialog):
@@ -235,6 +236,10 @@ def _cloze_validation_messages(markdown_text: str) -> list[str]:
     return messages
 
 
+def _replace_nth_cloze(markdown_text: str, cloze_index: int) -> str:
+    return replace_nth_cloze(markdown_text, cloze_index)
+
+
 class HintMarkdownDialog(QDialog):
     keep_on_top_changed = Signal(bool)
     markdown_changed = Signal(str)
@@ -256,10 +261,10 @@ class HintMarkdownDialog(QDialog):
         self.reveal_all_btn.setToolTip("Reveal all clozes in rendered preview")
         self.hide_all_btn.setToolTip("Hide all clozes in rendered preview")
         self.toggle_all_btn.setToolTip("Toggle all clozes in rendered preview")
-        self.make_cloze_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.wrapSelectionCloze();"))
-        self.reveal_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(true);"))
-        self.hide_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.setAllClozes(false);"))
-        self.toggle_all_btn.clicked.connect(lambda: self.web.page().runJavaScript("window.toggleAllClozes();"))
+        self.make_cloze_btn.clicked.connect(self._on_make_cloze_clicked)
+        self.reveal_all_btn.clicked.connect(self._on_reveal_all_clicked)
+        self.hide_all_btn.clicked.connect(self._on_hide_all_clicked)
+        self.toggle_all_btn.clicked.connect(self._on_toggle_all_clicked)
         self.setStyleSheet(
             "QDialog{background:#0b1530;color:#dbe4ef;}"
             "QLabel#hintTitle{color:#e7efff;font-size:13px;font-weight:600;}"
@@ -386,6 +391,41 @@ class HintMarkdownDialog(QDialog):
             return
         self._parent_for_filter.removeEventFilter(self)
 
+    def _run_editor_action(self, function_name: str, retries: int = 12) -> None:
+        if not self.web:
+            return
+        fn = str(function_name or "").strip()
+        if not fn:
+            return
+        script = (
+            "(function(){"
+            f"if (typeof {fn} !== 'function') return false;"
+            f"{fn}();"
+            "return true;"
+            "})();"
+        )
+
+        def _callback(ok) -> None:
+            if bool(ok):
+                return
+            if retries <= 0:
+                return
+            QTimer.singleShot(120, lambda: self._run_editor_action(fn, retries=retries - 1))
+
+        self.web.page().runJavaScript(script, _callback)
+
+    def _on_make_cloze_clicked(self) -> None:
+        self._run_editor_action("window.wrapSelectionCloze")
+
+    def _on_reveal_all_clicked(self) -> None:
+        self._run_editor_action("window.setAllClozesReveal")
+
+    def _on_hide_all_clicked(self) -> None:
+        self._run_editor_action("window.setAllClozesHide")
+
+    def _on_toggle_all_clicked(self) -> None:
+        self._run_editor_action("window.toggleAllClozes")
+
 def _hint_editor_html() -> str:
     return """
 <!doctype html>
@@ -420,21 +460,70 @@ def _hint_editor_html() -> str:
     .cloze-box { display:inline-block; vertical-align:baseline; white-space:nowrap; overflow:hidden; text-overflow:clip; border-radius:4px; padding:0 4px; cursor:pointer; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .cloze-hidden { background:#33425f; color:transparent; }
     .cloze-shown { background:#1f7a3d; color:#ecffef; }
+    .cloze-menu {
+      position:absolute;
+      display:none;
+      flex-direction:column;
+      z-index:9999;
+      border:1px solid #345389;
+      border-radius:8px;
+      overflow:hidden;
+      background:#122546;
+      box-shadow:0 8px 22px rgba(0,0,0,0.35);
+    }
+    .cloze-menu button {
+      border:0;
+      color:#e8f0ff;
+      background:#122546;
+      text-align:left;
+      padding:8px 12px;
+      cursor:pointer;
+    }
+    .cloze-menu button:hover { background:#223a64; }
   </style>
 </head>
 <body>
   <textarea id="editor-root"></textarea>
+  <div id="cloze-menu" class="cloze-menu">
+    <button type="button" id="cloze-menu-toggle">Reveal/Hide</button>
+    <button type="button" id="cloze-menu-uncloze">Make normal text</button>
+  </div>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
   <script>
     const measureCanvas = document.createElement('canvas');
     const measureCtx = measureCanvas.getContext('2d');
     const clozeFont = '600 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    const clozeMenu = document.getElementById('cloze-menu');
+    const clozeMenuToggle = document.getElementById('cloze-menu-toggle');
+    const clozeMenuUncloze = document.getElementById('cloze-menu-uncloze');
+    let clozeMenuTarget = null;
+    function hideClozeMenu() {
+      clozeMenu.style.display = 'none';
+      clozeMenuTarget = null;
+    }
+    function showClozeMenu(target, x, y) {
+      clozeMenuTarget = target;
+      clozeMenu.style.left = x + 'px';
+      clozeMenu.style.top = y + 'px';
+      clozeMenu.style.display = 'flex';
+    }
     function clozeWidthPx(value) {
       measureCtx.font = clozeFont;
       const text = value || '';
       const measured = Math.ceil(measureCtx.measureText(text).width);
       return Math.max(42, measured + 14);
+    }
+    function replaceNthClozeWithText(markdown, targetIndex) {
+      let idx = 0;
+      return (markdown || '').replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(match, g1) {
+        if (idx === targetIndex) {
+          idx += 1;
+          return g1;
+        }
+        idx += 1;
+        return match;
+      });
     }
     let editor = new EasyMDE({
       element: document.getElementById('editor-root'),
@@ -446,13 +535,36 @@ def _hint_editor_html() -> str:
         'link', 'image', 'code', '|',
         'preview', 'side-by-side', 'fullscreen'
       ],
-      renderingConfig: { singleLineBreaks: false },
+      renderingConfig: { singleLineBreaks: true },
       previewRender: function(text) {
+        let clozeIndex = 0;
         const replaced = text.replace(/\\{\\{c::([\\s\\S]*?)\\}\\}/g, function(_m, g1) {
           const widthPx = clozeWidthPx(g1);
-          return '<span class=\"cloze-box cloze-hidden\" data-answer=\"' + encodeURIComponent(g1) + '\" data-width-px=\"' + widthPx + '\" style=\"width:' + widthPx + 'px\">▇▇▇</span>';
+          const idx = clozeIndex;
+          clozeIndex += 1;
+          return '<span class=\"cloze-box cloze-hidden\" data-answer=\"' + encodeURIComponent(g1) + '\" data-cloze-idx=\"' + idx + '\" data-width-px=\"' + widthPx + '\" style=\"width:' + widthPx + 'px\">▇▇▇</span>';
         });
-        return marked.parse(replaced);
+        return marked.parse(replaced, { breaks: true, gfm: true });
+      }
+    });
+    if (typeof editor.isPreviewActive === 'function' && !editor.isPreviewActive()) {
+      editor.togglePreview();
+    }
+    document.addEventListener('contextmenu', function(ev) {
+      const target = ev.target;
+      if (!target || !target.classList || !target.classList.contains('cloze-box')) {
+        hideClozeMenu();
+        return;
+      }
+      ev.preventDefault();
+      showClozeMenu(target, ev.pageX, ev.pageY);
+    });
+    document.addEventListener('click', function(ev) {
+      if (clozeMenu.style.display === 'none') {
+        return;
+      }
+      if (!clozeMenu.contains(ev.target)) {
+        hideClozeMenu();
       }
     });
     document.addEventListener('click', function(ev) {
@@ -473,10 +585,47 @@ def _hint_editor_html() -> str:
         target.classList.add('cloze-hidden');
       }
     });
+    clozeMenuToggle.addEventListener('click', function() {
+      if (!clozeMenuTarget) return;
+      if (clozeMenuTarget.classList.contains('cloze-hidden')) {
+        clozeMenuTarget.click();
+      } else if (clozeMenuTarget.classList.contains('cloze-shown')) {
+        clozeMenuTarget.click();
+      }
+      hideClozeMenu();
+    });
+    clozeMenuUncloze.addEventListener('click', function() {
+      if (!clozeMenuTarget) return;
+      const idx = parseInt(clozeMenuTarget.getAttribute('data-cloze-idx') || '-1', 10);
+      if (idx < 0) {
+        hideClozeMenu();
+        return;
+      }
+      const updated = replaceNthClozeWithText(editor.value(), idx);
+      editor.value(updated);
+      hideClozeMenu();
+    });
     window.wrapSelectionCloze = function() {
       const cm = editor.codemirror;
-      const selected = cm.getSelection();
-      if (!selected || !selected.trim()) return;
+      let selected = cm.getSelection();
+      if (!selected || !selected.trim()) {
+        const pos = cm.getCursor();
+        const lineText = cm.getLine(pos.line) || '';
+        let start = pos.ch;
+        let end = pos.ch;
+        while (start > 0 && /[^\\s]/.test(lineText[start - 1])) {
+          start -= 1;
+        }
+        while (end < lineText.length && /[^\\s]/.test(lineText[end])) {
+          end += 1;
+        }
+        selected = lineText.slice(start, end);
+        if (!selected || !selected.trim()) return;
+        cm.setSelection({ line: pos.line, ch: start }, { line: pos.line, ch: end });
+      }
+      if (selected.startsWith('{{c::') && selected.endsWith('}}')) {
+        return;
+      }
       cm.replaceSelection('{{c::' + selected + '}}');
     };
     window.setAllClozes = function(reveal) {
@@ -496,6 +645,8 @@ def _hint_editor_html() -> str:
         }
       }
     };
+    window.setAllClozesReveal = function() { window.setAllClozes(true); };
+    window.setAllClozesHide = function() { window.setAllClozes(false); };
     window.toggleAllClozes = function() {
       const anyHidden = document.querySelector('.cloze-hidden') !== null;
       window.setAllClozes(anyHidden);
