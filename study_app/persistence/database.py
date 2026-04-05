@@ -72,14 +72,17 @@ CREATE TABLE IF NOT EXISTS review_events (
     started_at TEXT NOT NULL,
     ended_at TEXT NOT NULL,
     elapsed_seconds INTEGER NOT NULL,
-    rating TEXT NOT NULL,
+    rating TEXT NOT NULL DEFAULT '',
+    event_kind TEXT NOT NULL DEFAULT 'fsrs_review',
+    fsrs_grade TEXT,
     pre_note TEXT NOT NULL DEFAULT '',
     post_note TEXT NOT NULL DEFAULT '',
     interval_days REAL NOT NULL,
     next_review_at TEXT NOT NULL,
     deleted_at TEXT,
     CHECK (elapsed_seconds >= 0),
-    CHECK (rating IN ('easy','with_effort','hard','skip')),
+    CHECK (event_kind IN ('learning_submit','to_stabilizing','again','fsrs_review')),
+    CHECK (fsrs_grade IS NULL OR fsrs_grade IN ('hard','with_effort','easy')),
     FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
 );
 
@@ -210,6 +213,7 @@ class Database:
             self.conn.execute("ALTER TABLE highlights ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
         self._backfill_highlight_annotation_fields()
         self._ensure_fsrs_columns()
+        self._ensure_event_stream_columns()
         self._ensure_postponement_table()
         self.conn.commit()
         self._ensure_scheduling_constraints()
@@ -276,6 +280,33 @@ class Database:
             "UPDATE highlights SET updated_at = created_at WHERE trim(updated_at) = ''"
         )
 
+    def _ensure_event_stream_columns(self) -> None:
+        review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(review_events)").fetchall()}
+        if "event_kind" not in review_cols:
+            self.conn.execute("ALTER TABLE review_events ADD COLUMN event_kind TEXT NOT NULL DEFAULT 'fsrs_review'")
+        if "fsrs_grade" not in review_cols:
+            self.conn.execute("ALTER TABLE review_events ADD COLUMN fsrs_grade TEXT")
+        self.conn.execute(
+            """
+            UPDATE review_events
+            SET event_kind = CASE
+                WHEN rating='skip' THEN 'again'
+                WHEN COALESCE(trim(event_kind), '') <> '' THEN event_kind
+                ELSE 'fsrs_review'
+            END
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE review_events
+            SET fsrs_grade = CASE
+                WHEN fsrs_grade IN ('hard','with_effort','easy') THEN fsrs_grade
+                WHEN event_kind='fsrs_review' AND rating IN ('hard','with_effort','easy') THEN rating
+                ELSE NULL
+            END
+            """
+        )
+
     def _ensure_indexes(self) -> None:
         self.conn.executescript(INDEXES)
 
@@ -314,7 +345,11 @@ class Database:
         )
         review_ok = self._table_has_constraint_markers(
             "review_events",
-            ["check (elapsed_seconds >= 0)", "check (rating in ('easy','with_effort','hard','skip'))"],
+            [
+                "check (elapsed_seconds >= 0)",
+                "check (event_kind in ('learning_submit','to_stabilizing','again','fsrs_review'))",
+                "check (fsrs_grade is null or fsrs_grade in ('hard','with_effort','easy'))",
+            ],
         )
         if outline_ok and units_ok and review_ok:
             return
@@ -433,14 +468,17 @@ class Database:
                 started_at TEXT NOT NULL,
                 ended_at TEXT NOT NULL,
                 elapsed_seconds INTEGER NOT NULL,
-                rating TEXT NOT NULL,
+                rating TEXT NOT NULL DEFAULT '',
+                event_kind TEXT NOT NULL DEFAULT 'fsrs_review',
+                fsrs_grade TEXT,
                 pre_note TEXT NOT NULL DEFAULT '',
                 post_note TEXT NOT NULL DEFAULT '',
                 interval_days REAL NOT NULL,
                 next_review_at TEXT NOT NULL,
                 deleted_at TEXT,
                 CHECK (elapsed_seconds >= 0),
-                CHECK (rating IN ('easy','with_effort','hard','skip')),
+                CHECK (event_kind IN ('learning_submit','to_stabilizing','again','fsrs_review')),
+                CHECK (fsrs_grade IS NULL OR fsrs_grade IN ('hard','with_effort','easy')),
                 FOREIGN KEY(unit_id) REFERENCES units(id) ON DELETE CASCADE
             )
             """
@@ -448,10 +486,26 @@ class Database:
         self.conn.execute(
             """
             INSERT INTO review_events_new (
-                id, unit_id, started_at, ended_at, elapsed_seconds, rating, pre_note, post_note, interval_days, next_review_at, deleted_at
+                id, unit_id, started_at, ended_at, elapsed_seconds, rating, event_kind, fsrs_grade, pre_note, post_note, interval_days, next_review_at, deleted_at
             )
             SELECT
-                id, unit_id, started_at, ended_at, elapsed_seconds, rating, pre_note, post_note, interval_days, next_review_at, deleted_at
+                id, unit_id, started_at, ended_at, elapsed_seconds,
+                COALESCE(rating, ''),
+                CASE
+                    WHEN rating='skip' THEN 'again'
+                    WHEN COALESCE(trim(event_kind), '') <> '' THEN event_kind
+                    ELSE 'fsrs_review'
+                END,
+                CASE
+                    WHEN fsrs_grade IN ('hard','with_effort','easy') THEN fsrs_grade
+                    WHEN (CASE
+                        WHEN COALESCE(trim(event_kind), '') <> '' THEN event_kind
+                        WHEN rating='skip' THEN 'again'
+                        ELSE 'fsrs_review'
+                    END)='fsrs_review' AND rating IN ('hard','with_effort','easy') THEN rating
+                    ELSE NULL
+                END,
+                pre_note, post_note, interval_days, next_review_at, deleted_at
             FROM review_events
             """
         )
