@@ -172,6 +172,26 @@ class HighlightAnnotationsTests(unittest.TestCase):
             self.assertIsNotNone(found)
             self.assertEqual(int(found['id']), hid)
 
+    def test_repo_text_highlight_can_persist_pdf_page_rects(self):
+        with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
+            db = Database(tmp.name)
+            self.addCleanup(db.close)
+            source_repo = SourceRepo(db)
+            source_id = source_repo.create('Book', '/tmp/book.pdf', 10, 100)
+            repo = HighlightRepo(db)
+
+            rects = [{'x': 12.5, 'y': 333.2, 'w': 48.0, 'h': 9.5}]
+            hid = repo.add_text_highlight(
+                source_id=source_id,
+                page=4,
+                quote_text='Selected text',
+                text_exact='Selected text',
+                rects=rects,
+            )
+            row = repo.get_highlight(hid)
+            self.assertEqual(row['anchor_type'], 'text')
+            self.assertEqual(json.loads(row['rects_json']), rects)
+
     def test_repo_resolve_text_anchor_page_prefers_exact_then_fallback(self):
         with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
             db = Database(tmp.name)

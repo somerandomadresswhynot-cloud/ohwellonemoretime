@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -25,6 +26,7 @@ class EmbeddedPdfViewer(QWidget):
         self._pending_page: int | None = None
         self._pending_page_attempts = 0
         self._selection_menu_handler: Callable | None = None
+        self._active_highlights: list[dict] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -70,7 +72,14 @@ class EmbeddedPdfViewer(QWidget):
     def _on_context_menu(self, _pos) -> None:
         if not self._selection_menu_handler:
             return
-        self._selection_menu_handler(QCursor.pos(), self.selected_text(), int(self.view_state().get("page", 1)))
+        self.get_selection_details(
+            lambda details: self._selection_menu_handler(
+                QCursor.pos(),
+                details.get("selected_text", ""),
+                int(details.get("page", self.view_state().get("page", 1))),
+                details,
+            )
+        )
 
     def set_selection_menu_handler(self, handler) -> None:
         self._selection_menu_handler = handler
@@ -83,6 +92,216 @@ class EmbeddedPdfViewer(QWidget):
             return (QApplication.clipboard().text() or "").strip()
         except Exception:
             return ""
+
+    def _browser_page(self):
+        if not self._viewer:
+            return None
+        direct_page = getattr(self._viewer, "page", None)
+        if callable(direct_page):
+            try:
+                page = direct_page()
+                if page:
+                    return page
+            except Exception:
+                pass
+        for attr in ("webview", "view", "_webview", "_view", "browser"):
+            candidate = getattr(self._viewer, attr, None)
+            if not candidate:
+                continue
+            page_fn = getattr(candidate, "page", None)
+            if callable(page_fn):
+                try:
+                    page = page_fn()
+                    if page:
+                        return page
+                except Exception:
+                    continue
+        return None
+
+    def _run_js(self, script: str, callback: Callable | None = None) -> bool:
+        if not self._viewer:
+            return False
+        run_js = getattr(self._viewer, "runJavaScript", None)
+        if callable(run_js):
+            try:
+                if callback:
+                    run_js(script, callback)
+                else:
+                    run_js(script)
+                return True
+            except Exception:
+                pass
+        page = self._browser_page()
+        if not page:
+            return False
+        run_js = getattr(page, "runJavaScript", None)
+        if not callable(run_js):
+            return False
+        try:
+            if callback:
+                run_js(script, callback)
+            else:
+                run_js(script)
+            return True
+        except Exception:
+            return False
+
+    def _ensure_highlight_runtime(self) -> None:
+        self._run_js(
+            """
+(() => {
+  if (window.__studyHighlightRuntimeReady) return true;
+  window.__studyHighlightRuntimeReady = true;
+  window.__studyHighlightStore = [];
+  const toHex = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : '#fff59d';
+  const ensureLayer = (pageDiv) => {
+    let layer = pageDiv.querySelector('.study-highlight-layer');
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.className = 'study-highlight-layer';
+      Object.assign(layer.style, {
+        position: 'absolute', left: '0', top: '0', width: '100%', height: '100%',
+        pointerEvents: 'none', zIndex: '15',
+      });
+      pageDiv.appendChild(layer);
+    }
+    return layer;
+  };
+  const render = () => {
+    const app = window.PDFViewerApplication;
+    const viewer = app && app.pdfViewer;
+    if (!viewer) return;
+    const pageViews = viewer._pages || [];
+    for (const pv of pageViews) {
+      if (!pv || !pv.div || !pv.viewport) continue;
+      const pageDiv = pv.div;
+      const layer = ensureLayer(pageDiv);
+      layer.replaceChildren();
+      const pageIndex = Number(pv.id || 1) - 1;
+      const rows = window.__studyHighlightStore.filter((h) => Number(h.page_index) === pageIndex);
+      for (const row of rows) {
+        const opacity = Number(row.opacity ?? 0.35);
+        const color = toHex(row.color_value || row.color || '#fff59d');
+        for (const r of (row.rects || [])) {
+          const x = Number(r.x), y = Number(r.y), w = Number(r.w), h = Number(r.h);
+          if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) continue;
+          const p1 = pv.viewport.convertToViewportPoint(x, y);
+          const p2 = pv.viewport.convertToViewportPoint(x + w, y + h);
+          const left = Math.min(p1[0], p2[0]);
+          const top = Math.min(p1[1], p2[1]);
+          const width = Math.abs(p2[0] - p1[0]);
+          const height = Math.abs(p2[1] - p1[1]);
+          if (width <= 0 || height <= 0) continue;
+          const box = document.createElement('div');
+          box.dataset.highlightId = String(row.id || '');
+          Object.assign(box.style, {
+            position: 'absolute', left: `${left}px`, top: `${top}px`,
+            width: `${width}px`, height: `${height}px`,
+            background: color, opacity: String(opacity),
+            borderRadius: '2px', mixBlendMode: 'multiply', pointerEvents: 'none',
+          });
+          layer.appendChild(box);
+        }
+      }
+    }
+  };
+  window.__studyRenderHighlights = render;
+  const bus = window.PDFViewerApplication && window.PDFViewerApplication.eventBus;
+  if (bus && !window.__studyHighlightEventsBound) {
+    window.__studyHighlightEventsBound = true;
+    ['pagerendered','textlayerrendered','scalechanging','updateviewarea'].forEach((evt) => {
+      try { bus.on(evt, () => window.requestAnimationFrame(render)); } catch (_e) {}
+    });
+  }
+  window.requestAnimationFrame(render);
+  return true;
+})();
+            """
+        )
+
+    def get_selection_details(self, callback: Callable[[dict], None]) -> None:
+        def _default() -> None:
+            callback(
+                {
+                    "selected_text": self.selected_text(),
+                    "page": int(self.view_state().get("page", 1)),
+                    "rects_by_page": [],
+                    "page_index": max(0, int(self.view_state().get("page", 1)) - 1),
+                }
+            )
+
+        self._ensure_highlight_runtime()
+        ok = self._run_js(
+            """
+(() => {
+  const out = { selected_text: '', page: 1, page_index: 0, rects_by_page: [] };
+  const sel = window.getSelection && window.getSelection();
+  if (!sel || !sel.rangeCount) return out;
+  const text = (sel.toString() || '').replace(/\\s+/g, ' ').trim();
+  if (!text) return out;
+  out.selected_text = text;
+  const app = window.PDFViewerApplication;
+  const viewer = app && app.pdfViewer;
+  if (!viewer) return out;
+  const byPage = new Map();
+  const range = sel.getRangeAt(0);
+  for (const rawRect of Array.from(range.getClientRects())) {
+    if (!rawRect || rawRect.width <= 0 || rawRect.height <= 0) continue;
+    const cx = rawRect.left + (rawRect.width / 2);
+    const cy = rawRect.top + (rawRect.height / 2);
+    const el = document.elementFromPoint(cx, cy);
+    const pageDiv = el && el.closest && el.closest('.page');
+    if (!pageDiv) continue;
+    const pageNum = Number(pageDiv.dataset.pageNumber || pageDiv.getAttribute('data-page-number') || 1);
+    const pageView = viewer.getPageView(pageNum - 1);
+    if (!pageView || !pageView.viewport) continue;
+    const pageRect = pageDiv.getBoundingClientRect();
+    const left = rawRect.left - pageRect.left;
+    const top = rawRect.top - pageRect.top;
+    const right = rawRect.right - pageRect.left;
+    const bottom = rawRect.bottom - pageRect.top;
+    const a = pageView.viewport.convertToPdfPoint(left, top);
+    const b = pageView.viewport.convertToPdfPoint(right, bottom);
+    const x = Math.min(a[0], b[0]);
+    const y = Math.min(a[1], b[1]);
+    const w = Math.abs(b[0] - a[0]);
+    const h = Math.abs(b[1] - a[1]);
+    if (!(w > 0 && h > 0)) continue;
+    const row = byPage.get(pageNum) || { page: pageNum, page_index: pageNum - 1, rects: [] };
+    row.rects.push({ x, y, w, h });
+    byPage.set(pageNum, row);
+  }
+  out.rects_by_page = Array.from(byPage.values()).sort((a,b) => a.page - b.page);
+  if (out.rects_by_page.length > 0) {
+    out.page = Number(out.rects_by_page[0].page);
+    out.page_index = Number(out.rects_by_page[0].page_index);
+  } else {
+    out.page = Number((viewer.currentPageNumber || 1));
+    out.page_index = Math.max(0, out.page - 1);
+  }
+  return out;
+})();
+            """,
+            callback=lambda result: callback(result or {}),
+        )
+        if not ok:
+            _default()
+
+    def set_text_highlights(self, highlights: list[dict]) -> None:
+        self._active_highlights = list(highlights or [])
+        self._ensure_highlight_runtime()
+        payload = json.dumps(self._active_highlights, separators=(",", ":"))
+        self._run_js(
+            f"""
+(() => {{
+  window.__studyHighlightStore = {payload};
+  if (typeof window.__studyRenderHighlights === 'function') {{
+    window.requestAnimationFrame(window.__studyRenderHighlights);
+  }}
+  return true;
+}})();
+            """
+        )
 
     def prime_path(self, path: str) -> None:
         # Intentionally no-op for PDF.js viewer backend.
@@ -122,6 +341,7 @@ class EmbeddedPdfViewer(QWidget):
         self._pending_page = None
         self._pending_page_attempts = 0
         self._viewer.load_pdf(path, page=1, zoom=self._last_zoom)
+        QTimer.singleShot(120, lambda: self.set_text_highlights(self._active_highlights))
         return True
 
     def set_fit_mode(self) -> None:
@@ -198,7 +418,8 @@ class EmbeddedPdfViewer(QWidget):
         _ = handler
 
     def set_overlay_highlights(self, highlights: list[dict]) -> None:
-        _ = highlights
+        # Legacy API now maps to page-space text highlights for compatibility.
+        self.set_text_highlights(highlights)
 
     def toggle_fullscreen(self) -> None:
         if not self._viewer:
